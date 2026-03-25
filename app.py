@@ -24,7 +24,10 @@ CREDENTIALS_FILE = Path.home() / ".claude" / ".credentials.json"
 USAGE_API_URL = "https://api.anthropic.com/api/oauth/usage"
 USAGE_API_BETA_HEADER = "oauth-2025-04-20"
 CACHE_MAX_AGE = 180       # seconds before re-fetching
-CACHE_MIN_RETRY = 30      # minimum seconds between failed attempts
+CACHE_MIN_RETRY = 300     # minimum seconds between failed attempts (5 min)
+CACHE_MAX_RETRY = 3600    # maximum retry backoff (1 hour)
+QUOTA_CACHE_FILE = Path(__file__).parent / "data" / "quota_cache.json"
+QUOTA_CACHE_MAX_STALE = 600  # seconds: accept disk-cached data up to 10 min old on startup
 
 app = FastAPI(title="Claude Usage Dashboard")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
@@ -37,10 +40,21 @@ _ingest_status = {"running": False, "progress": 0, "total": 0, "done": False, "e
 # Usage API cache: holds the last successful API response + metadata
 _usage_cache: dict = {
     "data": None,        # parsed response dict or None
-    "fetched_at": 0.0,   # unix timestamp of last successful fetch
-    "retry_after": 0.0,  # unix timestamp before which we should not retry
+    "fetched_at": 0.0,   # monotonic time of last successful fetch
+    "retry_after": 0.0,  # monotonic time before which we should not retry
     "error": None,       # last error string if data is None
+    "fail_count": 0,     # consecutive failure count for exponential backoff
 }
+
+# Seed in-memory cache from disk on startup so restarts don't lose last known quota
+try:
+    _saved = json.loads(QUOTA_CACHE_FILE.read_text())
+    if time.time() - _saved.get("time", 0) < QUOTA_CACHE_MAX_STALE:
+        _usage_cache["data"] = _saved["data"]
+        # Mark as stale so the next request will refresh, but non-None so fallback works
+        _usage_cache["fetched_at"] = time.monotonic() - CACHE_MAX_AGE
+except Exception:
+    pass
 
 
 def _run_ingest_background(force: bool = False):
@@ -93,7 +107,10 @@ def _fetch_usage_sync() -> dict:
         with urllib.request.urlopen(req, timeout=8) as resp:
             body = resp.read().decode("utf-8")
             data = json.loads(body)
-            return {"ok": True, "data": data, "retry_after": None}
+            rate_headers = {k: resp.headers[k] for k in resp.headers if 'ratelimit' in k.lower() or 'retry-after' in k.lower()}
+            if rate_headers:
+                print(f"[quota] rate-limit headers: {rate_headers}")
+            return {"ok": True, "data": data, "retry_after": None, "rate_headers": rate_headers}
     except urllib.error.HTTPError as e:
         if e.code == 429:
             retry_after_raw = e.headers.get("Retry-After", "")
@@ -151,11 +168,20 @@ async def _get_usage_data() -> dict:
         cache["fetched_at"] = now
         cache["retry_after"] = 0.0
         cache["error"] = None
+        cache["fail_count"] = 0
+        try:
+            QUOTA_CACHE_FILE.write_text(json.dumps({"data": parsed, "time": time.time()}))
+        except Exception:
+            pass
         return parsed
     else:
-        # Back off before next attempt
-        retry_secs = result.get("retry_after") or CACHE_MIN_RETRY
+        # Exponential backoff: double the wait per consecutive failure, capped at CACHE_MAX_RETRY
+        cache["fail_count"] = cache.get("fail_count", 0) + 1
+        api_retry = result.get("retry_after") or 0
+        backoff = min(CACHE_MIN_RETRY * (2 ** (cache["fail_count"] - 1)), CACHE_MAX_RETRY)
+        retry_secs = max(api_retry, backoff)
         cache["retry_after"] = now + retry_secs
+        print(f"[quota] fetch failed ({result['error']}), fail #{cache['fail_count']}, retry in {retry_secs}s")
         cache["error"] = result["error"]
         # Return stale data if available, otherwise an error shell
         if cache["data"]:
@@ -312,6 +338,7 @@ async def window(
         "quota_pct": quota_pct,
         "bucket_minutes": bucket_minutes,
         "buckets": buckets,
+        "value_type": "cost" if group_by_param == "model" else "tokens",
     }
 
 

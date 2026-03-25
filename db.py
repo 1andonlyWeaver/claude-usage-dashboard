@@ -268,15 +268,40 @@ def window_tokens(window_start: str, window_end: str, bucket_minutes: int,
             GROUP BY time
             ORDER BY time, grp
         """, (window_start, window_end) * 4).fetchall()
-    elif group_by in ('project', 'model'):
-        col = group_by
+    elif group_by == 'model':
         rows = conn.execute(f"""
             SELECT {bucket_expr} as time,
-                   {col} as grp,
+                   model as grp,
+                   SUM(input_tokens) as input_tokens,
+                   SUM(cache_creation_tokens) as cache_creation_tokens,
+                   SUM(cache_read_tokens) as cache_read_tokens,
+                   SUM(output_tokens) as output_tokens
+            FROM messages
+            WHERE timestamp >= ? AND timestamp < ?
+            GROUP BY time, model
+            ORDER BY time
+        """, (window_start, window_end)).fetchall()
+        conn.close()
+        results = []
+        for r in rows:
+            model = r['grp']
+            inp_price, out_price, cache_create_mult, cache_read_mult = MODEL_PRICING.get(model, DEFAULT_PRICING)
+            cost = (
+                (r['input_tokens'] or 0) / 1_000_000 * inp_price +
+                (r['cache_creation_tokens'] or 0) / 1_000_000 * inp_price * cache_create_mult +
+                (r['cache_read_tokens'] or 0) / 1_000_000 * inp_price * cache_read_mult +
+                (r['output_tokens'] or 0) / 1_000_000 * out_price
+            )
+            results.append({'time': r['time'], 'group': model, 'tokens': cost})
+        return results
+    elif group_by == 'project':
+        rows = conn.execute(f"""
+            SELECT {bucket_expr} as time,
+                   project as grp,
                    SUM(input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens) as tokens
             FROM messages
             WHERE timestamp >= ? AND timestamp < ?
-            GROUP BY time, {col}
+            GROUP BY time, project
             ORDER BY time, tokens DESC
         """, (window_start, window_end)).fetchall()
     else:

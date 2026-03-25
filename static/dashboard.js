@@ -58,9 +58,18 @@ async function initAll() {
 }
 
 // ─── Quota polling ───────────────────────────────────────────
+let _quotaPollInterval = null;
+const QUOTA_POLL_NORMAL = 5000;
+const QUOTA_POLL_ERROR  = 30000;
+
+function _setQuotaPollRate(ms) {
+  if (_quotaPollInterval) clearInterval(_quotaPollInterval);
+  _quotaPollInterval = setInterval(fetchQuota, ms);
+}
+
 function startQuotaPolling() {
   fetchQuota();
-  setInterval(fetchQuota, 5000);
+  _setQuotaPollRate(QUOTA_POLL_NORMAL);
   setInterval(updateCountdowns, 1000);
 }
 
@@ -75,8 +84,10 @@ async function fetchQuota() {
 
     if (hasError) {
       document.getElementById('lastUpdated').textContent = 'Quota unavailable: ' + data.error;
+      _setQuotaPollRate(QUOTA_POLL_ERROR);
       return;
     }
+    _setQuotaPollRate(QUOTA_POLL_NORMAL);
 
     quotaState = {
       five: { pct: data.five_hour_pct, resetsAt: new Date(data.five_hour_resets_at) },
@@ -306,7 +317,7 @@ function _movingAverage(arr, halfWin) {
 }
 
 function buildWindowChart(data, canvasId, maHalf) {
-  const { window_start, window_end, quota_pct, bucket_minutes, buckets } = data;
+  const { window_start, window_end, quota_pct, bucket_minutes, buckets, value_type } = data;
 
   // Generate all time labels for the window
   const startMs = new Date(window_start).getTime();
@@ -560,7 +571,8 @@ function buildWindowChart(data, canvasId, maHalf) {
     });
   }
 
-  const yLabel = isCumulative ? '% of quota' : 'tokens / min';
+  const isCostWeighted = value_type === 'cost';
+  const yLabel = isCumulative ? '% of quota' : (isCostWeighted ? '$ / min' : 'tokens / min');
   const yMax = isCumulative ? 100 : undefined;
   const projLabels = new Set(['projection', 'proj-upper', 'proj-lower', 'now-dot']);
 
@@ -599,10 +611,10 @@ function buildWindowChart(data, canvasId, maHalf) {
               if (lbl === 'proj-upper' || lbl === 'proj-lower' || lbl === 'now-dot') return null;
               if (lbl === '— pace') return ` Pace: ${ctx.parsed.y.toFixed(1)}%`;
               if (lbl === 'projection') {
-                const val = isCumulative ? `${ctx.parsed.y.toFixed(1)}%` : fmtShort(ctx.parsed.y) + '/min';
+                const val = isCumulative ? `${ctx.parsed.y.toFixed(1)}%` : isCostWeighted ? `$${ctx.parsed.y.toFixed(4)}/min` : fmtShort(ctx.parsed.y) + '/min';
                 return ` ~ projected: ${val}`;
               }
-              const val = isCumulative ? `${ctx.parsed.y.toFixed(1)}%` : fmtShort(ctx.parsed.y) + '/min';
+              const val = isCumulative ? `${ctx.parsed.y.toFixed(1)}%` : isCostWeighted ? `$${ctx.parsed.y.toFixed(4)}/min` : fmtShort(ctx.parsed.y) + '/min';
               return ` ${lbl}: ${val}`;
             },
           }
@@ -619,7 +631,7 @@ function buildWindowChart(data, canvasId, maHalf) {
           max: yMax,
           min: 0,
           ticks: {
-            callback: v => isCumulative ? v + '%' : fmtShort(v),
+            callback: v => isCumulative ? v + '%' : isCostWeighted ? `$${v.toFixed(3)}` : fmtShort(v),
             font: { size: 10 },
           },
           grid: { color: 'rgba(255,245,235,0.04)' },
