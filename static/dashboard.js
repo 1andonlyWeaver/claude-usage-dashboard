@@ -11,7 +11,7 @@ const CLAUDE_CREAM   = 'rgba(250,240,230,0.7)';
 const CLAUDE_RED     = '#D95F5F';
 const CLAUDE_PURPLE  = '#9B7FC8';
 
-const ARC_TOTAL      = 330;   // total arc length (out of 440 circumference for 270° arc)
+const ARC_TOTAL      = 377;   // total arc length for 270° arc on r=80 (circumference≈503, arc=377, gap=126)
 const DAY_LABELS     = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 
 // Chart.js global defaults
@@ -69,7 +69,15 @@ let quotaState = { five: null, seven: null };
 async function fetchQuota() {
   try {
     const data = await apiFetch('/api/quota');
-    if (data.error) return;
+    const hasError = !!data.error;
+    document.getElementById('gauge5h').classList.toggle('stale', hasError);
+    document.getElementById('gauge7d').classList.toggle('stale', hasError);
+
+    if (hasError) {
+      document.getElementById('lastUpdated').textContent = 'Quota unavailable: ' + data.error;
+      return;
+    }
+
     quotaState = {
       five: { pct: data.five_hour_pct, resetsAt: new Date(data.five_hour_resets_at) },
       seven: { pct: data.seven_day_pct, resetsAt: new Date(data.seven_day_resets_at) },
@@ -77,6 +85,7 @@ async function fetchQuota() {
     updateGauge('5h', quotaState.five.pct);
     updateGauge('7d', quotaState.seven.pct);
     updateForecasts();
+    updateExtraUsage(data);
     document.getElementById('lastUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString();
   } catch(e) {
     document.getElementById('lastUpdated').textContent = 'Error fetching quota';
@@ -180,6 +189,22 @@ function updateForecasts() {
       }
     }
   });
+}
+
+function updateExtraUsage(data) {
+  const el = document.getElementById('extraUsage');
+  if (!el) return;
+  const enabled = data.extra_usage_enabled;
+  if (enabled == null) { el.style.display = 'none'; return; }
+  el.style.display = '';
+  if (!enabled) {
+    el.style.display = 'none';
+    return;
+  }
+  const limit = data.extra_usage_limit != null ? '$' + (data.extra_usage_limit / 100).toFixed(2) : '—';
+  const used  = data.extra_usage_used  != null ? '$' + (data.extra_usage_used  / 100).toFixed(2) : '—';
+  const pct   = data.extra_usage_utilization != null ? ' (' + Math.round(data.extra_usage_utilization) + '%)' : '';
+  el.textContent = `Overuse: ${used} / ${limit}${pct}`;
 }
 
 function formatCountdown(date) {
@@ -300,8 +325,10 @@ function buildWindowChart(data, canvasId, maHalf) {
   // X-axis labels
   const xLabels = allTimes.map(t => {
     const d = new Date(t);
-    if (bucket_minutes <= 60) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    return d.toLocaleDateString([], { weekday: 'short', month: 'numeric', day: 'numeric' });
+    if (bucket_minutes < 60) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    // 60-min buckets (7d chart): show weekday + date + hour
+    return d.toLocaleDateString([], { weekday: 'short', month: 'numeric', day: 'numeric' })
+      + ' ' + d.toLocaleTimeString([], { hour: 'numeric' });
   });
 
   // Group colors
@@ -348,6 +375,7 @@ function buildWindowChart(data, canvasId, maHalf) {
       tension: 0,
       pointRadius: 0,
       order: -1,
+      yAxisID: 'y2',
     });
   } else {
     // Rate view: tokens/min with moving average
@@ -388,6 +416,15 @@ function buildWindowChart(data, canvasId, maHalf) {
         },
         tooltip: {
           callbacks: {
+            title: (items) => {
+              const t = allTimes[items[0].dataIndex];
+              const d = new Date(t);
+              if (bucket_minutes >= 60) {
+                return d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })
+                  + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+              }
+              return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            },
             label: ctx => {
               if (ctx.dataset.label === '— pace') return ` Pace: ${ctx.parsed.y.toFixed(1)}%`;
               const val = isCumulative ? `${ctx.parsed.y.toFixed(1)}%` : fmtShort(ctx.parsed.y) + '/min';
@@ -399,7 +436,7 @@ function buildWindowChart(data, canvasId, maHalf) {
       scales: {
         x: {
           stacked,
-          ticks: { maxTicksLimit: bucket_minutes <= 60 ? 10 : 7, font: { size: 9, family: "'DM Mono'" } },
+          ticks: { maxTicksLimit: bucket_minutes < 60 ? 10 : 7, font: { size: 9, family: "'DM Mono'" } },
           grid: { display: false },
         },
         y: {
@@ -412,6 +449,12 @@ function buildWindowChart(data, canvasId, maHalf) {
           },
           grid: { color: 'rgba(255,245,235,0.04)' },
           title: { display: true, text: yLabel, color: 'rgba(245,237,228,0.3)', font: { size: 9 } },
+        },
+        y2: {
+          display: false,
+          min: 0,
+          max: 100,
+          stacked: false,
         },
       }
     }

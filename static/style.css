@@ -286,6 +286,21 @@ body {
   animation: gaugePulse 2s ease-in-out infinite;
 }
 
+/* ─── Stale gauge state ─── */
+.gauge-card.stale {
+  opacity: 0.45;
+  filter: grayscale(0.4);
+}
+
+/* ─── Overuse status (inline in 7d gauge card) ─── */
+.gauge-overuse-status {
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+
 /* ─── Cost card ─── */
 .cost-card {
   padding: 24px;

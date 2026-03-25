@@ -69,13 +69,13 @@
                   <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
                 </filter>
               </defs>
-              <!-- Track -->
+              <!-- Track: 270° arc, r=80, circumference≈503, arc=377, gap=126 -->
               <circle class="gauge-track" cx="100" cy="100" r="80" fill="none" stroke-width="12"
-                      stroke-dasharray="440" stroke-dashoffset="110" transform="rotate(135 100 100)"/>
+                      stroke-dasharray="377 503" transform="rotate(135 100 100)"/>
               <!-- Value arc -->
               <circle class="gauge-arc" id="arc5h" cx="100" cy="100" r="80" fill="none"
                       stroke="url(#grad5h)" stroke-width="12" stroke-linecap="round"
-                      stroke-dasharray="330 110" stroke-dashoffset="330"
+                      stroke-dasharray="377 503" stroke-dashoffset="377"
                       transform="rotate(135 100 100)" filter="url(#glow5h)"/>
               <!-- Center text -->
               <text class="gauge-pct" id="pct5h" x="100" y="90" text-anchor="middle">—</text>
@@ -104,10 +104,10 @@
                 </filter>
               </defs>
               <circle class="gauge-track" cx="100" cy="100" r="80" fill="none" stroke-width="12"
-                      stroke-dasharray="440" stroke-dashoffset="110" transform="rotate(135 100 100)"/>
+                      stroke-dasharray="377 503" transform="rotate(135 100 100)"/>
               <circle class="gauge-arc" id="arc7d" cx="100" cy="100" r="80" fill="none"
                       stroke="url(#grad7d)" stroke-width="12" stroke-linecap="round"
-                      stroke-dasharray="330 110" stroke-dashoffset="330"
+                      stroke-dasharray="377 503" stroke-dashoffset="377"
                       transform="rotate(135 100 100)" filter="url(#glow7d)"/>
               <text class="gauge-pct" id="pct7d" x="100" y="90" text-anchor="middle">—</text>
               <text class="gauge-label-center" x="100" y="114" text-anchor="middle">7-Day</text>
@@ -116,6 +116,7 @@
           <div class="gauge-info">
             <div class="gauge-countdown" id="countdown7d">—</div>
             <div class="gauge-forecast" id="forecast7d"></div>
+            <div class="gauge-overuse-status" id="extraUsage" style="display:none"></div>
           </div>
         </div>
 

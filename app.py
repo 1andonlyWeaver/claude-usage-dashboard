@@ -1,11 +1,14 @@
 """
 FastAPI server for Claude Code usage dashboard.
 """
-import os
+import asyncio
 import json
 import threading
+import time
+import urllib.request
+import urllib.error
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
@@ -16,7 +19,12 @@ from fastapi.responses import JSONResponse
 import db
 
 BASE_DIR = Path(__file__).parent
-QUOTA_FILE = Path(os.path.expanduser("~")) / "AppData" / "Local" / "Temp" / "claude-statusline-quota-weaverjc.json"
+CREDENTIALS_FILE = Path.home() / ".claude" / ".credentials.json"
+
+USAGE_API_URL = "https://api.anthropic.com/api/oauth/usage"
+USAGE_API_BETA_HEADER = "oauth-2025-04-20"
+CACHE_MAX_AGE = 180       # seconds before re-fetching
+CACHE_MIN_RETRY = 30      # minimum seconds between failed attempts
 
 app = FastAPI(title="Claude Usage Dashboard")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
@@ -25,6 +33,14 @@ templates = Jinja2Templates(directory=BASE_DIR / "templates")
 # Ingest state
 _ingest_lock = threading.Lock()
 _ingest_status = {"running": False, "progress": 0, "total": 0, "done": False, "error": None}
+
+# Usage API cache: holds the last successful API response + metadata
+_usage_cache: dict = {
+    "data": None,        # parsed response dict or None
+    "fetched_at": 0.0,   # unix timestamp of last successful fetch
+    "retry_after": 0.0,  # unix timestamp before which we should not retry
+    "error": None,       # last error string if data is None
+}
 
 
 def _run_ingest_background(force: bool = False):
@@ -47,15 +63,104 @@ def _run_ingest_background(force: bool = False):
         _ingest_status["running"] = False
 
 
-def _read_quota_data() -> dict | None:
-    """Read quota JSON file, return the data dict or None on failure."""
-    if not QUOTA_FILE.exists():
-        return None
+def _read_oauth_token() -> str | None:
+    """Extract the OAuth access token from ~/.claude/.credentials.json."""
     try:
-        raw = json.loads(QUOTA_FILE.read_text())
-        return raw.get("data", raw)
+        raw = json.loads(CREDENTIALS_FILE.read_text())
+        return raw.get("claudeAiOauth", {}).get("accessToken") or None
     except Exception:
         return None
+
+
+def _fetch_usage_sync() -> dict:
+    """Call the Anthropic usage API synchronously. Returns a result dict:
+    On success: {"ok": True, "data": {...}, "retry_after": None}
+    On rate-limit: {"ok": False, "error": "rate-limited", "retry_after": <seconds>}
+    On other failure: {"ok": False, "error": "<message>", "retry_after": None}
+    """
+    token = _read_oauth_token()
+    if not token:
+        return {"ok": False, "error": "no-credentials", "retry_after": None}
+
+    req = urllib.request.Request(
+        USAGE_API_URL,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "anthropic-beta": USAGE_API_BETA_HEADER,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            body = resp.read().decode("utf-8")
+            data = json.loads(body)
+            return {"ok": True, "data": data, "retry_after": None}
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            retry_after_raw = e.headers.get("Retry-After", "")
+            try:
+                retry_secs = int(retry_after_raw)
+            except (ValueError, TypeError):
+                retry_secs = 300
+            return {"ok": False, "error": "rate-limited", "retry_after": retry_secs}
+        return {"ok": False, "error": f"http-{e.code}", "retry_after": None}
+    except Exception as ex:
+        return {"ok": False, "error": str(ex), "retry_after": None}
+
+
+async def _get_usage_data() -> dict:
+    """Return cached usage data, refreshing from the API when the cache is stale.
+
+    Returns a dict with keys: five_hour_pct, five_hour_resets_at,
+    seven_day_pct, seven_day_resets_at, plus optional extra_usage_* fields.
+    On error, includes an "error" key.
+    """
+    now = time.monotonic()
+    cache = _usage_cache
+
+    # Return in-memory cache if still fresh
+    if cache["data"] and (now - cache["fetched_at"]) < CACHE_MAX_AGE:
+        return cache["data"]
+
+    # Respect rate-limit backoff
+    if now < cache["retry_after"]:
+        if cache["data"]:
+            return cache["data"]
+        return {"error": cache["error"] or "rate-limited",
+                "five_hour_pct": 0, "seven_day_pct": 0}
+
+    # Fetch in a thread so we don't block the event loop
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, _fetch_usage_sync)
+
+    if result["ok"]:
+        raw = result["data"]
+        five = raw.get("five_hour") or {}
+        seven = raw.get("seven_day") or {}
+        extra = raw.get("extra_usage") or {}
+        parsed = {
+            "five_hour_pct": five.get("utilization", 0),
+            "five_hour_resets_at": five.get("resets_at"),
+            "seven_day_pct": seven.get("utilization", 0),
+            "seven_day_resets_at": seven.get("resets_at"),
+            "extra_usage_enabled": extra.get("is_enabled", False),
+            "extra_usage_limit": extra.get("monthly_limit"),
+            "extra_usage_used": extra.get("used_credits"),
+            "extra_usage_utilization": extra.get("utilization"),
+        }
+        cache["data"] = parsed
+        cache["fetched_at"] = now
+        cache["retry_after"] = 0.0
+        cache["error"] = None
+        return parsed
+    else:
+        # Back off before next attempt
+        retry_secs = result.get("retry_after") or CACHE_MIN_RETRY
+        cache["retry_after"] = now + retry_secs
+        cache["error"] = result["error"]
+        # Return stale data if available, otherwise an error shell
+        if cache["data"]:
+            return {**cache["data"], "error": result["error"]}
+        return {"error": result["error"], "five_hour_pct": 0, "seven_day_pct": 0}
 
 
 @app.on_event("startup")
@@ -76,11 +181,8 @@ async def index(request: Request):
 
 @app.get("/api/quota")
 async def get_quota():
-    """Read the live quota JSON file."""
-    data = _read_quota_data()
-    if data is None:
-        return JSONResponse({"error": "Quota file not found", "five_hour_pct": 0, "seven_day_pct": 0})
-    return data
+    """Fetch live quota data from the Anthropic usage API."""
+    return await _get_usage_data()
 
 
 @app.get("/api/ingest-status")
@@ -157,7 +259,7 @@ async def window(
 ):
     """Return token data bucketed within the current quota window.
 
-    The window boundaries are derived from the quota reset times in the quota file.
+    The window boundaries are derived from the Anthropic usage API reset times.
     Timestamps are converted to local time to match the DB's timestamp column.
 
     Returns:
@@ -166,11 +268,10 @@ async def window(
         bucket_minutes: bucket size used
         buckets: list of {time, group, tokens}
     """
-    quota = _read_quota_data()
+    quota = await _get_usage_data()
 
-    # Determine window boundaries
     now_local = datetime.now()
-    if quota and type == "5h" and quota.get("five_hour_resets_at"):
+    if type == "5h" and quota.get("five_hour_resets_at"):
         try:
             resets_utc = datetime.fromisoformat(quota["five_hour_resets_at"])
             resets_local = resets_utc.astimezone().replace(tzinfo=None)
@@ -181,7 +282,7 @@ async def window(
             window_end = now_local
             window_start = now_local - timedelta(hours=5)
             quota_pct = 0
-    elif quota and type == "7d" and quota.get("seven_day_resets_at"):
+    elif type == "7d" and quota.get("seven_day_resets_at"):
         try:
             resets_utc = datetime.fromisoformat(quota["seven_day_resets_at"])
             resets_local = resets_utc.astimezone().replace(tzinfo=None)
@@ -193,7 +294,6 @@ async def window(
             window_start = now_local - timedelta(days=7)
             quota_pct = 0
     else:
-        # Fallback: no quota file
         window_end = now_local
         window_start = now_local - (timedelta(hours=5) if type == "5h" else timedelta(days=7))
         quota_pct = 0
@@ -219,6 +319,6 @@ if __name__ == "__main__":
     import uvicorn
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
     uvicorn.run("app:app", host="127.0.0.1", port=args.port, reload=False)
