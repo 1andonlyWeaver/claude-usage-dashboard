@@ -84,6 +84,8 @@ async function fetchQuota() {
     };
     updateGauge('5h', quotaState.five.pct);
     updateGauge('7d', quotaState.seven.pct);
+    updateIdealTick('5h', quotaState.five.resetsAt, 5 * 3600000);
+    updateIdealTick('7d', quotaState.seven.resetsAt, 7 * 24 * 3600000);
     updateForecasts();
     updateExtraUsage(data);
     document.getElementById('lastUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString();
@@ -126,12 +128,30 @@ function updateGauge(id, pct) {
   pctEl.textContent = Math.round(pct) + '%';
 }
 
+function updateIdealTick(id, resetsAt, windowMs) {
+  const tick = document.getElementById('tick' + id);
+  if (!tick) return;
+  const now = Date.now();
+  const elapsed = windowMs - (resetsAt - now);
+  const idealPct = Math.max(0, Math.min(100, elapsed / windowMs * 100));
+  // 270° arc starting at 135° (SVG coords, center 100,100, r=80)
+  const angleDeg = 135 + (idealPct / 100 * 270);
+  const angleRad = angleDeg * (Math.PI / 180);
+  const cos = Math.cos(angleRad), sin = Math.sin(angleRad);
+  tick.setAttribute('x1', (100 + 72 * cos).toFixed(2));
+  tick.setAttribute('y1', (100 + 72 * sin).toFixed(2));
+  tick.setAttribute('x2', (100 + 88 * cos).toFixed(2));
+  tick.setAttribute('y2', (100 + 88 * sin).toFixed(2));
+}
+
 function updateCountdowns() {
   if (quotaState.five) {
     document.getElementById('countdown5h').textContent = 'Resets ' + formatCountdown(quotaState.five.resetsAt);
+    updateIdealTick('5h', quotaState.five.resetsAt, 5 * 3600000);
   }
   if (quotaState.seven) {
     document.getElementById('countdown7d').textContent = 'Resets ' + formatCountdown(quotaState.seven.resetsAt);
+    updateIdealTick('7d', quotaState.seven.resetsAt, 7 * 24 * 3600000);
   }
 }
 

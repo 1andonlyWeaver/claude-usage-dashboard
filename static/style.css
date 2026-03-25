@@ -244,6 +244,12 @@ body {
   transition: stroke-dashoffset 0.7s cubic-bezier(0.4, 0, 0.2, 1),
               stroke 0.7s ease;
 }
+.gauge-tick {
+  stroke: rgba(250,240,230,0.65);
+  stroke-width: 3;
+  stroke-linecap: round;
+  transition: x1 1s linear, y1 1s linear, x2 1s linear, y2 1s linear;
+}
 .gauge-pct {
   font-family: var(--font-display);
   font-size: 32px;
