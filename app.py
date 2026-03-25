@@ -323,6 +323,18 @@ async def window(
     """
     quota = await _get_usage_data()
 
+    # If quota API returned an error, try the disk cache for window boundaries
+    if quota.get("error") and not quota.get("five_hour_resets_at"):
+        try:
+            disk = json.loads(QUOTA_CACHE_FILE.read_text()).get("data", {})
+            # Merge cached resets_at and pct values the live response is missing
+            for key in ("five_hour_resets_at", "seven_day_resets_at",
+                        "five_hour_pct", "seven_day_pct"):
+                if key not in quota or quota[key] is None:
+                    quota[key] = disk.get(key)
+        except Exception:
+            pass
+
     now_local = datetime.now()
     if type == "5h" and quota.get("five_hour_resets_at"):
         try:
@@ -334,7 +346,7 @@ async def window(
         except Exception:
             window_end = now_local
             window_start = now_local - timedelta(hours=5)
-            quota_pct = 0
+            quota_pct = quota.get("five_hour_pct") or 0
     elif type == "7d" and quota.get("seven_day_resets_at"):
         try:
             resets_utc = datetime.fromisoformat(quota["seven_day_resets_at"])
@@ -345,11 +357,12 @@ async def window(
         except Exception:
             window_end = now_local
             window_start = now_local - timedelta(days=7)
-            quota_pct = 0
+            quota_pct = quota.get("seven_day_pct") or 0
     else:
         window_end = now_local
         window_start = now_local - (timedelta(hours=5) if type == "5h" else timedelta(days=7))
-        quota_pct = 0
+        pct_key = "five_hour_pct" if type == "5h" else "seven_day_pct"
+        quota_pct = quota.get(pct_key) or 0
 
     bucket_minutes = 5 if type == "5h" else 60
     group_by_param = None if group_by == "none" else group_by

@@ -297,15 +297,21 @@ function setWindowStack(stack, btn) {
 }
 
 async function loadWindowCharts() {
-  const gb = windowStack === 'none' ? 'none' : windowStack;
-  const [d5h, d7d] = await Promise.all([
-    apiFetch('/api/window?type=5h&group_by=' + gb),
-    apiFetch('/api/window?type=7d&group_by=' + gb),
-  ]);
-  if (chart5h) { chart5h.destroy(); chart5h = null; }
-  if (chart7d) { chart7d.destroy(); chart7d = null; }
-  chart5h = buildWindowChart(d5h, 'chart5h', 3);
-  chart7d = buildWindowChart(d7d, 'chart7d', 9);
+  try {
+    const gb = windowStack === 'none' ? 'none' : windowStack;
+    const [d5h, d7d] = await Promise.all([
+      apiFetch('/api/window?type=5h&group_by=' + gb),
+      apiFetch('/api/window?type=7d&group_by=' + gb),
+    ]);
+    // Destroy old charts, then build new ones from fetched data
+    if (chart5h) { chart5h.destroy(); chart5h = null; }
+    if (chart7d) { chart7d.destroy(); chart7d = null; }
+    chart5h = buildWindowChart(d5h, 'chart5h', 3);
+    chart7d = buildWindowChart(d7d, 'chart7d', 9);
+  } catch (e) {
+    // Fetch failed — leave existing charts intact rather than showing blank canvas
+    console.warn('Window chart refresh failed, keeping previous charts:', e);
+  }
 }
 
 function _movingAverage(arr, halfWin) {
@@ -382,10 +388,16 @@ function buildWindowChart(data, canvasId, maHalf) {
 
   let datasets;
   let localNorm = null; // corrected norm when calibration data is available
+  // When quota_pct is unavailable (API error), fall back to raw cumulative tokens
+  const quotaAvailable = quota_pct > 0;
 
   if (isCumulative) {
     // Determine effective normalization factor (local quota % per token)
-    let effectiveNorm = totalTokensInWindow > 0 ? quota_pct / totalTokensInWindow : 0;
+    // If quota_pct is 0 (API unreachable), use norm=1 so charts show raw token totals
+    // instead of multiplying everything by zero and flatlining.
+    let effectiveNorm = (quotaAvailable && totalTokensInWindow > 0)
+        ? quota_pct / totalTokensInWindow
+        : (totalTokensInWindow > 0 ? 1 : 0);
     if (calibrated && cost_per_pct > 0 && cost_buckets && cost_buckets.length > 0) {
       const costLookup = {};
       for (const cb of cost_buckets) {
@@ -484,7 +496,7 @@ function buildWindowChart(data, canvasId, maHalf) {
   // ── EMA Projection ───────────────────────────────────────────
   // Aggregate total across all groups for EMA input
   const aggRaw = allTimes.map((_, i) => groupOrder.reduce((s, g) => s + rawByGroup[g][i], 0));
-  const emaNorm = localNorm || (totalTokensInWindow > 0 ? quota_pct / totalTokensInWindow : 0);
+  const emaNorm = localNorm || ((quotaAvailable && totalTokensInWindow > 0) ? quota_pct / totalTokensInWindow : (totalTokensInWindow > 0 ? 1 : 0));
 
   let emaInput;
   if (isCumulative) {
@@ -624,8 +636,10 @@ function buildWindowChart(data, canvasId, maHalf) {
   }
 
   const isCostWeighted = value_type === 'cost';
-  const yLabel = isCumulative ? '% of quota' : (isCostWeighted ? '$ / min' : 'tokens / min');
-  const yMax = isCumulative ? 100 : undefined;
+  const yLabel = isCumulative
+      ? (quotaAvailable ? '% of quota' : 'tokens (quota unavailable)')
+      : (isCostWeighted ? '$ / min' : 'tokens / min');
+  const yMax = (isCumulative && quotaAvailable) ? 100 : undefined;
   const projLabels = new Set(['projection', 'proj-upper', 'proj-lower', 'now-dot']);
 
   const ctx = document.getElementById(canvasId);
@@ -662,11 +676,13 @@ function buildWindowChart(data, canvasId, maHalf) {
               const lbl = ctx.dataset.label;
               if (lbl === 'proj-upper' || lbl === 'proj-lower' || lbl === 'now-dot') return null;
               if (lbl === '— pace') return ` Pace: ${ctx.parsed.y.toFixed(1)}%`;
+              const cumFmt = v => (isCumulative && quotaAvailable) ? `${v.toFixed(1)}%` : fmtShort(v);
+              const rateFmt = v => isCostWeighted ? `$${v.toFixed(4)}/min` : fmtShort(v) + '/min';
               if (lbl === 'projection') {
-                const val = isCumulative ? `${ctx.parsed.y.toFixed(1)}%` : isCostWeighted ? `$${ctx.parsed.y.toFixed(4)}/min` : fmtShort(ctx.parsed.y) + '/min';
+                const val = isCumulative ? cumFmt(ctx.parsed.y) : rateFmt(ctx.parsed.y);
                 return ` ~ projected: ${val}`;
               }
-              const val = isCumulative ? `${ctx.parsed.y.toFixed(1)}%` : isCostWeighted ? `$${ctx.parsed.y.toFixed(4)}/min` : fmtShort(ctx.parsed.y) + '/min';
+              const val = isCumulative ? cumFmt(ctx.parsed.y) : rateFmt(ctx.parsed.y);
               return ` ${lbl}: ${val}`;
             },
           }
@@ -683,7 +699,7 @@ function buildWindowChart(data, canvasId, maHalf) {
           max: yMax,
           min: 0,
           ticks: {
-            callback: v => isCumulative ? v + '%' : isCostWeighted ? `$${v.toFixed(3)}` : fmtShort(v),
+            callback: v => (isCumulative && quotaAvailable) ? v + '%' : isCostWeighted ? `$${v.toFixed(3)}` : fmtShort(v),
             font: { size: 10 },
           },
           grid: { color: 'rgba(255,245,235,0.04)' },
@@ -988,6 +1004,7 @@ async function loadRate() {
 // ─── Utilities ───────────────────────────────────────────────
 async function apiFetch(url, opts = {}) {
   const res = await fetch(url, opts);
+  if (!res.ok) throw new Error(`${url} returned ${res.status}`);
   return res.json();
 }
 
