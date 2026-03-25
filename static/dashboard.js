@@ -385,7 +385,7 @@ function buildWindowChart(data, canvasId, maHalf) {
         backgroundColor: hexAlpha(color.startsWith('rgba') ? CLAUDE_ORANGE : color, stacked ? 0.4 : 0.3),
         borderColor: color,
         borderWidth: 1.5,
-        fill: stacked ? 'origin' : false,
+        fill: stacked ? (i === 0 ? 'origin' : '-1') : false,
         tension: 0.3,
         pointRadius: 0,
       };
@@ -416,7 +416,7 @@ function buildWindowChart(data, canvasId, maHalf) {
         backgroundColor: hexAlpha(color.startsWith('rgba') ? CLAUDE_ORANGE : color, stacked ? 0.5 : 0.3),
         borderColor: color,
         borderWidth: 1.5,
-        fill: stacked ? 'origin' : false,
+        fill: stacked ? (i === 0 ? 'origin' : '-1') : false,
         tension: 0.3,
         pointRadius: 0,
       };
