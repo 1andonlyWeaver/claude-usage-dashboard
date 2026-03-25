@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Claude Code Usage</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&family=DM+Sans:wght@300;400;500&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='none' stroke='%23E07A5F' stroke-width='4' stroke-dasharray='60 28' stroke-linecap='round' transform='rotate(-90 16 16)'/></svg>">
+</head>
+<body>
+  <!-- Background blobs -->
+  <div class="bg-blob blob-1"></div>
+  <div class="bg-blob blob-2"></div>
+  <div class="bg-blob blob-3"></div>
+
+  <div class="app">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-left">
+        <div class="logo">
+          <svg width="28" height="28" viewBox="0 0 32 32" fill="none">
+            <circle cx="16" cy="16" r="13" stroke="#E07A5F" stroke-width="3" stroke-dasharray="56 26" stroke-linecap="round" transform="rotate(-90 16 16)" opacity="0.3"/>
+            <circle cx="16" cy="16" r="13" stroke="#E07A5F" stroke-width="3" stroke-dasharray="35 47" stroke-linecap="round" transform="rotate(-90 16 16)"/>
+          </svg>
+        </div>
+        <div>
+          <h1 class="header-title">Claude Code Usage</h1>
+          <p class="header-sub">Session quota &amp; token analytics</p>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="last-updated" id="lastUpdated">Connecting…</div>
+        <button class="btn-refresh" id="btnRefresh" onclick="triggerRefresh()" title="Re-parse session files (R)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+          </svg>
+          Re-parse
+        </button>
+      </div>
+    </header>
+
+    <!-- Ingest progress bar (hidden when done) -->
+    <div class="ingest-banner" id="ingestBanner" style="display:none">
+      <div class="ingest-progress-wrap">
+        <div class="ingest-progress-bar" id="ingestProgressBar"></div>
+      </div>
+      <span id="ingestMsg">Parsing session files…</span>
+    </div>
+
+    <!-- Main content -->
+    <main class="main">
+
+      <!-- Gauge row -->
+      <section class="gauges-row">
+        <div class="card gauge-card" id="gauge5h">
+          <div class="gauge-wrap">
+            <svg class="gauge-svg" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+              <defs>
+                <linearGradient id="grad5h" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stop-color="#E07A5F"/>
+                  <stop offset="100%" stop-color="#C9A96E"/>
+                </linearGradient>
+                <filter id="glow5h">
+                  <feGaussianBlur stdDeviation="4" result="blur"/>
+                  <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+                </filter>
+              </defs>
+              <!-- Track -->
+              <circle class="gauge-track" cx="100" cy="100" r="80" fill="none" stroke-width="12"
+                      stroke-dasharray="440" stroke-dashoffset="110" transform="rotate(135 100 100)"/>
+              <!-- Value arc -->
+              <circle class="gauge-arc" id="arc5h" cx="100" cy="100" r="80" fill="none"
+                      stroke="url(#grad5h)" stroke-width="12" stroke-linecap="round"
+                      stroke-dasharray="330 110" stroke-dashoffset="330"
+                      transform="rotate(135 100 100)" filter="url(#glow5h)"/>
+              <!-- Center text -->
+              <text class="gauge-pct" id="pct5h" x="100" y="90" text-anchor="middle">—</text>
+              <text class="gauge-label-center" x="100" y="114" text-anchor="middle">5-Hour</text>
+            </svg>
+          </div>
+          <div class="gauge-info">
+            <div class="gauge-countdown" id="countdown5h">—</div>
+            <div class="gauge-forecast" id="forecast5h"></div>
+          </div>
+        </div>
+
+        <div class="divider-vert"></div>
+
+        <div class="card gauge-card" id="gauge7d">
+          <div class="gauge-wrap">
+            <svg class="gauge-svg" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+              <defs>
+                <linearGradient id="grad7d" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stop-color="#E07A5F"/>
+                  <stop offset="100%" stop-color="#C9A96E"/>
+                </linearGradient>
+                <filter id="glow7d">
+                  <feGaussianBlur stdDeviation="4" result="blur"/>
+                  <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+                </filter>
+              </defs>
+              <circle class="gauge-track" cx="100" cy="100" r="80" fill="none" stroke-width="12"
+                      stroke-dasharray="440" stroke-dashoffset="110" transform="rotate(135 100 100)"/>
+              <circle class="gauge-arc" id="arc7d" cx="100" cy="100" r="80" fill="none"
+                      stroke="url(#grad7d)" stroke-width="12" stroke-linecap="round"
+                      stroke-dasharray="330 110" stroke-dashoffset="330"
+                      transform="rotate(135 100 100)" filter="url(#glow7d)"/>
+              <text class="gauge-pct" id="pct7d" x="100" y="90" text-anchor="middle">—</text>
+              <text class="gauge-label-center" x="100" y="114" text-anchor="middle">7-Day</text>
+            </svg>
+          </div>
+          <div class="gauge-info">
+            <div class="gauge-countdown" id="countdown7d">—</div>
+            <div class="gauge-forecast" id="forecast7d"></div>
+          </div>
+        </div>
+
+        <!-- Cost panel -->
+        <div class="card cost-card" id="costCard">
+          <div class="cost-header">
+            <span class="cost-icon">✦</span>
+            <span class="cost-title">Est. API Cost</span>
+            <span class="cost-period" id="costPeriod">30 days</span>
+          </div>
+          <div class="cost-amount" id="costAmount">—</div>
+          <div class="cost-breakdown" id="costBreakdown"></div>
+          <p class="cost-note">At published API prices. You're on a subscription — this is for context.</p>
+        </div>
+      </section>
+
+      <!-- Daily chart -->
+      <section class="card chart-card daily-card">
+        <div class="card-header">
+          <h2 class="card-title">Daily Token Usage</h2>
+          <div class="day-selector">
+            <button class="day-btn active" data-days="30" onclick="setDailyDays(30, this)">30d</button>
+            <button class="day-btn" data-days="90" onclick="setDailyDays(90, this)">90d</button>
+            <button class="day-btn" data-days="180" onclick="setDailyDays(180, this)">180d</button>
+          </div>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="dailyChart"></canvas>
+        </div>
+      </section>
+
+      <!-- Bottom row -->
+      <section class="bottom-row">
+
+        <!-- Projects chart -->
+        <div class="card chart-card">
+          <div class="card-header">
+            <h2 class="card-title">By Project</h2>
+          </div>
+          <div class="chart-wrap chart-wrap-tall">
+            <canvas id="projectChart"></canvas>
+          </div>
+        </div>
+
+        <!-- Models chart -->
+        <div class="card chart-card">
+          <div class="card-header">
+            <h2 class="card-title">By Model</h2>
+          </div>
+          <div class="chart-wrap chart-wrap-donut">
+            <canvas id="modelChart"></canvas>
+          </div>
+        </div>
+
+        <!-- Session heatmap -->
+        <div class="card chart-card">
+          <div class="card-header">
+            <h2 class="card-title">Session Heatmap</h2>
+            <span class="card-sub">Hour of day × Day of week</span>
+          </div>
+          <div id="heatmapWrap" class="heatmap-wrap"></div>
+        </div>
+
+      </section>
+
+      <!-- Session list -->
+      <section class="card sessions-card">
+        <div class="card-header">
+          <h2 class="card-title">Recent Sessions</h2>
+          <div class="session-filter">
+            <button class="day-btn active" data-days="7" onclick="setSessionDays(7, this)">7d</button>
+            <button class="day-btn" data-days="30" onclick="setSessionDays(30, this)">30d</button>
+          </div>
+        </div>
+        <div id="sessionList" class="session-list">
+          <div class="skeleton-row"></div>
+          <div class="skeleton-row"></div>
+          <div class="skeleton-row"></div>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- Session drill-down panel -->
+    <div class="session-panel" id="sessionPanel">
+      <div class="session-panel-inner">
+        <div class="session-panel-header">
+          <div>
+            <h3 class="session-panel-title" id="panelTitle">Session Detail</h3>
+            <p class="session-panel-meta" id="panelMeta"></p>
+          </div>
+          <button class="panel-close" onclick="closePanel()">✕</button>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="sessionDetailChart"></canvas>
+        </div>
+      </div>
+    </div>
+    <div class="panel-overlay" id="panelOverlay" onclick="closePanel()"></div>
+
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>
