@@ -410,6 +410,51 @@ body {
   color: var(--claude-orange);
 }
 
+/* ─── Window charts section ─── */
+.window-section {
+  margin-bottom: 18px;
+}
+.window-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.view-selector, .stack-selector {
+  display: flex;
+  gap: 4px;
+}
+.view-btn, .stack-btn {
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-family: var(--font-display);
+  font-size: 0.72rem;
+  font-weight: 500;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.view-btn:hover, .stack-btn:hover {
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
+.view-btn.active, .stack-btn.active {
+  background: rgba(224,122,95,0.15);
+  border-color: rgba(224,122,95,0.35);
+  color: var(--claude-orange);
+}
+.window-charts-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+}
+.window-card {
+  animation-delay: 0.08s;
+}
+
 /* ─── Bottom row ─── */
 .bottom-row {
   display: grid;
@@ -491,7 +536,7 @@ body {
 
 .session-row {
   display: grid;
-  grid-template-columns: auto 1fr auto auto;
+  grid-template-columns: auto 1fr auto auto auto;
   align-items: center;
   gap: 14px;
   padding: 10px 14px;
@@ -545,6 +590,24 @@ body {
 }
 .session-model.opus-model { color: #C4A8E8; background: rgba(155,127,200,0.12); }
 .session-model.haiku-model { color: var(--claude-amber); background: rgba(201,169,110,0.12); }
+
+.session-badges {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.session-badge {
+  font-size: 0.6rem;
+  font-family: var(--font-mono);
+  padding: 2px 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+  background: rgba(255,245,235,0.06);
+  color: var(--text-muted);
+}
+.badge-vscode { color: #6B9FD4; background: rgba(107,159,212,0.12); }
+.badge-cli { color: var(--text-muted); }
+.badge-fast { color: #7BC87B; background: rgba(123,200,123,0.12); }
 
 /* Skeleton loading */
 .skeleton-row {
@@ -629,9 +692,11 @@ body {
   .gauges-row { grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; }
   .divider-vert { display: none; }
   .bottom-row { grid-template-columns: 1fr 1fr; }
+  .window-charts-row { grid-template-columns: 1fr; }
 }
 @media (max-width: 700px) {
   .gauges-row { grid-template-columns: 1fr; }
   .bottom-row { grid-template-columns: 1fr; }
   .chart-wrap-tall { height: 220px; }
+  .window-charts-row { grid-template-columns: 1fr; }
 }

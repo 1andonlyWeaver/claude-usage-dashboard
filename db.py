@@ -7,7 +7,9 @@ from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "data" / "usage.db"
 
-# API pricing per 1M tokens (input, output, cache_creation_multiplier, cache_read_multiplier)
+# API pricing per 1M tokens (input_price, output_price, cache_create_mult, cache_read_mult)
+# Cache creation tiers (5m and 1h ephemeral) are both charged at 1.25x input price.
+# Cache read is charged at 0.10x input price.
 MODEL_PRICING = {
     "claude-opus-4-6":           (15.00, 75.00, 1.25, 0.10),
     "claude-opus-4-5":           (15.00, 75.00, 1.25, 0.10),
@@ -114,7 +116,10 @@ def session_list(days: int = 30) -> list[dict]:
                COUNT(*) as message_count,
                SUM(input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens) as total_tokens,
                SUM(output_tokens) as output_tokens,
-               date
+               date,
+               MAX(entrypoint) as entrypoint,
+               MAX(speed) as speed,
+               MAX(git_branch) as git_branch
         FROM messages
         WHERE date >= ?
         GROUP BY session_id
@@ -131,7 +136,9 @@ def session_detail(session_id: str) -> list[dict]:
     rows = conn.execute("""
         SELECT timestamp, model,
                input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
-               input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens as total_tokens
+               input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens as total_tokens,
+               cache_5m_tokens, cache_1h_tokens,
+               entrypoint, speed, git_branch, web_search_count, web_fetch_count
         FROM messages
         WHERE session_id = ?
         ORDER BY timestamp ASC
@@ -168,7 +175,9 @@ def estimate_cost(days: int = 30) -> dict:
                SUM(input_tokens) as input_tokens,
                SUM(cache_creation_tokens) as cache_creation_tokens,
                SUM(cache_read_tokens) as cache_read_tokens,
-               SUM(output_tokens) as output_tokens
+               SUM(output_tokens) as output_tokens,
+               SUM(cache_5m_tokens) as cache_5m_tokens,
+               SUM(cache_1h_tokens) as cache_1h_tokens
         FROM messages
         WHERE date >= ?
         GROUP BY model
@@ -183,10 +192,19 @@ def estimate_cost(days: int = 30) -> dict:
         pricing = MODEL_PRICING.get(model, DEFAULT_PRICING)
         input_price, output_price, cache_create_mult, cache_read_mult = pricing
 
-        # Cost per token type (prices are per 1M)
+        # Use tier-specific cache counts when available, fall back to aggregated column
+        cache_5m = row['cache_5m_tokens'] or 0
+        cache_1h = row['cache_1h_tokens'] or 0
+        if cache_5m + cache_1h > 0:
+            # Use tier-specific counts — both tiers charged at the same 1.25x rate
+            cache_create_cost = (cache_5m + cache_1h) / 1_000_000 * input_price * cache_create_mult
+        else:
+            # Pre-migration data: use aggregated column
+            cache_create_cost = row['cache_creation_tokens'] / 1_000_000 * input_price * cache_create_mult
+
         cost = (
             (row['input_tokens'] / 1_000_000) * input_price +
-            (row['cache_creation_tokens'] / 1_000_000) * input_price * cache_create_mult +
+            cache_create_cost +
             (row['cache_read_tokens'] / 1_000_000) * input_price * cache_read_mult +
             (row['output_tokens'] / 1_000_000) * output_price
         )
@@ -198,6 +216,97 @@ def estimate_cost(days: int = 30) -> dict:
         'breakdown': sorted(breakdown, key=lambda x: -x['cost']),
         'days': days,
     }
+
+
+def window_tokens(window_start: str, window_end: str, bucket_minutes: int,
+                  group_by: str = None) -> list[dict]:
+    """Return token counts in time buckets within a window.
+
+    Args:
+        window_start: Local-time ISO string (no tz) matching DB timestamp format
+        window_end: Local-time ISO string (no tz)
+        bucket_minutes: Bucket size in minutes (e.g. 5 or 60)
+        group_by: None | 'token_type' | 'project' | 'model'
+
+    Returns list of {time, group, tokens} dicts.
+    """
+    conn = get_conn()
+
+    # SQLite time bucket expression
+    if bucket_minutes == 60:
+        bucket_expr = "strftime('%Y-%m-%dT%H:00', timestamp)"
+    else:
+        bucket_expr = (
+            f"strftime('%Y-%m-%dT%H:', timestamp) || "
+            f"printf('%02d', (CAST(strftime('%M', timestamp) AS INTEGER) / {bucket_minutes}) * {bucket_minutes})"
+        )
+
+    if group_by == 'token_type':
+        rows = conn.execute(f"""
+            SELECT {bucket_expr} as time,
+                   'input' as grp,
+                   SUM(input_tokens) as tokens
+            FROM messages WHERE timestamp >= ? AND timestamp < ?
+            GROUP BY time
+            UNION ALL
+            SELECT {bucket_expr} as time,
+                   'cache_create' as grp,
+                   SUM(cache_creation_tokens) as tokens
+            FROM messages WHERE timestamp >= ? AND timestamp < ?
+            GROUP BY time
+            UNION ALL
+            SELECT {bucket_expr} as time,
+                   'cache_read' as grp,
+                   SUM(cache_read_tokens) as tokens
+            FROM messages WHERE timestamp >= ? AND timestamp < ?
+            GROUP BY time
+            UNION ALL
+            SELECT {bucket_expr} as time,
+                   'output' as grp,
+                   SUM(output_tokens) as tokens
+            FROM messages WHERE timestamp >= ? AND timestamp < ?
+            GROUP BY time
+            ORDER BY time, grp
+        """, (window_start, window_end) * 4).fetchall()
+    elif group_by in ('project', 'model'):
+        col = group_by
+        rows = conn.execute(f"""
+            SELECT {bucket_expr} as time,
+                   {col} as grp,
+                   SUM(input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens) as tokens
+            FROM messages
+            WHERE timestamp >= ? AND timestamp < ?
+            GROUP BY time, {col}
+            ORDER BY time, tokens DESC
+        """, (window_start, window_end)).fetchall()
+    else:
+        # Total only
+        rows = conn.execute(f"""
+            SELECT {bucket_expr} as time,
+                   'total' as grp,
+                   SUM(input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens) as tokens
+            FROM messages
+            WHERE timestamp >= ? AND timestamp < ?
+            GROUP BY time
+            ORDER BY time
+        """, (window_start, window_end)).fetchall()
+
+    conn.close()
+    return [{'time': r['time'], 'group': r['grp'], 'tokens': r['tokens'] or 0} for r in rows]
+
+
+def entrypoint_stats(days: int = 30) -> dict:
+    """Return counts of sessions by entrypoint."""
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT entrypoint, COUNT(DISTINCT session_id) as session_count
+        FROM messages
+        WHERE date >= ?
+        GROUP BY entrypoint
+        ORDER BY session_count DESC
+    """, (_since_date(days),)).fetchall()
+    conn.close()
+    return {r['entrypoint'] or 'unknown': r['session_count'] for r in rows}
 
 
 def db_stats() -> dict:

@@ -20,10 +20,17 @@ Chart.defaults.borderColor = 'rgba(255,245,235,0.07)';
 Chart.defaults.font.family = "'DM Sans', sans-serif";
 
 // ─── State ───────────────────────────────────────────────────
-let dailyChart = null, projectChart = null, modelChart = null, sessionDetailChart = null;
-let currentDailyDays = 30;
+let chart5h = null, chart7d = null, projectChart = null, modelChart = null, sessionDetailChart = null;
 let currentSessionDays = 7;
 let rateData = null;
+let windowView = 'rate';    // 'rate' | 'cumulative'
+let windowStack = 'none';   // 'none' | 'token_type' | 'project' | 'model'
+
+// Extended palette for project/model stacking
+const STACK_PALETTE = [
+  '#E07A5F','#C9A96E','#7B9E8A','#6B8CBA','#BA6B8C',
+  '#8CBA6B','#BA8C6B','#6BBA8C','#8C6BBA','#BA9E6B',
+];
 
 // ─── Init ────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
@@ -38,7 +45,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
 async function initAll() {
   await Promise.all([
-    loadDaily(currentDailyDays),
+    loadWindowCharts(),
     loadProjects(),
     loadModels(),
     loadHeatmap(),
@@ -46,6 +53,8 @@ async function initAll() {
     loadCost(),
     loadRate(),
   ]);
+  // Auto-refresh window charts every 60s
+  setInterval(loadWindowCharts, 60000);
 }
 
 // ─── Quota polling ───────────────────────────────────────────
@@ -175,14 +184,16 @@ function updateForecasts() {
 
 function formatCountdown(date) {
   const ms = date - new Date();
-  if (ms <= 0) return 'now';
+  if (ms <= 0 && ms > -15000) return 'now';
+  if (ms <= -15000) return 'passed';
   const s = Math.floor(ms / 1000);
   const m = Math.floor(s / 60);
   const h = Math.floor(m / 60);
   const d = Math.floor(h / 24);
-  if (d > 1) return `in ${d}d ${h % 24}h`;
-  if (h > 0) return `in ${h}h ${m % 60}m`;
-  return `in ${m}m`;
+  if (d >= 1) return `in ${d}d ${h % 24}h`;
+  if (h >= 2) return `in ${h}h ${m % 60}m`;
+  if (ms > 120000) return `in ${m}m`;
+  return `in ${m}m ${s % 60}s`;
 }
 
 // ─── Ingest status ───────────────────────────────────────────
@@ -214,48 +225,197 @@ async function triggerRefresh() {
   checkIngestStatus();
 }
 
-// ─── Daily chart ─────────────────────────────────────────────
-async function loadDaily(days) {
-  const data = await apiFetch('/api/daily?days=' + days);
-  const labels = data.map(r => r.date);
-  const datasets = [
-    { label: 'Input',         data: data.map(r => r.input_tokens),          backgroundColor: hexAlpha(CLAUDE_ORANGE, 0.55), borderColor: CLAUDE_ORANGE,   borderWidth: 1.5, fill: true },
-    { label: 'Cache Create',  data: data.map(r => r.cache_creation_tokens),  backgroundColor: hexAlpha(CLAUDE_AMBER, 0.4),  borderColor: CLAUDE_AMBER,    borderWidth: 1.5, fill: true },
-    { label: 'Cache Read',    data: data.map(r => r.cache_read_tokens),       backgroundColor: hexAlpha('#7B9E8A', 0.4),     borderColor: '#7B9E8A',       borderWidth: 1.5, fill: true },
-    { label: 'Output',        data: data.map(r => r.output_tokens),           backgroundColor: hexAlpha(CLAUDE_CREAM, 0.25), borderColor: CLAUDE_CREAM,    borderWidth: 1.5, fill: true },
-  ];
+// ─── Window charts (5h / 7d session) ─────────────────────────
+function setWindowView(view, btn) {
+  windowView = view;
+  document.querySelectorAll('.view-selector .view-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  loadWindowCharts();
+}
 
-  if (dailyChart) { dailyChart.destroy(); }
-  const ctx = document.getElementById('dailyChart').getContext('2d');
-  dailyChart = new Chart(ctx, {
+function setWindowStack(stack, btn) {
+  windowStack = stack;
+  document.querySelectorAll('.stack-selector .stack-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  loadWindowCharts();
+}
+
+async function loadWindowCharts() {
+  const gb = windowStack === 'none' ? 'none' : windowStack;
+  const [d5h, d7d] = await Promise.all([
+    apiFetch('/api/window?type=5h&group_by=' + gb),
+    apiFetch('/api/window?type=7d&group_by=' + gb),
+  ]);
+  if (chart5h) { chart5h.destroy(); chart5h = null; }
+  if (chart7d) { chart7d.destroy(); chart7d = null; }
+  chart5h = buildWindowChart(d5h, 'chart5h', 3);
+  chart7d = buildWindowChart(d7d, 'chart7d', 9);
+}
+
+function _movingAverage(arr, halfWin) {
+  return arr.map((_, i) => {
+    const s = Math.max(0, i - halfWin), e = Math.min(arr.length - 1, i + halfWin);
+    const slice = arr.slice(s, e + 1);
+    return slice.reduce((a, b) => a + b, 0) / slice.length;
+  });
+}
+
+function buildWindowChart(data, canvasId, maHalf) {
+  const { window_start, window_end, quota_pct, bucket_minutes, buckets } = data;
+
+  // Generate all time labels for the window
+  const startMs = new Date(window_start).getTime();
+  const endMs   = new Date(window_end).getTime();
+  const bucketMs = bucket_minutes * 60000;
+  const allTimes = [];
+  for (let t = startMs; t < endMs; t += bucketMs) allTimes.push(t);
+
+  // Collect unique groups preserving order
+  const groupOrder = [];
+  const seen = new Set();
+  for (const b of buckets) {
+    if (!seen.has(b.group)) { groupOrder.push(b.group); seen.add(b.group); }
+  }
+  if (groupOrder.length === 0) groupOrder.push('total');
+
+  // Build lookup: time_label -> group -> tokens
+  const lookup = {};
+  for (const b of buckets) {
+    const k = new Date(b.time).getTime();
+    if (!lookup[k]) lookup[k] = {};
+    lookup[k][b.group] = (lookup[k][b.group] || 0) + b.tokens;
+  }
+
+  // Fill arrays: allTimes x groupOrder
+  const rawByGroup = {};
+  for (const g of groupOrder) rawByGroup[g] = allTimes.map(t => (lookup[t] && lookup[t][g]) || 0);
+
+  const totalTokensInWindow = groupOrder.reduce(
+    (sum, g) => sum + rawByGroup[g].reduce((a, b) => a + b, 0), 0
+  );
+
+  const stacked = windowStack !== 'none';
+  const isCumulative = windowView === 'cumulative';
+
+  // X-axis labels
+  const xLabels = allTimes.map(t => {
+    const d = new Date(t);
+    if (bucket_minutes <= 60) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return d.toLocaleDateString([], { weekday: 'short', month: 'numeric', day: 'numeric' });
+  });
+
+  // Group colors
+  const tokenTypeColors = {
+    input: CLAUDE_ORANGE, cache_create: CLAUDE_AMBER,
+    cache_read: '#7B9E8A', output: CLAUDE_CREAM,
+    total: CLAUDE_ORANGE,
+  };
+
+  function groupColor(g, i) {
+    if (windowStack === 'token_type' || windowStack === 'none') return tokenTypeColors[g] || STACK_PALETTE[i % STACK_PALETTE.length];
+    return STACK_PALETTE[i % STACK_PALETTE.length];
+  }
+
+  let datasets;
+
+  if (isCumulative) {
+    // Running sum per group, normalized to quota_pct %
+    const norm = totalTokensInWindow > 0 ? quota_pct / totalTokensInWindow : 0;
+    datasets = groupOrder.map((g, i) => {
+      const color = groupColor(g, i);
+      let running = 0;
+      const cumData = rawByGroup[g].map(v => { running += v; return running * norm; });
+      return {
+        label: g,
+        data: cumData,
+        backgroundColor: hexAlpha(color.startsWith('rgba') ? CLAUDE_ORANGE : color, stacked ? 0.4 : 0.3),
+        borderColor: color,
+        borderWidth: 1.5,
+        fill: stacked ? 'origin' : false,
+        tension: 0.3,
+        pointRadius: 0,
+      };
+    });
+    // Reference line: linear 0% → 100% across window
+    const refData = allTimes.map((t, i) => (i / (allTimes.length - 1 || 1)) * 100);
+    datasets.push({
+      label: '— pace',
+      data: refData,
+      borderColor: 'rgba(255,245,235,0.25)',
+      borderDash: [5, 4],
+      borderWidth: 1.5,
+      fill: false,
+      tension: 0,
+      pointRadius: 0,
+      order: -1,
+    });
+  } else {
+    // Rate view: tokens/min with moving average
+    datasets = groupOrder.map((g, i) => {
+      const color = groupColor(g, i);
+      const raw = rawByGroup[g].map(v => v / bucket_minutes);
+      const smoothed = _movingAverage(raw, maHalf);
+      return {
+        label: g,
+        data: smoothed,
+        backgroundColor: hexAlpha(color.startsWith('rgba') ? CLAUDE_ORANGE : color, stacked ? 0.5 : 0.3),
+        borderColor: color,
+        borderWidth: 1.5,
+        fill: stacked ? 'origin' : false,
+        tension: 0.3,
+        pointRadius: 0,
+      };
+    });
+  }
+
+  const yLabel = isCumulative ? '% of quota' : 'tokens / min';
+  const yMax = isCumulative ? 100 : undefined;
+
+  const ctx = document.getElementById(canvasId);
+  if (!ctx) return null;
+  return new Chart(ctx, {
     type: 'line',
-    data: { labels, datasets },
+    data: { labels: xLabels, datasets },
     options: {
       responsive: true,
       maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       plugins: {
-        legend: { position: 'top', align: 'end', labels: { boxWidth: 10, boxHeight: 10, padding: 16, font: { size: 11 } } },
+        legend: {
+          position: 'top', align: 'end',
+          labels: { boxWidth: 8, boxHeight: 8, padding: 12, font: { size: 10 },
+            filter: item => item.text !== '— pace' || isCumulative },
+        },
         tooltip: {
           callbacks: {
-            label: ctx => ` ${ctx.dataset.label}: ${fmt(ctx.parsed.y)}`,
-            footer: items => ` Total: ${fmt(items.reduce((s, i) => s + i.parsed.y, 0))}`,
+            label: ctx => {
+              if (ctx.dataset.label === '— pace') return ` Pace: ${ctx.parsed.y.toFixed(1)}%`;
+              const val = isCumulative ? `${ctx.parsed.y.toFixed(1)}%` : fmtShort(ctx.parsed.y) + '/min';
+              return ` ${ctx.dataset.label}: ${val}`;
+            },
           }
         }
       },
       scales: {
-        x: { stacked: true, ticks: { maxTicksLimit: 12, font: { size: 10, family: "'DM Mono'" } }, grid: { display: false } },
-        y: { stacked: true, ticks: { callback: v => fmtShort(v), font: { size: 10 } }, grid: { color: 'rgba(255,245,235,0.04)' } },
+        x: {
+          stacked,
+          ticks: { maxTicksLimit: bucket_minutes <= 60 ? 10 : 7, font: { size: 9, family: "'DM Mono'" } },
+          grid: { display: false },
+        },
+        y: {
+          stacked,
+          max: yMax,
+          min: 0,
+          ticks: {
+            callback: v => isCumulative ? v + '%' : fmtShort(v),
+            font: { size: 10 },
+          },
+          grid: { color: 'rgba(255,245,235,0.04)' },
+          title: { display: true, text: yLabel, color: 'rgba(245,237,228,0.3)', font: { size: 9 } },
+        },
       }
     }
   });
-}
-
-function setDailyDays(days, btn) {
-  currentDailyDays = days;
-  document.querySelectorAll('.day-selector .day-btn').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  loadDaily(days);
 }
 
 // ─── Projects chart ──────────────────────────────────────────
@@ -343,8 +503,14 @@ function modelColor(model) {
 }
 
 // ─── Heatmap ─────────────────────────────────────────────────
-async function loadHeatmap() {
-  const data = await apiFetch('/api/heatmap?days=90');
+function setHeatmapDays(days, btn) {
+  document.querySelectorAll('#heatmapDaySelector .day-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  loadHeatmap(days);
+}
+
+async function loadHeatmap(days = 90) {
+  const data = await apiFetch('/api/heatmap?days=' + days);
 
   // Build lookup: dow -> hour -> tokens
   const grid = {};
@@ -436,12 +602,22 @@ async function loadSessions(days) {
     const endDt = new Date(s.end_time);
     const durationMin = Math.max(1, Math.round((endDt - startDt) / 60000));
 
+    const entrypointBadge = s.entrypoint && s.entrypoint.includes('vscode')
+      ? '<span class="session-badge badge-vscode">VS Code</span>'
+      : s.entrypoint && !s.entrypoint.includes('vscode') && s.entrypoint !== ''
+        ? '<span class="session-badge badge-cli">CLI</span>'
+        : '';
+    const speedBadge = s.speed === 'fast'
+      ? '<span class="session-badge badge-fast">fast</span>'
+      : '';
+
     row.innerHTML = `
       ${dot}
       <div class="session-info">
         <div class="session-project">${escHtml(s.project)}</div>
-        <div class="session-time">${startDt.toLocaleDateString()} ${startDt.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})} · ${durationMin}m · ${s.message_count} msgs</div>
+        <div class="session-time">${startDt.toLocaleDateString()} ${startDt.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})} · ${durationMin}m · ${s.message_count} msgs${s.git_branch ? ' · ' + escHtml(s.git_branch) : ''}</div>
       </div>
+      <div class="session-badges">${entrypointBadge}${speedBadge}</div>
       <div class="session-tokens">${fmtShort(s.total_tokens)}</div>
       <div class="session-model ${modelClass ? modelClass+'-model' : ''}">${shortModelName(s.model)}</div>
     `;

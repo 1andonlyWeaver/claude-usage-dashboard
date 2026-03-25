@@ -12,9 +12,9 @@ A FastAPI + vanilla JS dashboard for monitoring Claude Code token usage, costs, 
 # Create environment (first time)
 conda env create -f environment.yml
 
-# Run the server
-conda activate claude-usage-dashboard && python app.py
-# Serves at http://127.0.0.1:8000/
+# Run the server (avoid port 8000 — often in use)
+conda activate claude-usage-dashboard && python app.py --port 8080
+# Serves at http://127.0.0.1:8080/
 ```
 
 Manual ingest only (without starting the server):
@@ -27,7 +27,7 @@ There is no test suite.
 ## Architecture
 
 ```
-app.py       FastAPI server — 13 API endpoints, background ingest thread, serves templates/
+app.py       FastAPI server — 14 API endpoints, background ingest thread, serves templates/
 db.py        SQLite query layer — pricing constants, token aggregations, cost calculations
 ingest.py    ETL pipeline — scans ~/.claude/projects/**/*.jsonl, deduplicates, writes to SQLite
 templates/   Jinja2 HTML (single index.html)
@@ -54,10 +54,15 @@ data/        usage.db — auto-created on first run; not committed
 ```sql
 messages (id, msg_id UNIQUE, timestamp, date, hour, day_of_week,
           session_id, project, model,
-          input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens)
+          input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
+          cache_5m_tokens, cache_1h_tokens,
+          entrypoint, speed, git_branch,
+          web_search_count, web_fetch_count)
 
 ingest_meta (file_path PRIMARY KEY, file_size, last_modified)
 ```
+
+`timestamp` stores **local time** (no timezone). All window/range queries use local-time boundaries to match.
 
 ## Model Pricing (hardcoded in db.py and ingest.py)
 
@@ -68,6 +73,16 @@ ingest_meta (file_path PRIMARY KEY, file_size, last_modified)
 
 When updating pricing, change it in **both** `db.py` and `ingest.py`.
 
+## Gotchas
+
+- **Force re-ingest required** after schema migrations or `extract_project_name` changes — unchanged files are skipped otherwise. Use `POST /api/refresh?force=true` or delete `ingest_meta` rows manually.
+- **Project name resolution** uses filesystem greedy-match: `C--Users-weaverjc-Projects-march-madness` → resolves by checking real directories on disk, so project names only resolve correctly on the machine where the paths exist.
+- **Schema migration** is handled automatically by `_migrate_db()` in `ingest.py` via `PRAGMA table_info` + `ALTER TABLE`. New columns default to 0/empty for pre-migration rows.
+
 ## API Endpoints
 
-`/api/quota`, `/api/ingest-status`, `/api/refresh` (POST), `/api/daily`, `/api/projects`, `/api/models`, `/api/heatmap`, `/api/sessions`, `/api/session/{id}`, `/api/rate`, `/api/cost`, `/api/stats`
+`/api/quota`, `/api/ingest-status`, `/api/refresh` (POST), `/api/daily`, `/api/projects`, `/api/models`, `/api/heatmap`, `/api/sessions`, `/api/session/{id}`, `/api/rate`, `/api/cost`, `/api/stats`, `/api/window`
+
+`/api/window?type=5h|7d&group_by=none|token_type|project|model` — token buckets within the current quota window (5-min or 60-min buckets).
+
+`/api/refresh?force=true` — clears `ingest_meta` and re-processes all files. Use after schema migrations or project name changes.

@@ -4,7 +4,6 @@ Supports incremental updates - only re-parses changed files.
 """
 import sqlite3
 import os
-import glob
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,12 +54,20 @@ def init_db(conn):
             input_tokens INTEGER DEFAULT 0,
             cache_creation_tokens INTEGER DEFAULT 0,
             cache_read_tokens INTEGER DEFAULT 0,
-            output_tokens INTEGER DEFAULT 0
+            output_tokens INTEGER DEFAULT 0,
+            cache_5m_tokens INTEGER DEFAULT 0,
+            cache_1h_tokens INTEGER DEFAULT 0,
+            entrypoint TEXT DEFAULT '',
+            speed TEXT DEFAULT 'standard',
+            git_branch TEXT DEFAULT '',
+            web_search_count INTEGER DEFAULT 0,
+            web_fetch_count INTEGER DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_date ON messages(date);
         CREATE INDEX IF NOT EXISTS idx_project ON messages(project);
         CREATE INDEX IF NOT EXISTS idx_model ON messages(model);
         CREATE INDEX IF NOT EXISTS idx_session ON messages(session_id);
+        CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp);
 
         CREATE TABLE IF NOT EXISTS ingest_meta (
             file_path TEXT PRIMARY KEY,
@@ -68,42 +75,107 @@ def init_db(conn):
             last_modified REAL
         );
     """)
+    _migrate_db(conn)
     conn.commit()
 
 
+def _migrate_db(conn):
+    """Add new columns to existing databases."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+    new_cols = [
+        ('cache_5m_tokens', 'INTEGER DEFAULT 0'),
+        ('cache_1h_tokens', 'INTEGER DEFAULT 0'),
+        ('entrypoint', "TEXT DEFAULT ''"),
+        ('speed', "TEXT DEFAULT 'standard'"),
+        ('git_branch', "TEXT DEFAULT ''"),
+        ('web_search_count', 'INTEGER DEFAULT 0'),
+        ('web_fetch_count', 'INTEGER DEFAULT 0'),
+    ]
+    for col, typedef in new_cols:
+        if col not in existing:
+            conn.execute(f'ALTER TABLE messages ADD COLUMN {col} {typedef}')
+
+
 def extract_project_name(dir_name: str) -> str:
-    """Convert directory name like 'C--Users-weaverjc-Projects-Personal-music-analyst' to 'music-analyst'."""
-    # Strip leading drive/user path
-    name = re.sub(r'^[Cc]--Users-\w+-', '', dir_name)
-    # Handle ssh sessions
-    if name.startswith('ssh-'):
+    """Convert encoded directory name to a readable path using filesystem resolution.
+
+    The directory names under ~/.claude/projects/ encode the original CWD path with
+    dashes replacing path separators. We resolve ambiguous dashes by checking which
+    segments correspond to real directories on disk.
+
+    Examples:
+      C--Users-weaverjc                              → Home
+      C--Users-weaverjc-Projects                    → Projects
+      C--Users-weaverjc-Projects-Personal-foo-bar   → Projects / Personal / foo-bar
+      c--Users-weaverjc-Projects-march-madness       → Projects / march-madness
+    """
+    if 'ssh-' in dir_name:
         return 'ssh-session'
-    # Remove Projects- or PycharmProjects- prefix
-    name = re.sub(r'^(Projects|PycharmProjects)-', '', name, flags=re.IGNORECASE)
-    # Replace remaining dashes with slashes to show project/subproject
-    # But keep the last component(s) as the display name
-    parts = name.split('-')
-    # If looks like a path (Personal-music-analyst), show as "Personal / music-analyst"
-    if len(parts) > 2:
-        return f"{parts[0]} / {'-'.join(parts[1:])}"
-    return name or dir_name
+
+    # Parse the encoded dir name.
+    # Two formats:
+    #   {Drive}--Users-{username}[-{rest}]  e.g. C--Users-weaverjc-Projects-foo
+    #   {Drive}--{rest}                      e.g. u--Projects-WCAG-PDF
+    m_users = re.match(r'^([A-Za-z])--Users-(\w+)(-(.+))?$', dir_name)
+    m_drive = re.match(r'^([A-Za-z])--(.+)$', dir_name)
+
+    if m_users:
+        drive = m_users.group(1).upper()
+        username = m_users.group(2)
+        rest = m_users.group(4) or ''
+        if not rest:
+            return 'Home'
+        base_path = Path(f'{drive}:\\Users\\{username}')
+    elif m_drive:
+        drive = m_drive.group(1).upper()
+        rest = m_drive.group(2)
+        base_path = Path(f'{drive}:\\')
+    else:
+        return dir_name  # unknown format
+
+    if not base_path.exists():
+        # Filesystem not accessible — fall back to simple display
+        return rest
+
+    tokens = rest.split('-')
+    resolved = []
+    current = base_path
+    i = 0
+
+    while i < len(tokens):
+        # Try growing a candidate from tokens[i] onward, shortest match first
+        matched = False
+        for j in range(i + 1, len(tokens) + 1):
+            candidate = '-'.join(tokens[i:j])
+            if (current / candidate).is_dir():
+                resolved.append(candidate)
+                current = current / candidate
+                i = j
+                matched = True
+                break
+        if not matched:
+            # No directory match at any length — consume remaining tokens as final component
+            resolved.append('-'.join(tokens[i:]))
+            break
+
+    return ' / '.join(resolved) if resolved else 'Home'
 
 
 def parse_timestamp(ts: str):
-    """Parse ISO timestamp, return (date_str, hour, day_of_week)."""
+    """Parse ISO timestamp, return (local_iso_str, date_str, hour, day_of_week)."""
     try:
         dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
-        # Convert to local time for display
+        # Convert to local time for display (DB stores local time)
         local_dt = dt.astimezone()
-        return local_dt.strftime('%Y-%m-%d'), local_dt.hour, local_dt.weekday()
+        local_iso = local_dt.strftime('%Y-%m-%dT%H:%M:%S')
+        return local_iso, local_dt.strftime('%Y-%m-%d'), local_dt.hour, local_dt.weekday()
     except Exception:
-        return None, None, None
+        return None, None, None, None
 
 
 def ingest_file(conn, file_path: str, project_name: str) -> int:
     """Parse a single JSONL file and insert new messages. Returns count inserted."""
     count = 0
-    seen_msg_ids = set()
 
     # Collect all qualifying messages, keeping last occurrence per msg_id
     messages = {}
@@ -137,13 +209,16 @@ def ingest_file(conn, file_path: str, project_name: str) -> int:
                 if not timestamp or not session_id:
                     continue
 
-                date, hour, dow = parse_timestamp(timestamp)
+                local_iso, date, hour, dow = parse_timestamp(timestamp)
                 if date is None:
                     continue
 
+                cache_creation = usage.get('cache_creation', {})
+                server_tool_use = usage.get('server_tool_use', {})
+
                 record = {
                     'msg_id': msg_id or f"{session_id}_{timestamp}",
-                    'timestamp': timestamp,
+                    'timestamp': local_iso,
                     'date': date,
                     'hour': hour,
                     'day_of_week': dow,
@@ -154,6 +229,13 @@ def ingest_file(conn, file_path: str, project_name: str) -> int:
                     'cache_creation_tokens': usage.get('cache_creation_input_tokens', 0),
                     'cache_read_tokens': usage.get('cache_read_input_tokens', 0),
                     'output_tokens': usage.get('output_tokens', 0),
+                    'cache_5m_tokens': cache_creation.get('ephemeral_5m_input_tokens', 0),
+                    'cache_1h_tokens': cache_creation.get('ephemeral_1h_input_tokens', 0),
+                    'entrypoint': obj.get('entrypoint', ''),
+                    'speed': usage.get('speed', 'standard'),
+                    'git_branch': obj.get('gitBranch', ''),
+                    'web_search_count': server_tool_use.get('web_search_requests', 0),
+                    'web_fetch_count': server_tool_use.get('web_fetch_requests', 0),
                 }
                 # Keep last occurrence (streaming sends multiple chunks)
                 messages[record['msg_id']] = record
@@ -167,14 +249,19 @@ def ingest_file(conn, file_path: str, project_name: str) -> int:
             conn.execute("""
                 INSERT OR REPLACE INTO messages
                 (msg_id, timestamp, date, hour, day_of_week, session_id, project, model,
-                 input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
+                 cache_5m_tokens, cache_1h_tokens, entrypoint, speed, git_branch,
+                 web_search_count, web_fetch_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 record['msg_id'], record['timestamp'], record['date'],
                 record['hour'], record['day_of_week'], record['session_id'],
                 record['project'], record['model'],
                 record['input_tokens'], record['cache_creation_tokens'],
                 record['cache_read_tokens'], record['output_tokens'],
+                record['cache_5m_tokens'], record['cache_1h_tokens'],
+                record['entrypoint'], record['speed'], record['git_branch'],
+                record['web_search_count'], record['web_fetch_count'],
             ))
             count += 1
         except Exception:
@@ -183,11 +270,19 @@ def ingest_file(conn, file_path: str, project_name: str) -> int:
     return count
 
 
-def run_ingest(progress_callback=None):
-    """Main ingest entry point. Returns dict with stats."""
+def run_ingest(progress_callback=None, force=False):
+    """Main ingest entry point. Returns dict with stats.
+
+    Args:
+        force: If True, clear ingest_meta to force re-processing all files.
+    """
     DB_PATH.parent.mkdir(exist_ok=True)
     conn = get_db()
     init_db(conn)
+
+    if force:
+        conn.execute("DELETE FROM ingest_meta")
+        conn.commit()
 
     # Find all non-subagent JSONL files
     all_files = []

@@ -5,9 +5,9 @@ import os
 import json
 import threading
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.requests import Request
@@ -27,7 +27,7 @@ _ingest_lock = threading.Lock()
 _ingest_status = {"running": False, "progress": 0, "total": 0, "done": False, "error": None}
 
 
-def _run_ingest_background():
+def _run_ingest_background(force: bool = False):
     from ingest import run_ingest
     global _ingest_status
     _ingest_status["running"] = True
@@ -38,13 +38,24 @@ def _run_ingest_background():
         _ingest_status["total"] = total
 
     try:
-        stats = run_ingest(progress_callback=progress_cb)
+        stats = run_ingest(progress_callback=progress_cb, force=force)
         _ingest_status["done"] = True
         _ingest_status["stats"] = stats
     except Exception as e:
         _ingest_status["error"] = str(e)
     finally:
         _ingest_status["running"] = False
+
+
+def _read_quota_data() -> dict | None:
+    """Read quota JSON file, return the data dict or None on failure."""
+    if not QUOTA_FILE.exists():
+        return None
+    try:
+        raw = json.loads(QUOTA_FILE.read_text())
+        return raw.get("data", raw)
+    except Exception:
+        return None
 
 
 @app.on_event("startup")
@@ -66,16 +77,10 @@ async def index(request: Request):
 @app.get("/api/quota")
 async def get_quota():
     """Read the live quota JSON file."""
-    if not QUOTA_FILE.exists():
+    data = _read_quota_data()
+    if data is None:
         return JSONResponse({"error": "Quota file not found", "five_hour_pct": 0, "seven_day_pct": 0})
-    try:
-        data = json.loads(QUOTA_FILE.read_text())
-        # File has {"timestamp": ..., "data": {...}} structure
-        if "data" in data:
-            return data["data"]
-        return data
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+    return data
 
 
 @app.get("/api/ingest-status")
@@ -84,13 +89,17 @@ async def ingest_status():
 
 
 @app.post("/api/refresh")
-async def refresh():
-    """Trigger a re-ingest of JSONL files."""
+async def refresh(force: bool = Query(default=False)):
+    """Trigger a re-ingest of JSONL files.
+
+    Use ?force=true to clear ingest_meta and re-process all files (needed after
+    schema migrations or project name changes).
+    """
     if _ingest_status.get("running"):
         return {"message": "Ingest already running"}
-    thread = threading.Thread(target=_run_ingest_background, daemon=True)
+    thread = threading.Thread(target=lambda: _run_ingest_background(force=force), daemon=True)
     thread.start()
-    return {"message": "Ingest started"}
+    return {"message": "Ingest started", "force": force}
 
 
 @app.get("/api/daily")
@@ -139,6 +148,71 @@ async def cost(days: int = 30):
 @app.get("/api/stats")
 async def stats():
     return db.db_stats()
+
+
+@app.get("/api/window")
+async def window(
+    type: str = Query(default="5h", pattern="^(5h|7d)$"),
+    group_by: str = Query(default="none", pattern="^(none|token_type|project|model)$"),
+):
+    """Return token data bucketed within the current quota window.
+
+    The window boundaries are derived from the quota reset times in the quota file.
+    Timestamps are converted to local time to match the DB's timestamp column.
+
+    Returns:
+        window_start, window_end: local-time ISO strings
+        quota_pct: current percentage of quota used
+        bucket_minutes: bucket size used
+        buckets: list of {time, group, tokens}
+    """
+    quota = _read_quota_data()
+
+    # Determine window boundaries
+    now_local = datetime.now()
+    if quota and type == "5h" and quota.get("five_hour_resets_at"):
+        try:
+            resets_utc = datetime.fromisoformat(quota["five_hour_resets_at"])
+            resets_local = resets_utc.astimezone().replace(tzinfo=None)
+            window_end = resets_local
+            window_start = resets_local - timedelta(hours=5)
+            quota_pct = quota.get("five_hour_pct", 0)
+        except Exception:
+            window_end = now_local
+            window_start = now_local - timedelta(hours=5)
+            quota_pct = 0
+    elif quota and type == "7d" and quota.get("seven_day_resets_at"):
+        try:
+            resets_utc = datetime.fromisoformat(quota["seven_day_resets_at"])
+            resets_local = resets_utc.astimezone().replace(tzinfo=None)
+            window_end = resets_local
+            window_start = resets_local - timedelta(days=7)
+            quota_pct = quota.get("seven_day_pct", 0)
+        except Exception:
+            window_end = now_local
+            window_start = now_local - timedelta(days=7)
+            quota_pct = 0
+    else:
+        # Fallback: no quota file
+        window_end = now_local
+        window_start = now_local - (timedelta(hours=5) if type == "5h" else timedelta(days=7))
+        quota_pct = 0
+
+    bucket_minutes = 5 if type == "5h" else 60
+    group_by_param = None if group_by == "none" else group_by
+
+    ws = window_start.strftime('%Y-%m-%dT%H:%M:%S')
+    we = window_end.strftime('%Y-%m-%dT%H:%M:%S')
+
+    buckets = db.window_tokens(ws, we, bucket_minutes, group_by_param)
+
+    return {
+        "window_start": ws,
+        "window_end": we,
+        "quota_pct": quota_pct,
+        "bucket_minutes": bucket_minutes,
+        "buckets": buckets,
+    }
 
 
 if __name__ == "__main__":

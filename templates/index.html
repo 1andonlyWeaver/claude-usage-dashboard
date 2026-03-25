@@ -132,18 +132,37 @@
         </div>
       </section>
 
-      <!-- Daily chart -->
-      <section class="card chart-card daily-card">
-        <div class="card-header">
-          <h2 class="card-title">Daily Token Usage</h2>
-          <div class="day-selector">
-            <button class="day-btn active" data-days="30" onclick="setDailyDays(30, this)">30d</button>
-            <button class="day-btn" data-days="90" onclick="setDailyDays(90, this)">90d</button>
-            <button class="day-btn" data-days="180" onclick="setDailyDays(180, this)">180d</button>
+      <!-- Window charts -->
+      <section class="window-section">
+        <div class="window-controls">
+          <div class="view-selector">
+            <button class="view-btn active" onclick="setWindowView('rate', this)">Rate</button>
+            <button class="view-btn" onclick="setWindowView('cumulative', this)">Cumulative</button>
+          </div>
+          <div class="stack-selector">
+            <button class="stack-btn active" onclick="setWindowStack('none', this)">Clean</button>
+            <button class="stack-btn" onclick="setWindowStack('token_type', this)">Token Type</button>
+            <button class="stack-btn" onclick="setWindowStack('project', this)">Project</button>
+            <button class="stack-btn" onclick="setWindowStack('model', this)">Model</button>
           </div>
         </div>
-        <div class="chart-wrap">
-          <canvas id="dailyChart"></canvas>
+        <div class="window-charts-row">
+          <div class="card chart-card window-card">
+            <div class="card-header">
+              <h2 class="card-title">5-Hour Session</h2>
+            </div>
+            <div class="chart-wrap">
+              <canvas id="chart5h"></canvas>
+            </div>
+          </div>
+          <div class="card chart-card window-card">
+            <div class="card-header">
+              <h2 class="card-title">7-Day Session</h2>
+            </div>
+            <div class="chart-wrap">
+              <canvas id="chart7d"></canvas>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -174,7 +193,11 @@
         <div class="card chart-card">
           <div class="card-header">
             <h2 class="card-title">Session Heatmap</h2>
-            <span class="card-sub">Hour of day × Day of week</span>
+            <div class="day-selector" id="heatmapDaySelector">
+              <button class="day-btn" onclick="setHeatmapDays(7, this)">7d</button>
+              <button class="day-btn" onclick="setHeatmapDays(30, this)">30d</button>
+              <button class="day-btn active" onclick="setHeatmapDays(90, this)">90d</button>
+            </div>
           </div>
           <div id="heatmapWrap" class="heatmap-wrap"></div>
         </div>
