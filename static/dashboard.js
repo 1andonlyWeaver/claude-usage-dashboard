@@ -315,6 +315,10 @@ function buildWindowChart(data, canvasId, maHalf) {
   const allTimes = [];
   for (let t = startMs; t < endMs; t += bucketMs) allTimes.push(t);
 
+  // "Now" detection: last bucket whose timestamp <= current time
+  const nowMs = Date.now();
+  const nowIndex = allTimes.reduce((acc, t, i) => t <= nowMs ? i : acc, -1);
+
   // Collect unique groups preserving order
   const groupOrder = [];
   const seen = new Set();
@@ -366,12 +370,15 @@ function buildWindowChart(data, canvasId, maHalf) {
   let datasets;
 
   if (isCumulative) {
-    // Running sum per group, normalized to quota_pct %
+    // Running sum per group, normalized to quota_pct %; truncated at nowIndex
     const norm = totalTokensInWindow > 0 ? quota_pct / totalTokensInWindow : 0;
     datasets = groupOrder.map((g, i) => {
       const color = groupColor(g, i);
       let running = 0;
-      const cumData = rawByGroup[g].map(v => { running += v; return running * norm; });
+      const cumData = rawByGroup[g].map((v, idx) => {
+        running += v;
+        return idx <= nowIndex ? running * norm : null;
+      });
       return {
         label: g,
         data: cumData,
@@ -398,11 +405,11 @@ function buildWindowChart(data, canvasId, maHalf) {
       yAxisID: 'y2',
     });
   } else {
-    // Rate view: tokens/min with moving average
+    // Rate view: tokens/min with moving average; truncated at nowIndex
     datasets = groupOrder.map((g, i) => {
       const color = groupColor(g, i);
       const raw = rawByGroup[g].map(v => v / bucket_minutes);
-      const smoothed = _movingAverage(raw, maHalf);
+      const smoothed = _movingAverage(raw, maHalf).map((v, idx) => idx <= nowIndex ? v : null);
       return {
         label: g,
         data: smoothed,
@@ -416,8 +423,146 @@ function buildWindowChart(data, canvasId, maHalf) {
     });
   }
 
+  // ── EMA Projection ───────────────────────────────────────────
+  // Aggregate total across all groups for EMA input
+  const aggRaw = allTimes.map((_, i) => groupOrder.reduce((s, g) => s + rawByGroup[g][i], 0));
+  const norm = totalTokensInWindow > 0 ? quota_pct / totalTokensInWindow : 0;
+
+  let emaInput;
+  if (isCumulative) {
+    let running = 0;
+    emaInput = aggRaw.map(v => { running += v; return running * norm; });
+  } else {
+    emaInput = _movingAverage(aggRaw.map(v => v / bucket_minutes), maHalf);
+  }
+
+  function computeEma(series, nowIdx) {
+    if (nowIdx < 2) return null;
+    const alpha = 0.3;
+    const ema = [series[0]];
+    let sumSqRes = 0;
+    for (let i = 1; i <= nowIdx; i++) {
+      ema[i] = alpha * series[i] + (1 - alpha) * ema[i - 1];
+      sumSqRes += (series[i] - ema[i]) ** 2;
+    }
+    const sigma = Math.sqrt(sumSqRes / nowIdx);
+    // Fixed projection interval: 1h for 5-min buckets, 1d for 60-min buckets
+    const projBuckets = Math.min(
+      bucket_minutes < 60 ? Math.round(60 / bucket_minutes) : 24,
+      series.length - 1 - nowIdx
+    );
+    return { ema, sigma, projBuckets };
+  }
+
+  const emaResult = nowIndex >= 0 ? computeEma(emaInput, nowIndex) : null;
+
+  if (emaResult) {
+    const { ema, sigma, projBuckets } = emaResult;
+    const projEndIndex = nowIndex + projBuckets;
+    const n = allTimes.length;
+    const slope = nowIndex > 0 ? ema[nowIndex] - ema[nowIndex - 1] : 0;
+
+    // Build projection data arrays — anchor at actual value, not EMA (EMA lags)
+    const actualAtNow = emaInput[nowIndex];
+    const projLineData = allTimes.map((_, i) => {
+      const step = i - nowIndex;
+      if (step < 0 || step > projBuckets) return null;
+      if (step === 0) return actualAtNow;
+      return isCumulative
+        ? Math.min(Math.max(actualAtNow + slope * step, 0), 100)
+        : Math.max(actualAtNow, 0);
+    });
+
+    const projUpperData = allTimes.map((_, i) => {
+      const step = i - nowIndex;
+      if (step < 0 || step > projBuckets) return null;
+      const base = projLineData[i];
+      const band = sigma * 1.5 * Math.sqrt(step);  // 0 at step=0, fans out
+      return isCumulative ? Math.min(base + band, 100) : base + band;
+    });
+
+    const projLowerData = allTimes.map((_, i) => {
+      const step = i - nowIndex;
+      if (step < 0 || step > projBuckets) return null;
+      const base = projLineData[i];
+      const band = sigma * 1.5 * Math.sqrt(step);  // 0 at step=0, fans out
+      return Math.max(base - band, 0);
+    });
+
+    // Gradient factories using scriptable context (chart area available after layout)
+    const PROJ_RGB = '123,158,184';
+    const makeGrad = (startA, endA) => (ctx) => {
+      const { chart } = ctx;
+      const { chartArea } = chart;
+      if (!chartArea) return `rgba(${PROJ_RGB},${startA})`;
+      const pct0 = nowIndex / Math.max(n - 1, 1);
+      const pct1 = projEndIndex / Math.max(n - 1, 1);
+      const xStart = chartArea.left + pct0 * chartArea.width;
+      const xEnd   = chartArea.left + pct1 * chartArea.width;
+      const g = chart.ctx.createLinearGradient(xStart, 0, xEnd, 0);
+      g.addColorStop(0, `rgba(${PROJ_RGB},${startA})`);
+      g.addColorStop(1, `rgba(${PROJ_RGB},${endA})`);
+      return g;
+    };
+
+    // "Now" glowing dot — single point at the aggregate value at nowIndex
+    datasets.push({
+      label: 'now-dot',
+      data: allTimes.map((_, i) => i === nowIndex ? emaInput[nowIndex] : null),
+      borderColor: 'rgba(250,240,230,0.7)',
+      backgroundColor: CLAUDE_ORANGE,
+      borderWidth: 1.5,
+      fill: false,
+      tension: 0,
+      pointRadius: allTimes.map((_, i) => i === nowIndex ? 5 : 0),
+      pointHoverRadius: allTimes.map((_, i) => i === nowIndex ? 5 : 0),
+      pointBackgroundColor: CLAUDE_ORANGE,
+      pointBorderColor: 'rgba(250,240,230,0.7)',
+      pointBorderWidth: 1.5,
+      stack: 'proj-dot',
+    });
+
+    // Confidence band: upper fills down to lower (each in own stack group to avoid y-accumulation)
+    datasets.push({
+      label: 'proj-upper',
+      data: projUpperData,
+      borderWidth: 0,
+      borderColor: 'transparent',
+      backgroundColor: makeGrad(0.12, 0),
+      fill: '+1',
+      pointRadius: 0,
+      tension: 0.3,
+      stack: 'proj-u',
+    });
+    datasets.push({
+      label: 'proj-lower',
+      data: projLowerData,
+      borderWidth: 0,
+      borderColor: 'transparent',
+      backgroundColor: 'transparent',
+      fill: false,
+      pointRadius: 0,
+      tension: 0.3,
+      stack: 'proj-l',
+    });
+
+    // Projection line (drawn on top, starts at ema[nowIndex] to connect with now-dot)
+    datasets.push({
+      label: 'projection',
+      data: projLineData,
+      borderColor: makeGrad(0.55, 0),
+      borderWidth: 1.5,
+      borderDash: [6, 4],
+      fill: false,
+      pointRadius: 0,
+      tension: 0.3,
+      stack: 'proj-c',
+    });
+  }
+
   const yLabel = isCumulative ? '% of quota' : 'tokens / min';
   const yMax = isCumulative ? 100 : undefined;
+  const projLabels = new Set(['projection', 'proj-upper', 'proj-lower', 'now-dot']);
 
   const ctx = document.getElementById(canvasId);
   if (!ctx) return null;
@@ -432,7 +577,11 @@ function buildWindowChart(data, canvasId, maHalf) {
         legend: {
           position: 'top', align: 'end',
           labels: { boxWidth: 8, boxHeight: 8, padding: 12, font: { size: 10 },
-            filter: item => item.text !== '— pace' || isCumulative },
+            filter: item => {
+              if (projLabels.has(item.text)) return false;
+              return item.text !== '— pace' || isCumulative;
+            },
+          },
         },
         tooltip: {
           callbacks: {
@@ -446,9 +595,15 @@ function buildWindowChart(data, canvasId, maHalf) {
               return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             },
             label: ctx => {
-              if (ctx.dataset.label === '— pace') return ` Pace: ${ctx.parsed.y.toFixed(1)}%`;
+              const lbl = ctx.dataset.label;
+              if (lbl === 'proj-upper' || lbl === 'proj-lower' || lbl === 'now-dot') return null;
+              if (lbl === '— pace') return ` Pace: ${ctx.parsed.y.toFixed(1)}%`;
+              if (lbl === 'projection') {
+                const val = isCumulative ? `${ctx.parsed.y.toFixed(1)}%` : fmtShort(ctx.parsed.y) + '/min';
+                return ` ~ projected: ${val}`;
+              }
               const val = isCumulative ? `${ctx.parsed.y.toFixed(1)}%` : fmtShort(ctx.parsed.y) + '/min';
-              return ` ${ctx.dataset.label}: ${val}`;
+              return ` ${lbl}: ${val}`;
             },
           }
         }
