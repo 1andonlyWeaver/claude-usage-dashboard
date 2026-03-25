@@ -33,13 +33,15 @@ ingest.py    ETL pipeline — scans ~/.claude/projects/**/*.jsonl, deduplicates,
 templates/   Jinja2 HTML (single index.html)
 static/      dashboard.js (Chart.js, quota polling), style.css (glassmorphism dark theme)
 data/        usage.db — auto-created on first run; not committed
+scripts/     start-dashboard.bat (Task Scheduler launch), register-task.ps1 (one-time setup)
+logs/        dashboard.log — server output when run via Task Scheduler; not committed
 ```
 
 **Data flow**: JSONL session files → `ingest.py` → `data/usage.db` → `db.py` queries → FastAPI endpoints → `dashboard.js` charts
 
 **Ingest behavior**: On startup, a background thread runs ingest automatically if the DB is missing or empty. The `/api/refresh` endpoint triggers a full re-ingest. File metadata (`ingest_meta` table) is used to skip unchanged files.
 
-**Quota source**: Read from `~/AppData/Local/Temp/claude-statusline-quota-weaverjc.json` (written by the Claude Code status line tool). Frontend polls `/api/quota` every 5 seconds.
+**Quota source**: Fetched from the Anthropic OAuth usage API (`https://api.anthropic.com/api/oauth/usage`) using the token in `~/.claude/.credentials.json`. Response is cached 180s in-memory and on disk at `data/quota_cache.json`. Frontend polls `/api/quota` every 5 seconds; snapshots are written to `quota_snapshots` every 60s for calibration.
 
 ## Key Paths (Runtime)
 
@@ -47,7 +49,8 @@ data/        usage.db — auto-created on first run; not committed
 |------|---------|
 | `~/.claude/projects/` | Claude session JSONL files (read-only) |
 | `data/usage.db` | SQLite database (auto-created) |
-| `~/AppData/Local/Temp/claude-statusline-quota-weaverjc.json` | Live quota data |
+| `~/.claude/.credentials.json` | OAuth token for quota API (read-only) |
+| `data/quota_cache.json` | Disk cache of last known quota data (auto-created) |
 
 ## Database Schema
 
@@ -60,6 +63,8 @@ messages (id, msg_id UNIQUE, timestamp, date, hour, day_of_week,
           web_search_count, web_fetch_count)
 
 ingest_meta (file_path PRIMARY KEY, file_size, last_modified)
+
+quota_snapshots (id, timestamp, five_hour_pct, seven_day_pct)
 ```
 
 `timestamp` stores **local time** (no timezone). All window/range queries use local-time boundaries to match.
@@ -78,6 +83,8 @@ When updating pricing, change it in **both** `db.py` and `ingest.py`.
 - **Force re-ingest required** after schema migrations or `extract_project_name` changes — unchanged files are skipped otherwise. Use `POST /api/refresh?force=true` or delete `ingest_meta` rows manually.
 - **Project name resolution** uses filesystem greedy-match: `C--Users-weaverjc-Projects-march-madness` → resolves by checking real directories on disk, so project names only resolve correctly on the machine where the paths exist.
 - **Schema migration** is handled automatically by `_migrate_db()` in `ingest.py` via `PRAGMA table_info` + `ALTER TABLE`. New columns default to 0/empty for pre-migration rows.
+- **Multi-machine calibration**: The "Other / External" band in cumulative charts requires ~5 minutes of `quota_snapshots` data to activate. Until then, the chart falls back to attributing all quota usage to local projects. Calibration derives `cost_per_pct` via weighted median of snapshot deltas — it self-corrects retroactively for the full window once enough observations exist.
+- **Auto-start**: Registered in Windows Task Scheduler as `ClaudeUsageDashboard`. To re-register on a new machine, run `powershell -ExecutionPolicy Bypass -File scripts\register-task.ps1`.
 
 ## API Endpoints
 

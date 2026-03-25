@@ -317,7 +317,8 @@ function _movingAverage(arr, halfWin) {
 }
 
 function buildWindowChart(data, canvasId, maHalf) {
-  const { window_start, window_end, quota_pct, bucket_minutes, buckets, value_type } = data;
+  const { window_start, window_end, quota_pct, bucket_minutes, buckets, value_type,
+          calibrated, cost_per_pct, cost_buckets } = data;
 
   // Generate all time labels for the window
   const startMs = new Date(window_start).getTime();
@@ -374,15 +375,36 @@ function buildWindowChart(data, canvasId, maHalf) {
   };
 
   function groupColor(g, i) {
+    if (g === 'Other') return 'rgba(120, 120, 130, 0.7)';
     if (windowStack === 'token_type' || windowStack === 'none') return tokenTypeColors[g] || STACK_PALETTE[i % STACK_PALETTE.length];
     return STACK_PALETTE[i % STACK_PALETTE.length];
   }
 
   let datasets;
+  let localNorm = null; // corrected norm when calibration data is available
 
   if (isCumulative) {
-    // Running sum per group, normalized to quota_pct %; truncated at nowIndex
-    const norm = totalTokensInWindow > 0 ? quota_pct / totalTokensInWindow : 0;
+    // Determine effective normalization factor (local quota % per token)
+    let effectiveNorm = totalTokensInWindow > 0 ? quota_pct / totalTokensInWindow : 0;
+    if (calibrated && cost_per_pct > 0 && cost_buckets && cost_buckets.length > 0) {
+      const costLookup = {};
+      for (const cb of cost_buckets) {
+        const k = new Date(cb.time).getTime();
+        costLookup[k] = (costLookup[k] || 0) + cb.cost;
+      }
+      let runningCost = 0;
+      for (let i = 0; i <= nowIndex && i < allTimes.length; i++) {
+        runningCost += (costLookup[allTimes[i]] || 0);
+      }
+      const localPctTotal = runningCost / cost_per_pct;
+      if (totalTokensInWindow > 0 && localPctTotal > 0) {
+        localNorm = localPctTotal / totalTokensInWindow;
+        effectiveNorm = localNorm;
+      }
+    }
+
+    // Running sum per group, normalized to local quota contribution; truncated at nowIndex
+    const norm = effectiveNorm;
     datasets = groupOrder.map((g, i) => {
       const color = groupColor(g, i);
       let running = 0;
@@ -401,6 +423,31 @@ function buildWindowChart(data, canvasId, maHalf) {
         pointRadius: 0,
       };
     });
+
+    // "Other / External" band: gap between total quota curve and local cumulative
+    if (localNorm && stacked) {
+      let runningLocal = 0;
+      const localCumData = allTimes.map((_, idx) => {
+        runningLocal += groupOrder.reduce((s, g) => s + rawByGroup[g][idx], 0);
+        return idx <= nowIndex ? runningLocal * localNorm : null;
+      });
+      const otherData = allTimes.map((_, i) => {
+        if (i > nowIndex || nowIndex <= 0) return null;
+        const totalAtBucket = (i / nowIndex) * quota_pct;
+        return Math.max(0, totalAtBucket - (localCumData[i] || 0));
+      });
+      datasets.push({
+        label: 'Other',
+        data: otherData,
+        backgroundColor: 'rgba(120, 120, 130, 0.25)',
+        borderColor: 'rgba(120, 120, 130, 0.5)',
+        borderWidth: 1,
+        fill: '-1',
+        tension: 0.3,
+        pointRadius: 0,
+      });
+    }
+
     // Reference line: linear 0% → 100% across window
     const refData = allTimes.map((t, i) => (i / (allTimes.length - 1 || 1)) * 100);
     datasets.push({
@@ -437,12 +484,17 @@ function buildWindowChart(data, canvasId, maHalf) {
   // ── EMA Projection ───────────────────────────────────────────
   // Aggregate total across all groups for EMA input
   const aggRaw = allTimes.map((_, i) => groupOrder.reduce((s, g) => s + rawByGroup[g][i], 0));
-  const norm = totalTokensInWindow > 0 ? quota_pct / totalTokensInWindow : 0;
+  const emaNorm = localNorm || (totalTokensInWindow > 0 ? quota_pct / totalTokensInWindow : 0);
 
   let emaInput;
   if (isCumulative) {
-    let running = 0;
-    emaInput = aggRaw.map(v => { running += v; return running * norm; });
+    if (localNorm && nowIndex > 0) {
+      // When calibrated: EMA input is the total quota curve (local + other), not just local
+      emaInput = allTimes.map((_, i) => i <= nowIndex ? (i / nowIndex) * quota_pct : null);
+    } else {
+      let running = 0;
+      emaInput = aggRaw.map(v => { running += v; return running * emaNorm; });
+    }
   } else {
     emaInput = _movingAverage(aggRaw.map(v => v / bucket_minutes), maHalf);
   }

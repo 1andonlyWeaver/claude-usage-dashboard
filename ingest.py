@@ -74,6 +74,14 @@ def init_db(conn):
             file_size INTEGER,
             last_modified REAL
         );
+
+        CREATE TABLE IF NOT EXISTS quota_snapshots (
+            id INTEGER PRIMARY KEY,
+            timestamp TEXT NOT NULL,
+            five_hour_pct REAL NOT NULL DEFAULT 0,
+            seven_day_pct REAL NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_qs_timestamp ON quota_snapshots(timestamp);
     """)
     _migrate_db(conn)
     conn.commit()

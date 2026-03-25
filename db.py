@@ -320,6 +320,117 @@ def window_tokens(window_start: str, window_end: str, bucket_minutes: int,
     return [{'time': r['time'], 'group': r['grp'], 'tokens': r['tokens'] or 0} for r in rows]
 
 
+def _cost_sql_expr() -> str:
+    """Return a SQL CASE expression computing per-row cost from token columns and model."""
+    cases = []
+    for model, (inp, out, cc_mult, cr_mult) in MODEL_PRICING.items():
+        cases.append(
+            f"WHEN model = '{model}' THEN "
+            f"(input_tokens / 1000000.0 * {inp}) + "
+            f"(cache_creation_tokens / 1000000.0 * {inp} * {cc_mult}) + "
+            f"(cache_read_tokens / 1000000.0 * {inp} * {cr_mult}) + "
+            f"(output_tokens / 1000000.0 * {out})"
+        )
+    default_inp, default_out, default_cc, default_cr = DEFAULT_PRICING
+    default_case = (
+        f"(input_tokens / 1000000.0 * {default_inp}) + "
+        f"(cache_creation_tokens / 1000000.0 * {default_inp} * {default_cc}) + "
+        f"(cache_read_tokens / 1000000.0 * {default_inp} * {default_cr}) + "
+        f"(output_tokens / 1000000.0 * {default_out})"
+    )
+    return "CASE " + " ".join(cases) + f" ELSE {default_case} END"
+
+
+def _weighted_median(values: list, weights: list) -> float:
+    """Compute weighted median of values with corresponding weights."""
+    pairs = sorted(zip(values, weights))
+    total = sum(weights)
+    cumulative = 0.0
+    for val, w in pairs:
+        cumulative += w
+        if cumulative >= total / 2:
+            return val
+    return pairs[-1][0] if pairs else 0.0
+
+
+def calibrate_cost_per_pct(window_start: str, window_end: str, window_type: str) -> dict:
+    """Derive cost_per_pct calibration from quota snapshot deltas vs local cost deltas.
+
+    Args:
+        window_start: Local-time ISO string
+        window_end: Local-time ISO string
+        window_type: '5h' or '7d' — determines which pct column to use
+
+    Returns:
+        {"calibrated": bool, "cost_per_pct": float|None, "observations": int}
+    """
+    pct_col = "five_hour_pct" if window_type == "5h" else "seven_day_pct"
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            f"SELECT timestamp, {pct_col} as pct FROM quota_snapshots "
+            "WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp",
+            (window_start, window_end),
+        ).fetchall()
+    except Exception:
+        conn.close()
+        return {"calibrated": False, "cost_per_pct": None, "observations": 0}
+
+    cost_expr = _cost_sql_expr()
+    observations = []
+    for i in range(len(rows) - 1):
+        t1, p1 = rows[i]["timestamp"], rows[i]["pct"]
+        t2, p2 = rows[i + 1]["timestamp"], rows[i + 1]["pct"]
+        delta_pct = p2 - p1
+        if delta_pct <= 0.1:  # skip noise, resets, and quota decrements
+            continue
+        result = conn.execute(
+            f"SELECT SUM({cost_expr}) as cost FROM messages WHERE timestamp >= ? AND timestamp < ?",
+            (t1, t2),
+        ).fetchone()
+        local_cost = result["cost"] or 0.0
+        if local_cost <= 0:
+            continue
+        observations.append((local_cost / delta_pct, delta_pct))
+
+    conn.close()
+
+    if len(observations) < 5:
+        return {"calibrated": False, "cost_per_pct": None, "observations": len(observations)}
+
+    values = [o[0] for o in observations]
+    weights = [o[1] for o in observations]
+    return {
+        "calibrated": True,
+        "cost_per_pct": _weighted_median(values, weights),
+        "observations": len(observations),
+    }
+
+
+def window_cost_buckets(window_start: str, window_end: str, bucket_minutes: int) -> list:
+    """Return total local cost per time bucket within a window.
+
+    Returns list of {time, cost} dicts.
+    """
+    conn = get_conn()
+    if bucket_minutes == 60:
+        bucket_expr = "strftime('%Y-%m-%dT%H:00', timestamp)"
+    else:
+        bucket_expr = (
+            f"strftime('%Y-%m-%dT%H:', timestamp) || "
+            f"printf('%02d', (CAST(strftime('%M', timestamp) AS INTEGER) / {bucket_minutes}) * {bucket_minutes})"
+        )
+    cost_expr = _cost_sql_expr()
+    rows = conn.execute(
+        f"SELECT {bucket_expr} as time, SUM({cost_expr}) as cost "
+        "FROM messages WHERE timestamp >= ? AND timestamp < ? "
+        "GROUP BY time ORDER BY time",
+        (window_start, window_end),
+    ).fetchall()
+    conn.close()
+    return [{"time": r["time"], "cost": r["cost"] or 0.0} for r in rows]
+
+
 def entrypoint_stats(days: int = 30) -> dict:
     """Return counts of sessions by entrypoint."""
     conn = get_conn()

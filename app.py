@@ -46,6 +46,32 @@ _usage_cache: dict = {
     "fail_count": 0,     # consecutive failure count for exponential backoff
 }
 
+# Throttle for quota snapshot writes (max 1 per 60 seconds)
+_last_snapshot_time = 0.0
+
+
+def _maybe_write_snapshot(five_pct: float, seven_pct: float) -> None:
+    """Write a quota snapshot row if 60s have elapsed since the last write."""
+    global _last_snapshot_time
+    now = time.monotonic()
+    if now - _last_snapshot_time < 60:
+        return
+    _last_snapshot_time = now
+    try:
+        ts = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+        cutoff = (datetime.now() - timedelta(days=8)).strftime('%Y-%m-%dT%H:%M:%S')
+        conn = db.get_conn()
+        conn.execute(
+            "INSERT INTO quota_snapshots (timestamp, five_hour_pct, seven_day_pct) VALUES (?, ?, ?)",
+            (ts, five_pct, seven_pct),
+        )
+        conn.execute("DELETE FROM quota_snapshots WHERE timestamp < ?", (cutoff,))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 # Seed in-memory cache from disk on startup so restarts don't lose last known quota
 try:
     _saved = json.loads(QUOTA_CACHE_FILE.read_text())
@@ -173,6 +199,7 @@ async def _get_usage_data() -> dict:
             QUOTA_CACHE_FILE.write_text(json.dumps({"data": parsed, "time": time.time()}))
         except Exception:
             pass
+        _maybe_write_snapshot(parsed["five_hour_pct"], parsed["seven_day_pct"])
         return parsed
     else:
         # Exponential backoff: double the wait per consecutive failure, capped at CACHE_MAX_RETRY
@@ -332,6 +359,11 @@ async def window(
 
     buckets = db.window_tokens(ws, we, bucket_minutes, group_by_param)
 
+    calibration = db.calibrate_cost_per_pct(ws, we, type)
+    cost_buckets = None
+    if calibration["calibrated"] and group_by_param != "model":
+        cost_buckets = db.window_cost_buckets(ws, we, bucket_minutes)
+
     return {
         "window_start": ws,
         "window_end": we,
@@ -339,6 +371,9 @@ async def window(
         "bucket_minutes": bucket_minutes,
         "buckets": buckets,
         "value_type": "cost" if group_by_param == "model" else "tokens",
+        "calibrated": calibration["calibrated"],
+        "cost_per_pct": calibration.get("cost_per_pct"),
+        "cost_buckets": cost_buckets,
     }
 
 
