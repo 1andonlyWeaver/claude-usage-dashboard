@@ -400,8 +400,7 @@ function _movingAverage(arr, halfWin) {
 }
 
 function buildWindowChart(data, canvasId, maHalf) {
-  const { window_start, window_end, quota_pct, bucket_minutes, buckets, value_type,
-          calibrated, other_buckets } = data;
+  const { window_start, window_end, quota_pct, bucket_minutes, buckets, value_type } = data;
 
   // Generate all time labels for the window
   const startMs = new Date(window_start).getTime();
@@ -458,7 +457,6 @@ function buildWindowChart(data, canvasId, maHalf) {
   };
 
   function groupColor(g, i) {
-    if (g === 'Other') return 'rgba(120, 120, 130, 0.7)';
     if (windowStack === 'token_type' || windowStack === 'none') return tokenTypeColors[g] || STACK_PALETTE[i % STACK_PALETTE.length];
     return STACK_PALETTE[i % STACK_PALETTE.length];
   }
@@ -495,34 +493,6 @@ function buildWindowChart(data, canvasId, maHalf) {
         pointRadius: 0,
       };
     });
-
-    // "Other / External" band: backend-computed series using snapshot interpolation
-    if (other_buckets && other_buckets.length > 0 && stacked) {
-      // Build a lookup from bucket time string → other pct
-      const otherLookup = {};
-      for (const ob of other_buckets) {
-        otherLookup[ob.time] = ob.pct;
-      }
-      // Map to chart time axis; null for buckets outside snapshot coverage
-      const otherData = allTimes.map((t, i) => {
-        if (i > nowIndex) return null;
-        // Match the backend's local-time bucket format
-        const d = new Date(t);
-        const localStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}T${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
-        return localStr in otherLookup ? otherLookup[localStr] : null;
-      });
-      datasets.push({
-        label: 'Other',
-        data: otherData,
-        backgroundColor: 'rgba(120, 120, 130, 0.25)',
-        borderColor: 'rgba(120, 120, 130, 0.5)',
-        borderWidth: 1,
-        fill: '-1',
-        tension: 0.3,
-        pointRadius: 0,
-        spanGaps: false,
-      });
-    }
 
     // Reference line: linear 0% → 100% across window
     const refData = allTimes.map((t, i) => (i / (allTimes.length - 1 || 1)) * 100);

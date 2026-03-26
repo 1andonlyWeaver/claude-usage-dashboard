@@ -41,7 +41,7 @@ logs/        dashboard.log — server output when run via Task Scheduler; not co
 
 **Ingest behavior**: On startup, a background thread runs ingest automatically if the DB is missing or empty. The `/api/refresh` endpoint triggers a full re-ingest. File metadata (`ingest_meta` table) is used to skip unchanged files.
 
-**Quota source**: Fetched from the Anthropic OAuth usage API (`https://api.anthropic.com/api/oauth/usage`) using the token in `~/.claude/.credentials.json`. Response is cached 180s in-memory and on disk at `data/quota_cache.json`. Frontend polls `/api/quota` every 5 seconds; snapshots are written to `quota_snapshots` every 60s for calibration.
+**Quota source**: Fetched from the Anthropic OAuth usage API (`https://api.anthropic.com/api/oauth/usage`) using the token in `~/.claude/.credentials.json`. Response is cached 360s in-memory and on disk at `data/quota_cache.json`. Frontend polls `/api/quota` every 5 seconds.
 
 ## Key Paths (Runtime)
 
@@ -63,8 +63,6 @@ messages (id, msg_id UNIQUE, timestamp, date, hour, day_of_week,
           web_search_count, web_fetch_count)
 
 ingest_meta (file_path PRIMARY KEY, file_size, last_modified)
-
-quota_snapshots (id, timestamp, five_hour_pct, seven_day_pct)
 ```
 
 `timestamp` stores **local time** (no timezone). All window/range queries use local-time boundaries to match.
@@ -83,13 +81,12 @@ When updating pricing, change it in **both** `db.py` and `ingest.py`.
 - **Force re-ingest required** after schema migrations or `extract_project_name` changes — unchanged files are skipped otherwise. Use `POST /api/refresh?force=true` or delete `ingest_meta` rows manually.
 - **Project name resolution** uses filesystem greedy-match: `C--Users-weaverjc-Projects-march-madness` → resolves by checking real directories on disk, so project names only resolve correctly on the machine where the paths exist.
 - **Schema migration** is handled automatically by `_migrate_db()` in `ingest.py` via `PRAGMA table_info` + `ALTER TABLE`. New columns default to 0/empty for pre-migration rows.
-- **Multi-machine calibration**: The "Other / External" band in cumulative charts requires ~3 minutes of `quota_snapshots` data (≥3 valid delta observations with Δ≥0.5%) to activate. The band is computed backend-side using snapshot interpolation rather than linear interpolation, and only covers the period with snapshot data. Calibration uses a recency-weighted median of `cost_per_pct` (dollars per quota percent), anchored to the live API's current quota value.
 - **Auto-start**: Registered in Windows Task Scheduler as `ClaudeUsageDashboard`. To re-register on a new machine, run `powershell -ExecutionPolicy Bypass -File scripts\register-task.ps1`.
 
 ## API Endpoints
 
 `/api/quota`, `/api/ingest-status`, `/api/refresh` (POST), `/api/daily`, `/api/projects`, `/api/models`, `/api/heatmap`, `/api/sessions`, `/api/session/{id}`, `/api/rate`, `/api/cost`, `/api/stats`, `/api/window`
 
-`/api/window?type=5h|7d&group_by=none|token_type|project|model` — token buckets within the current quota window (5-min or 60-min buckets). Response includes `other_buckets` (list of `{time, pct}`) when calibration is active — this is the backend-computed "Other/External" series.
+`/api/window?type=5h|7d&group_by=none|token_type|project|model` — token buckets within the current quota window (5-min or 60-min buckets).
 
 `/api/refresh?force=true` — clears `ingest_meta` and re-processes all files. Use after schema migrations or project name changes.

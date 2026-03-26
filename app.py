@@ -23,7 +23,7 @@ CREDENTIALS_FILE = Path.home() / ".claude" / ".credentials.json"
 
 USAGE_API_URL = "https://api.anthropic.com/api/oauth/usage"
 USAGE_API_BETA_HEADER = "oauth-2025-04-20"
-CACHE_MAX_AGE = 180       # seconds before re-fetching
+CACHE_MAX_AGE = 360       # seconds before re-fetching
 CACHE_MIN_RETRY = 300     # minimum seconds between failed attempts (5 min)
 CACHE_MAX_RETRY = 3600    # maximum retry backoff (1 hour)
 QUOTA_CACHE_FILE = Path(__file__).parent / "data" / "quota_cache.json"
@@ -45,32 +45,7 @@ _usage_cache: dict = {
     "error": None,       # last error string if data is None
     "fail_count": 0,     # consecutive failure count for exponential backoff
 }
-
-# Throttle for quota snapshot writes (max 1 per 60 seconds)
-_last_snapshot_time = 0.0
-
-
-def _maybe_write_snapshot(five_pct: float, seven_pct: float) -> None:
-    """Write a quota snapshot row if 60s have elapsed since the last write."""
-    global _last_snapshot_time
-    now = time.monotonic()
-    if now - _last_snapshot_time < 60:
-        return
-    _last_snapshot_time = now
-    try:
-        ts = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
-        cutoff = (datetime.now() - timedelta(days=8)).strftime('%Y-%m-%dT%H:%M:%S')
-        conn = db.get_conn()
-        conn.execute(
-            "INSERT INTO quota_snapshots (timestamp, five_hour_pct, seven_day_pct) VALUES (?, ?, ?)",
-            (ts, five_pct, seven_pct),
-        )
-        conn.execute("DELETE FROM quota_snapshots WHERE timestamp < ?", (cutoff,))
-        conn.commit()
-        conn.close()
-    except Exception:
-        pass
-
+_fetch_lock = asyncio.Lock()  # prevents concurrent API calls when cache is stale
 
 # Seed in-memory cache from disk on startup so restarts don't lose last known quota
 try:
@@ -147,19 +122,28 @@ def _fetch_usage_sync() -> dict:
             body = resp.read().decode("utf-8")
             data = json.loads(body)
             rate_headers = {k: resp.headers[k] for k in resp.headers if 'ratelimit' in k.lower() or 'retry-after' in k.lower()}
+            ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             if rate_headers:
-                print(f"[quota] rate-limit headers: {rate_headers}")
+                print(f"[quota {ts}] OK - rate headers: {rate_headers}")
+            else:
+                print(f"[quota {ts}] OK - no rate-limit headers in response")
             return {"ok": True, "data": data, "retry_after": None, "rate_headers": rate_headers}
     except urllib.error.HTTPError as e:
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         if e.code == 429:
+            all_headers = {k: e.headers[k] for k in e.headers}
             retry_after_raw = e.headers.get("Retry-After", "")
             try:
                 retry_secs = int(retry_after_raw)
             except (ValueError, TypeError):
                 retry_secs = 300
+            print(f"[quota {ts}] 429 - Retry-After: {retry_after_raw!r}, all headers: {all_headers}")
             return {"ok": False, "error": "rate-limited", "retry_after": retry_secs}
+        print(f"[quota {ts}] HTTP {e.code}")
         return {"ok": False, "error": f"http-{e.code}", "retry_after": None}
     except Exception as ex:
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f"[quota {ts}] exception: {ex}")
         return {"ok": False, "error": str(ex), "retry_after": None}
 
 
@@ -184,49 +168,64 @@ async def _get_usage_data() -> dict:
         return {"error": cache["error"] or "rate-limited",
                 "five_hour_pct": 0, "seven_day_pct": 0}
 
-    # Fetch in a thread so we don't block the event loop
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, _fetch_usage_sync)
+    # Serialize concurrent fetches: only one caller hits the API at a time;
+    # others wait on the lock and then re-check the cache (which will be fresh).
+    async with _fetch_lock:
+        # Re-check after acquiring lock — another waiter may have just fetched
+        now = time.monotonic()
+        if cache["data"] and (now - cache["fetched_at"]) < CACHE_MAX_AGE:
+            return cache["data"]
+        if now < cache["retry_after"]:
+            if cache["data"]:
+                return cache["data"]
+            return {"error": cache["error"] or "rate-limited",
+                    "five_hour_pct": 0, "seven_day_pct": 0}
 
-    if result["ok"]:
-        raw = result["data"]
-        five = raw.get("five_hour") or {}
-        seven = raw.get("seven_day") or {}
-        extra = raw.get("extra_usage") or {}
-        parsed = {
-            "five_hour_pct": five.get("utilization", 0),
-            "five_hour_resets_at": five.get("resets_at"),
-            "seven_day_pct": seven.get("utilization", 0),
-            "seven_day_resets_at": seven.get("resets_at"),
-            "extra_usage_enabled": extra.get("is_enabled", False),
-            "extra_usage_limit": extra.get("monthly_limit"),
-            "extra_usage_used": extra.get("used_credits"),
-            "extra_usage_utilization": extra.get("utilization"),
-        }
-        cache["data"] = parsed
-        cache["fetched_at"] = now
-        cache["retry_after"] = 0.0
-        cache["error"] = None
-        cache["fail_count"] = 0
-        try:
-            QUOTA_CACHE_FILE.write_text(json.dumps({"data": parsed, "time": time.time()}))
-        except Exception:
-            pass
-        _maybe_write_snapshot(parsed["five_hour_pct"], parsed["seven_day_pct"])
-        return parsed
-    else:
-        # Exponential backoff: double the wait per consecutive failure, capped at CACHE_MAX_RETRY
-        cache["fail_count"] = cache.get("fail_count", 0) + 1
-        api_retry = result.get("retry_after") or 0
-        backoff = min(CACHE_MIN_RETRY * (2 ** (cache["fail_count"] - 1)), CACHE_MAX_RETRY)
-        retry_secs = max(api_retry, backoff)
-        cache["retry_after"] = now + retry_secs
-        print(f"[quota] fetch failed ({result['error']}), fail #{cache['fail_count']}, retry in {retry_secs}s")
-        cache["error"] = result["error"]
-        # Return stale data if available, otherwise an error shell
-        if cache["data"]:
-            return {**cache["data"], "error": result["error"]}
-        return {"error": result["error"], "five_hour_pct": 0, "seven_day_pct": 0}
+        # Fetch in a thread so we don't block the event loop
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _fetch_usage_sync)
+
+        if result["ok"]:
+            raw = result["data"]
+            five = raw.get("five_hour") or {}
+            seven = raw.get("seven_day") or {}
+            extra = raw.get("extra_usage") or {}
+            parsed = {
+                "five_hour_pct": five.get("utilization", 0),
+                "five_hour_resets_at": five.get("resets_at"),
+                "seven_day_pct": seven.get("utilization", 0),
+                "seven_day_resets_at": seven.get("resets_at"),
+                "extra_usage_enabled": extra.get("is_enabled", False),
+                "extra_usage_limit": extra.get("monthly_limit"),
+                "extra_usage_used": extra.get("used_credits"),
+                "extra_usage_utilization": extra.get("utilization"),
+            }
+            cache["data"] = parsed
+            cache["fetched_at"] = now
+            cache["retry_after"] = 0.0
+            cache["error"] = None
+            cache["fail_count"] = 0
+            try:
+                QUOTA_CACHE_FILE.write_text(json.dumps({"data": parsed, "time": time.time()}))
+            except Exception:
+                pass
+            _maybe_write_snapshot(  # write quota snapshot for calibration
+                parsed["five_hour_pct"], parsed["seven_day_pct"]
+            )
+            return parsed
+        else:
+            # Exponential backoff: double the wait per consecutive failure, capped at CACHE_MAX_RETRY
+            cache["fail_count"] = cache.get("fail_count", 0) + 1
+            api_retry = result.get("retry_after") or 0
+            backoff = min(CACHE_MIN_RETRY * (2 ** (cache["fail_count"] - 1)), CACHE_MAX_RETRY)
+            retry_secs = max(api_retry, backoff)
+            cache["retry_after"] = now + retry_secs
+            print(f"[quota {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] fetch failed ({result['error']}), fail #{cache['fail_count']}, retry in {retry_secs}s")
+            cache["error"] = result["error"]
+            # Return stale data if available, otherwise an error shell
+            if cache["data"]:
+                return {**cache["data"], "error": result["error"]}
+            return {"error": result["error"], "five_hour_pct": 0, "seven_day_pct": 0}
 
 
 @app.on_event("startup")
@@ -346,7 +345,7 @@ async def window(
             # Merge cached resets_at and pct values the live response is missing
             for key in ("five_hour_resets_at", "seven_day_resets_at",
                         "five_hour_pct", "seven_day_pct"):
-                if key not in quota or quota[key] is None:
+                if not quota.get(key):
                     quota[key] = disk.get(key)
         except Exception:
             pass
@@ -381,19 +380,18 @@ async def window(
         quota_pct = quota.get(pct_key) or 0
 
     bucket_minutes = 5 if type == "5h" else 60
+
+    # Snap window_start to the nearest bucket boundary so the frontend's generated
+    # time axis aligns with SQLite's bucket timestamps (which floor to bucket edges).
+    window_start = window_start.replace(second=0, microsecond=0)
+    window_start = window_start.replace(minute=(window_start.minute // bucket_minutes) * bucket_minutes)
+
     group_by_param = None if group_by == "none" else group_by
 
     ws = window_start.strftime('%Y-%m-%dT%H:%M:%S')
     we = window_end.strftime('%Y-%m-%dT%H:%M:%S')
 
     buckets = db.window_tokens(ws, we, bucket_minutes, group_by_param)
-
-    calibration = db.calibrate_cost_per_pct(ws, we, type)
-    other_buckets = None
-    if calibration["calibrated"] and calibration.get("cost_per_pct"):
-        other_buckets = db.compute_other_series(
-            ws, we, type, bucket_minutes, calibration["cost_per_pct"], quota_pct
-        )
 
     return {
         "window_start": ws,
@@ -402,8 +400,6 @@ async def window(
         "bucket_minutes": bucket_minutes,
         "buckets": buckets,
         "value_type": "cost" if group_by_param == "model" else "tokens",
-        "calibrated": calibration["calibrated"],
-        "other_buckets": other_buckets,
     }
 
 
