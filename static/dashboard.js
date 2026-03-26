@@ -255,8 +255,8 @@ function formatCountdown(date) {
   const h = Math.floor(m / 60);
   const d = Math.floor(h / 24);
   if (d >= 1) return `in ${d}d ${h % 24}h`;
-  if (h >= 2) return `in ${h}h ${m % 60}m`;
-  if (ms > 120000) return `in ${m}m`;
+  if (h >= 1) return `in ${h}h ${m % 60}m`;
+  if (m >= 1) return `in ${m}m`;
   return `in ${m}m ${s % 60}s`;
 }
 

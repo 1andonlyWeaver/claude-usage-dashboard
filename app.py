@@ -58,6 +58,32 @@ except Exception:
     pass
 
 
+# Throttle for quota snapshot writes (max 1 per 60 seconds)
+_last_snapshot_time = 0.0
+
+
+def _maybe_write_snapshot(five_pct: float, seven_pct: float) -> None:
+    """Write a quota snapshot row if 60s have elapsed since the last write."""
+    global _last_snapshot_time
+    now = time.monotonic()
+    if now - _last_snapshot_time < 60:
+        return
+    _last_snapshot_time = now
+    try:
+        ts = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+        cutoff = (datetime.now() - timedelta(days=8)).strftime('%Y-%m-%dT%H:%M:%S')
+        conn = db.get_conn()
+        conn.execute(
+            "INSERT INTO quota_snapshots (timestamp, five_hour_pct, seven_day_pct) VALUES (?, ?, ?)",
+            (ts, five_pct, seven_pct),
+        )
+        conn.execute("DELETE FROM quota_snapshots WHERE timestamp < ?", (cutoff,))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 def _run_ingest_background(force: bool = False):
     from ingest import run_ingest
     global _ingest_status
