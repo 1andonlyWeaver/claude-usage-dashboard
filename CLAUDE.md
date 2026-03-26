@@ -83,13 +83,13 @@ When updating pricing, change it in **both** `db.py` and `ingest.py`.
 - **Force re-ingest required** after schema migrations or `extract_project_name` changes — unchanged files are skipped otherwise. Use `POST /api/refresh?force=true` or delete `ingest_meta` rows manually.
 - **Project name resolution** uses filesystem greedy-match: `C--Users-weaverjc-Projects-march-madness` → resolves by checking real directories on disk, so project names only resolve correctly on the machine where the paths exist.
 - **Schema migration** is handled automatically by `_migrate_db()` in `ingest.py` via `PRAGMA table_info` + `ALTER TABLE`. New columns default to 0/empty for pre-migration rows.
-- **Multi-machine calibration**: The "Other / External" band in cumulative charts requires ~5 minutes of `quota_snapshots` data to activate. Until then, the chart falls back to attributing all quota usage to local projects. Calibration derives `cost_per_pct` via weighted median of snapshot deltas — it self-corrects retroactively for the full window once enough observations exist.
+- **Multi-machine calibration**: The "Other / External" band in cumulative charts requires ~3 minutes of `quota_snapshots` data (≥3 valid delta observations with Δ≥0.5%) to activate. The band is computed backend-side using snapshot interpolation rather than linear interpolation, and only covers the period with snapshot data. Calibration uses a recency-weighted median of `cost_per_pct` (dollars per quota percent), anchored to the live API's current quota value.
 - **Auto-start**: Registered in Windows Task Scheduler as `ClaudeUsageDashboard`. To re-register on a new machine, run `powershell -ExecutionPolicy Bypass -File scripts\register-task.ps1`.
 
 ## API Endpoints
 
 `/api/quota`, `/api/ingest-status`, `/api/refresh` (POST), `/api/daily`, `/api/projects`, `/api/models`, `/api/heatmap`, `/api/sessions`, `/api/session/{id}`, `/api/rate`, `/api/cost`, `/api/stats`, `/api/window`
 
-`/api/window?type=5h|7d&group_by=none|token_type|project|model` — token buckets within the current quota window (5-min or 60-min buckets).
+`/api/window?type=5h|7d&group_by=none|token_type|project|model` — token buckets within the current quota window (5-min or 60-min buckets). Response includes `other_buckets` (list of `{time, pct}`) when calibration is active — this is the backend-computed "Other/External" series.
 
 `/api/refresh?force=true` — clears `ingest_meta` and re-processes all files. Use after schema migrations or project name changes.

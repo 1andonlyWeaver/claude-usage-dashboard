@@ -401,7 +401,7 @@ function _movingAverage(arr, halfWin) {
 
 function buildWindowChart(data, canvasId, maHalf) {
   const { window_start, window_end, quota_pct, bucket_minutes, buckets, value_type,
-          calibrated, cost_per_pct, cost_buckets } = data;
+          calibrated, other_buckets } = data;
 
   // Generate all time labels for the window
   const startMs = new Date(window_start).getTime();
@@ -464,7 +464,6 @@ function buildWindowChart(data, canvasId, maHalf) {
   }
 
   let datasets;
-  let localNorm = null; // corrected norm when calibration data is available
   // When quota_pct is unavailable (API error), fall back to raw cumulative tokens
   const quotaAvailable = quota_pct > 0;
 
@@ -472,36 +471,11 @@ function buildWindowChart(data, canvasId, maHalf) {
     // Determine effective normalization factor (local quota % per token)
     // If quota_pct is 0 (API unreachable), use norm=1 so charts show raw token totals
     // instead of multiplying everything by zero and flatlining.
-    let effectiveNorm = (quotaAvailable && totalTokensInWindow > 0)
+    const effectiveNorm = (quotaAvailable && totalTokensInWindow > 0)
         ? quota_pct / totalTokensInWindow
         : (totalTokensInWindow > 0 ? 1 : 0);
-    if (calibrated && cost_per_pct > 0) {
-      let runningCost = 0;
-      if (cost_buckets && cost_buckets.length > 0) {
-        const costLookup = {};
-        for (const cb of cost_buckets) {
-          const k = new Date(cb.time).getTime();
-          costLookup[k] = (costLookup[k] || 0) + cb.cost;
-        }
-        for (let i = 0; i <= nowIndex && i < allTimes.length; i++) {
-          runningCost += (costLookup[allTimes[i]] || 0);
-        }
-      } else if (value_type === 'cost') {
-        // Model view: bucket values are already cost — use them directly
-        for (let i = 0; i <= nowIndex && i < allTimes.length; i++) {
-          runningCost += groupOrder.reduce((s, g) => s + rawByGroup[g][i], 0);
-        }
-      }
-      const localPctTotal = quotaAvailable
-        ? Math.min(runningCost / cost_per_pct, quota_pct)
-        : runningCost / cost_per_pct;
-      if (totalTokensInWindow > 0 && localPctTotal > 0) {
-        localNorm = localPctTotal / totalTokensInWindow;
-        effectiveNorm = localNorm;
-      }
-    }
 
-    // Running sum per group, normalized to local quota contribution; truncated at nowIndex
+    // Running sum per group, normalized to quota contribution; truncated at nowIndex
     const norm = effectiveNorm;
     datasets = groupOrder.map((g, i) => {
       const color = groupColor(g, i);
@@ -522,17 +496,20 @@ function buildWindowChart(data, canvasId, maHalf) {
       };
     });
 
-    // "Other / External" band: gap between total quota curve and local cumulative
-    if (localNorm && stacked) {
-      let runningLocal = 0;
-      const localCumData = allTimes.map((_, idx) => {
-        runningLocal += groupOrder.reduce((s, g) => s + rawByGroup[g][idx], 0);
-        return idx <= nowIndex ? runningLocal * localNorm : null;
-      });
-      const otherData = allTimes.map((_, i) => {
-        if (i > nowIndex || nowIndex <= 0) return null;
-        const totalAtBucket = (i / nowIndex) * quota_pct;
-        return Math.max(0, totalAtBucket - (localCumData[i] || 0));
+    // "Other / External" band: backend-computed series using snapshot interpolation
+    if (other_buckets && other_buckets.length > 0 && stacked) {
+      // Build a lookup from bucket time string → other pct
+      const otherLookup = {};
+      for (const ob of other_buckets) {
+        otherLookup[ob.time] = ob.pct;
+      }
+      // Map to chart time axis; null for buckets outside snapshot coverage
+      const otherData = allTimes.map((t, i) => {
+        if (i > nowIndex) return null;
+        // Match the backend's local-time bucket format
+        const d = new Date(t);
+        const localStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}T${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+        return localStr in otherLookup ? otherLookup[localStr] : null;
       });
       datasets.push({
         label: 'Other',
@@ -543,6 +520,7 @@ function buildWindowChart(data, canvasId, maHalf) {
         fill: '-1',
         tension: 0.3,
         pointRadius: 0,
+        spanGaps: false,
       });
     }
 
@@ -582,7 +560,7 @@ function buildWindowChart(data, canvasId, maHalf) {
   // ── EMA Projection ───────────────────────────────────────────
   // Aggregate total across all groups for EMA input
   const aggRaw = allTimes.map((_, i) => groupOrder.reduce((s, g) => s + rawByGroup[g][i], 0));
-  const emaNorm = localNorm || ((quotaAvailable && totalTokensInWindow > 0) ? quota_pct / totalTokensInWindow : (totalTokensInWindow > 0 ? 1 : 0));
+  const emaNorm = (quotaAvailable && totalTokensInWindow > 0) ? quota_pct / totalTokensInWindow : (totalTokensInWindow > 0 ? 1 : 0);
 
   let emaInput;
   if (isCumulative) {

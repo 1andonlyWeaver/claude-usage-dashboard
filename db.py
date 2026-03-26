@@ -377,12 +377,13 @@ def calibrate_cost_per_pct(window_start: str, window_end: str, window_type: str)
         return {"calibrated": False, "cost_per_pct": None, "observations": 0}
 
     cost_expr = _cost_sql_expr()
+    now = datetime.now()
     observations = []
     for i in range(len(rows) - 1):
         t1, p1 = rows[i]["timestamp"], rows[i]["pct"]
         t2, p2 = rows[i + 1]["timestamp"], rows[i + 1]["pct"]
         delta_pct = p2 - p1
-        if delta_pct <= 0.1:  # skip noise, resets, and quota decrements
+        if delta_pct <= 0.5:  # skip noise, resets, and quota decrements
             continue
         result = conn.execute(
             f"SELECT SUM({cost_expr}) as cost FROM messages WHERE timestamp >= ? AND timestamp < ?",
@@ -391,11 +392,17 @@ def calibrate_cost_per_pct(window_start: str, window_end: str, window_type: str)
         local_cost = result["cost"] or 0.0
         if local_cost <= 0:
             continue
-        observations.append((local_cost / delta_pct, delta_pct))
+        # Weight by delta_pct * recency (observations closer to now get higher weight)
+        try:
+            hours_ago = (now - datetime.fromisoformat(t2)).total_seconds() / 3600
+        except Exception:
+            hours_ago = 0.0
+        recency_weight = 1.0 / (1.0 + hours_ago)
+        observations.append((local_cost / delta_pct, delta_pct * recency_weight))
 
     conn.close()
 
-    if len(observations) < 5:
+    if len(observations) < 3:
         return {"calibrated": False, "cost_per_pct": None, "observations": len(observations)}
 
     values = [o[0] for o in observations]
@@ -429,6 +436,110 @@ def window_cost_buckets(window_start: str, window_end: str, bucket_minutes: int)
     ).fetchall()
     conn.close()
     return [{"time": r["time"], "cost": r["cost"] or 0.0} for r in rows]
+
+
+def compute_other_series(
+    window_start: str,
+    window_end: str,
+    window_type: str,
+    bucket_minutes: int,
+    cost_per_pct: float,
+    quota_pct: float,
+) -> list:
+    """Compute the 'Other/External' usage series using snapshot interpolation.
+
+    Returns a list of {time, pct} dicts representing the estimated external quota
+    usage at each bucket boundary. Only emits points within snapshot coverage;
+    buckets before the first snapshot (e.g. before server started) are omitted.
+
+    Args:
+        window_start: Local-time ISO string (window boundary)
+        window_end: Local-time ISO string (window boundary)
+        window_type: '5h' or '7d'
+        bucket_minutes: Bucket size in minutes
+        cost_per_pct: Dollars per quota percentage point (from calibration)
+        quota_pct: Current live quota percentage (anchors the final snapshot point)
+
+    Returns:
+        list of {"time": str, "pct": float}
+    """
+    pct_col = "five_hour_pct" if window_type == "5h" else "seven_day_pct"
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            f"SELECT timestamp, {pct_col} as pct FROM quota_snapshots "
+            "WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp",
+            (window_start, window_end),
+        ).fetchall()
+    except Exception:
+        conn.close()
+        return []
+
+    if len(rows) < 2:
+        conn.close()
+        return []
+
+    # Build snapshot series anchored to the live quota_pct at "now"
+    snap_times = [datetime.fromisoformat(r["timestamp"]) for r in rows]
+    snap_pcts = [r["pct"] for r in rows]
+    now = datetime.now()
+    snap_times.append(now)
+    snap_pcts.append(quota_pct)
+
+    first_snap = snap_times[0]
+    last_snap = snap_times[-1]
+
+    # Get local cost per bucket (only buckets with messages are present)
+    cost_buckets = window_cost_buckets(window_start, window_end, bucket_minutes)
+    cost_lookup = {cb["time"]: cb["cost"] for cb in cost_buckets}
+
+    # Generate all bucket start times across the window
+    ws_dt = datetime.fromisoformat(window_start)
+    we_dt = datetime.fromisoformat(window_end)
+    step = timedelta(minutes=bucket_minutes)
+
+    result = []
+    cumulative_cost = 0.0
+    bt = ws_dt
+    while bt < we_dt:
+        # Format bucket time to match window_cost_buckets output format
+        if bucket_minutes == 60:
+            bt_str = bt.strftime('%Y-%m-%dT%H:00')
+        else:
+            snapped_min = (bt.minute // bucket_minutes) * bucket_minutes
+            bt_str = bt.strftime('%Y-%m-%dT%H:') + f'{snapped_min:02d}'
+
+        cumulative_cost += cost_lookup.get(bt_str, 0.0)
+
+        # Only emit for buckets within snapshot coverage
+        if bt >= first_snap and bt <= last_snap:
+            # Linearly interpolate total quota % between surrounding snapshots
+            interp_pct = _interpolate_snapshot_pct(snap_times, snap_pcts, bt)
+            local_pct = cumulative_cost / cost_per_pct
+            other_pct = max(0.0, interp_pct - local_pct)
+            result.append({"time": bt_str, "pct": round(other_pct, 4)})
+
+        bt += step
+
+    conn.close()
+    return result
+
+
+def _interpolate_snapshot_pct(snap_times: list, snap_pcts: list, target: datetime) -> float:
+    """Linearly interpolate quota % at `target` time between snapshot data points."""
+    if target <= snap_times[0]:
+        return snap_pcts[0]
+    if target >= snap_times[-1]:
+        return snap_pcts[-1]
+    for i in range(len(snap_times) - 1):
+        t1, t2 = snap_times[i], snap_times[i + 1]
+        if t1 <= target <= t2:
+            span = (t2 - t1).total_seconds()
+            if span <= 0:
+                return snap_pcts[i]
+            frac = (target - t1).total_seconds() / span
+            return snap_pcts[i] + frac * (snap_pcts[i + 1] - snap_pcts[i])
+    return snap_pcts[-1]
 
 
 def entrypoint_stats(days: int = 30) -> dict:

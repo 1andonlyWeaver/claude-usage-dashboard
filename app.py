@@ -389,9 +389,11 @@ async def window(
     buckets = db.window_tokens(ws, we, bucket_minutes, group_by_param)
 
     calibration = db.calibrate_cost_per_pct(ws, we, type)
-    cost_buckets = None
-    if calibration["calibrated"] and group_by_param != "model":
-        cost_buckets = db.window_cost_buckets(ws, we, bucket_minutes)
+    other_buckets = None
+    if calibration["calibrated"] and calibration.get("cost_per_pct"):
+        other_buckets = db.compute_other_series(
+            ws, we, type, bucket_minutes, calibration["cost_per_pct"], quota_pct
+        )
 
     return {
         "window_start": ws,
@@ -401,8 +403,7 @@ async def window(
         "buckets": buckets,
         "value_type": "cost" if group_by_param == "model" else "tokens",
         "calibrated": calibration["calibrated"],
-        "cost_per_pct": calibration.get("cost_per_pct"),
-        "cost_buckets": cost_buckets,
+        "other_buckets": other_buckets,
     }
 
 
