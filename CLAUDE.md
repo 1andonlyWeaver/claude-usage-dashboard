@@ -76,6 +76,10 @@ ingest_meta (file_path PRIMARY KEY, file_size, last_modified)
 
 When updating pricing, change it in **both** `db.py` and `ingest.py`.
 
+## Server Restart
+
+Changes to `app.py`, `db.py`, or `ingest.py` require a server restart to take effect (FastAPI loads these once at startup). After making any such change, automatically flag that a restart is needed and offer to restart the server. The server runs on port 8080; the process can be identified via `netstat -ano | grep :8080` and killed by PID before relaunching with `conda activate claude-usage-dashboard && python app.py --port 8080`.
+
 ## Gotchas
 
 - **Force re-ingest required** after schema migrations or `extract_project_name` changes — unchanged files are skipped otherwise. Use `POST /api/refresh?force=true` or delete `ingest_meta` rows manually.

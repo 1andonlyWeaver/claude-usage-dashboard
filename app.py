@@ -355,9 +355,15 @@ async def window(
         try:
             resets_utc = datetime.fromisoformat(quota["five_hour_resets_at"])
             resets_local = resets_utc.astimezone().replace(tzinfo=None)
-            window_end = resets_local
-            window_start = resets_local - timedelta(hours=5)
             quota_pct = quota.get("five_hour_pct", 0)
+            period = timedelta(hours=5)
+            if resets_local <= now_local:
+                # Cached resets_at has already passed — advance to the current window
+                while resets_local <= now_local:
+                    resets_local += period
+                quota_pct = 0  # old pct belongs to the previous window
+            window_end = resets_local
+            window_start = resets_local - period
         except Exception:
             window_end = now_local
             window_start = now_local - timedelta(hours=5)
@@ -366,9 +372,15 @@ async def window(
         try:
             resets_utc = datetime.fromisoformat(quota["seven_day_resets_at"])
             resets_local = resets_utc.astimezone().replace(tzinfo=None)
-            window_end = resets_local
-            window_start = resets_local - timedelta(days=7)
             quota_pct = quota.get("seven_day_pct", 0)
+            period = timedelta(days=7)
+            if resets_local <= now_local:
+                # Cached resets_at has already passed — advance to the current window
+                while resets_local <= now_local:
+                    resets_local += period
+                quota_pct = 0  # old pct belongs to the previous window
+            window_end = resets_local
+            window_start = resets_local - period
         except Exception:
             window_end = now_local
             window_start = now_local - timedelta(days=7)
