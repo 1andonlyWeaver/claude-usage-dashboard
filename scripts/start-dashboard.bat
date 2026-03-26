@@ -1,10 +1,10 @@
 @echo off
-:: Start the Claude usage dashboard server.
+:: Start the Claude usage dashboard server in the background (no visible window).
 :: Intended to be run via Windows Task Scheduler at login.
 :: Logs are written to logs\dashboard.log in the repo directory.
 
 set REPO_DIR=%~dp0..
-set PYTHON=%USERPROFILE%\miniconda3\envs\claude-usage-dashboard\python.exe
+set PYTHONW=%USERPROFILE%\miniconda3\envs\claude-usage-dashboard\pythonw.exe
 set LOG_DIR=%REPO_DIR%\logs
 set LOG_FILE=%LOG_DIR%\dashboard.log
 
@@ -18,7 +18,7 @@ if %ERRORLEVEL% == 0 (
     exit /b 0
 )
 
-echo [%DATE% %TIME%] Starting dashboard server... >> "%LOG_FILE%"
+echo [%DATE% %TIME%] Starting dashboard server (detached)... >> "%LOG_FILE%"
 cd /d "%REPO_DIR%"
-"%PYTHON%" app.py --port 8080 >> "%LOG_FILE%" 2>&1
-echo [%DATE% %TIME%] Server exited with code %ERRORLEVEL%. >> "%LOG_FILE%"
+start "" /b "%PYTHONW%" app.py --port 8080
+echo [%DATE% %TIME%] Dashboard process launched. >> "%LOG_FILE%"

@@ -103,6 +103,19 @@ def _run_ingest_background(force: bool = False):
         _ingest_status["running"] = False
 
 
+def _periodic_ingest():
+    """Run an incremental ingest quietly in the background, then reschedule."""
+    from ingest import run_ingest
+    try:
+        if not _ingest_status.get("running"):
+            run_ingest(force=False)
+    except Exception:
+        pass
+    t = threading.Timer(90, _periodic_ingest)
+    t.daemon = True
+    t.start()
+
+
 def _read_oauth_token() -> str | None:
     """Extract the OAuth access token from ~/.claude/.credentials.json."""
     try:
@@ -218,13 +231,16 @@ async def _get_usage_data() -> dict:
 
 @app.on_event("startup")
 async def startup():
-    """Kick off ingest if DB is missing or stale."""
+    """Kick off ingest if DB is missing or stale, then schedule periodic ingest."""
     stats = db.db_stats()
     if not stats.get("exists") or stats.get("message_count", 0) == 0:
         thread = threading.Thread(target=_run_ingest_background, daemon=True)
         thread.start()
     else:
         _ingest_status["done"] = True
+    t = threading.Timer(90, _periodic_ingest)
+    t.daemon = True
+    t.start()
 
 
 @app.get("/")
@@ -391,8 +407,18 @@ async def window(
 
 
 if __name__ == "__main__":
+    import sys
     import uvicorn
     import argparse
+
+    # When launched via pythonw.exe, stdout/stderr are None — redirect to log file
+    if sys.stdout is None or sys.stderr is None:
+        log_dir = BASE_DIR / "logs"
+        log_dir.mkdir(exist_ok=True)
+        log_file = open(log_dir / "dashboard.log", "a", buffering=1)
+        sys.stdout = log_file
+        sys.stderr = log_file
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()

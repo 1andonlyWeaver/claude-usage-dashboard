@@ -22,6 +22,7 @@ Chart.defaults.font.family = "'DM Sans', sans-serif";
 // ─── State ───────────────────────────────────────────────────
 let chart5h = null, chart7d = null, projectChart = null, modelChart = null, sessionDetailChart = null;
 let currentSessionDays = 7;
+let _windowRefreshInterval = null;
 let rateData = null;
 let windowView = 'rate';    // 'rate' | 'cumulative'
 let windowStack = 'none';   // 'none' | 'token_type' | 'project' | 'model'
@@ -57,8 +58,9 @@ async function initAll() {
     loadCost(),
     loadRate(),
   ]);
-  // Auto-refresh window charts every 60s
-  setInterval(loadWindowCharts, 60000);
+  // Auto-refresh window charts every 60s (clear any prior interval to avoid stacking)
+  if (_windowRefreshInterval) clearInterval(_windowRefreshInterval);
+  _windowRefreshInterval = setInterval(loadWindowCharts, 60000);
 }
 
 // ─── Quota polling ───────────────────────────────────────────
