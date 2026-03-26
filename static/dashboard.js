@@ -25,6 +25,10 @@ let currentSessionDays = 7;
 let rateData = null;
 let windowView = 'rate';    // 'rate' | 'cumulative'
 let windowStack = 'none';   // 'none' | 'token_type' | 'project' | 'model'
+let chartFullscreen = null;
+let fsTab = '5h';            // '5h' | '7d'
+let fsView = 'rate';
+let fsStack = 'none';
 
 // Extended palette for project/model stacking
 const STACK_PALETTE = [
@@ -296,6 +300,77 @@ function setWindowStack(stack, btn) {
   loadWindowCharts();
 }
 
+// ─── Fullscreen chart overlay ─────────────────────────────────
+function _syncFsButtons() {
+  const tabMap = { '5h': 'fsTab5h', '7d': 'fsTab7d' };
+  const viewMap = { 'rate': 'fsViewRate', 'cumulative': 'fsViewCum' };
+  const stackMap = { 'none': 'fsStackNone', 'token_type': 'fsStackToken', 'project': 'fsStackProj', 'model': 'fsStackModel' };
+  document.querySelectorAll('.chart-fs-tabs .view-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.chart-fs-header .view-selector .view-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.chart-fs-header .stack-selector .stack-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById(tabMap[fsTab])?.classList.add('active');
+  document.getElementById(viewMap[fsView])?.classList.add('active');
+  document.getElementById(stackMap[fsStack])?.classList.add('active');
+}
+
+function openChartFullscreen(tab) {
+  fsTab = tab;
+  fsView = windowView;
+  fsStack = windowStack;
+  _syncFsButtons();
+  document.getElementById('chartFsOverlay').classList.add('open');
+  loadFullscreenChart();
+}
+
+function closeChartFullscreen() {
+  document.getElementById('chartFsOverlay').classList.remove('open');
+  if (chartFullscreen) { chartFullscreen.destroy(); chartFullscreen = null; }
+}
+
+function setFsTab(tab, btn) {
+  fsTab = tab;
+  document.querySelectorAll('.chart-fs-tabs .view-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  loadFullscreenChart();
+}
+
+function setFsView(view, btn) {
+  fsView = view;
+  document.querySelectorAll('.chart-fs-header .view-selector .view-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  loadFullscreenChart();
+}
+
+function setFsStack(stack, btn) {
+  fsStack = stack;
+  document.querySelectorAll('.chart-fs-header .stack-selector .stack-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  loadFullscreenChart();
+}
+
+async function loadFullscreenChart() {
+  try {
+    const gb = fsStack === 'none' ? 'none' : fsStack;
+    const data = await apiFetch('/api/window?type=' + fsTab + '&group_by=' + gb);
+    if (chartFullscreen) { chartFullscreen.destroy(); chartFullscreen = null; }
+    // Temporarily swap global view/stack state for buildWindowChart, then restore
+    const savedView = windowView, savedStack = windowStack;
+    windowView = fsView;
+    windowStack = fsStack;
+    chartFullscreen = buildWindowChart(data, 'chartFullscreen', fsTab === '5h' ? 3 : 9);
+    windowView = savedView;
+    windowStack = savedStack;
+  } catch (e) {
+    console.warn('Fullscreen chart load failed:', e);
+  }
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.getElementById('chartFsOverlay').classList.contains('open')) {
+    closeChartFullscreen();
+  }
+});
+
 async function loadWindowCharts() {
   try {
     const gb = windowStack === 'none' ? 'none' : windowStack;
@@ -398,17 +473,26 @@ function buildWindowChart(data, canvasId, maHalf) {
     let effectiveNorm = (quotaAvailable && totalTokensInWindow > 0)
         ? quota_pct / totalTokensInWindow
         : (totalTokensInWindow > 0 ? 1 : 0);
-    if (calibrated && cost_per_pct > 0 && cost_buckets && cost_buckets.length > 0) {
-      const costLookup = {};
-      for (const cb of cost_buckets) {
-        const k = new Date(cb.time).getTime();
-        costLookup[k] = (costLookup[k] || 0) + cb.cost;
-      }
+    if (calibrated && cost_per_pct > 0) {
       let runningCost = 0;
-      for (let i = 0; i <= nowIndex && i < allTimes.length; i++) {
-        runningCost += (costLookup[allTimes[i]] || 0);
+      if (cost_buckets && cost_buckets.length > 0) {
+        const costLookup = {};
+        for (const cb of cost_buckets) {
+          const k = new Date(cb.time).getTime();
+          costLookup[k] = (costLookup[k] || 0) + cb.cost;
+        }
+        for (let i = 0; i <= nowIndex && i < allTimes.length; i++) {
+          runningCost += (costLookup[allTimes[i]] || 0);
+        }
+      } else if (value_type === 'cost') {
+        // Model view: bucket values are already cost — use them directly
+        for (let i = 0; i <= nowIndex && i < allTimes.length; i++) {
+          runningCost += groupOrder.reduce((s, g) => s + rawByGroup[g][i], 0);
+        }
       }
-      const localPctTotal = runningCost / cost_per_pct;
+      const localPctTotal = quotaAvailable
+        ? Math.min(runningCost / cost_per_pct, quota_pct)
+        : runningCost / cost_per_pct;
       if (totalTokensInWindow > 0 && localPctTotal > 0) {
         localNorm = localPctTotal / totalTokensInWindow;
         effectiveNorm = localNorm;
@@ -500,13 +584,8 @@ function buildWindowChart(data, canvasId, maHalf) {
 
   let emaInput;
   if (isCumulative) {
-    if (localNorm && nowIndex > 0) {
-      // When calibrated: EMA input is the total quota curve (local + other), not just local
-      emaInput = allTimes.map((_, i) => i <= nowIndex ? (i / nowIndex) * quota_pct : null);
-    } else {
-      let running = 0;
-      emaInput = aggRaw.map(v => { running += v; return running * emaNorm; });
-    }
+    let running = 0;
+    emaInput = aggRaw.map(v => { running += v; return running * emaNorm; });
   } else {
     emaInput = _movingAverage(aggRaw.map(v => v / bucket_minutes), maHalf);
   }

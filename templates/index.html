@@ -155,6 +155,7 @@
           <div class="card chart-card window-card">
             <div class="card-header">
               <h2 class="card-title">5-Hour Session</h2>
+              <button class="maximize-btn" onclick="openChartFullscreen('5h')" title="Maximize">&#x26F6;</button>
             </div>
             <div class="chart-wrap">
               <canvas id="chart5h"></canvas>
@@ -163,6 +164,7 @@
           <div class="card chart-card window-card">
             <div class="card-header">
               <h2 class="card-title">7-Day Session</h2>
+              <button class="maximize-btn" onclick="openChartFullscreen('7d')" title="Maximize">&#x26F6;</button>
             </div>
             <div class="chart-wrap">
               <canvas id="chart7d"></canvas>
@@ -243,6 +245,32 @@
       </div>
     </div>
     <div class="panel-overlay" id="panelOverlay" onclick="closePanel()"></div>
+
+    <!-- Fullscreen chart overlay -->
+    <div class="chart-fs-overlay" id="chartFsOverlay" onclick="closeChartFullscreen()">
+      <div class="chart-fs-card" onclick="event.stopPropagation()">
+        <div class="chart-fs-header">
+          <div class="chart-fs-tabs">
+            <button class="view-btn" id="fsTab5h" onclick="setFsTab('5h', this)">5-Hour</button>
+            <button class="view-btn" id="fsTab7d" onclick="setFsTab('7d', this)">7-Day</button>
+          </div>
+          <div class="view-selector">
+            <button class="view-btn" id="fsViewRate" onclick="setFsView('rate', this)">Rate</button>
+            <button class="view-btn" id="fsViewCum" onclick="setFsView('cumulative', this)">Cumulative</button>
+          </div>
+          <div class="stack-selector">
+            <button class="stack-btn" id="fsStackNone" onclick="setFsStack('none', this)">Clean</button>
+            <button class="stack-btn" id="fsStackToken" onclick="setFsStack('token_type', this)">Token Type</button>
+            <button class="stack-btn" id="fsStackProj" onclick="setFsStack('project', this)">Project</button>
+            <button class="stack-btn" id="fsStackModel" onclick="setFsStack('model', this)">Model</button>
+          </div>
+          <button class="panel-close" onclick="closeChartFullscreen()">&#x2715;</button>
+        </div>
+        <div class="chart-fs-body">
+          <canvas id="chartFullscreen"></canvas>
+        </div>
+      </div>
+    </div>
 
   </div>
 
