@@ -87,6 +87,7 @@
           <div class="gauge-info">
             <div class="gauge-countdown" id="countdown5h">—</div>
             <div class="gauge-forecast" id="forecast5h"></div>
+            <div class="gauge-exceedance" id="exceedance5h" style="display:none"></div>
           </div>
         </div>
 
@@ -120,20 +121,19 @@
           <div class="gauge-info">
             <div class="gauge-countdown" id="countdown7d">—</div>
             <div class="gauge-forecast" id="forecast7d"></div>
+            <div class="gauge-exceedance" id="exceedance7d" style="display:none"></div>
             <div class="gauge-overuse-status" id="extraUsage" style="display:none"></div>
           </div>
         </div>
 
-        <!-- Cost panel -->
-        <div class="card cost-card" id="costCard">
-          <div class="cost-header">
-            <span class="cost-icon">✦</span>
-            <span class="cost-title">Est. API Cost</span>
-            <span class="cost-period" id="costPeriod">30 days</span>
+        <!-- Models chart -->
+        <div class="card chart-card">
+          <div class="card-header">
+            <h2 class="card-title">By Model</h2>
           </div>
-          <div class="cost-amount" id="costAmount">—</div>
-          <div class="cost-breakdown" id="costBreakdown"></div>
-          <p class="cost-note">At published API prices. You're on a subscription — this is for context.</p>
+          <div class="chart-wrap chart-wrap-donut">
+            <canvas id="modelChart"></canvas>
+          </div>
         </div>
       </section>
 
@@ -186,14 +186,16 @@
           </div>
         </div>
 
-        <!-- Models chart -->
-        <div class="card chart-card">
-          <div class="card-header">
-            <h2 class="card-title">By Model</h2>
+        <!-- Cost panel -->
+        <div class="card cost-card" id="costCard">
+          <div class="cost-header">
+            <span class="cost-icon">✦</span>
+            <span class="cost-title">Est. API Cost</span>
+            <span class="cost-period" id="costPeriod">30 days</span>
           </div>
-          <div class="chart-wrap chart-wrap-donut">
-            <canvas id="modelChart"></canvas>
-          </div>
+          <div class="cost-amount" id="costAmount">—</div>
+          <div class="cost-breakdown" id="costBreakdown"></div>
+          <p class="cost-note">At published API prices. You're on a subscription — this is for context.</p>
         </div>
 
         <!-- Session heatmap -->

@@ -28,6 +28,7 @@ let windowView = 'rate';    // 'rate' | 'cumulative'
 let windowStack = 'none';   // 'none' | 'token_type' | 'project' | 'model'
 let chartFullscreen = null;
 let fsTab = '5h';            // '5h' | '7d'
+let exceedanceState = { '5h': null, '7d': null };
 let fsView = 'rate';
 let fsStack = 'none';
 
@@ -170,6 +171,7 @@ function updateCountdowns() {
     document.getElementById('countdown7d').textContent = 'Resets ' + formatCountdown(quotaState.seven.resetsAt);
     updateIdealTick('7d', quotaState.seven.resetsAt, 7 * 24 * 3600000);
   }
+  updateExceedanceWarnings();
 }
 
 function updateForecasts() {
@@ -380,6 +382,10 @@ async function loadWindowCharts() {
       apiFetch('/api/window?type=5h&group_by=' + gb),
       apiFetch('/api/window?type=7d&group_by=' + gb),
     ]);
+    // Compute exceedance predictions before building charts
+    exceedanceState['5h'] = computeExceedance(d5h);
+    exceedanceState['7d'] = computeExceedance(d7d);
+    updateExceedanceWarnings();
     // Destroy old charts, then build new ones from fetched data
     if (chart5h) { chart5h.destroy(); chart5h = null; }
     if (chart7d) { chart7d.destroy(); chart7d = null; }
@@ -396,6 +402,105 @@ function _movingAverage(arr, halfWin) {
     const s = Math.max(0, i - halfWin), e = Math.min(arr.length - 1, i + halfWin);
     const slice = arr.slice(s, e + 1);
     return slice.reduce((a, b) => a + b, 0) / slice.length;
+  });
+}
+
+// ─── EMA helper (module-scoped so computeExceedance can reuse it) ─────────────
+function _computeEma(series, nowIdx) {
+  if (nowIdx < 2) return null;
+  const alpha = 0.3;
+  const ema = [series[0]];
+  let sumSqRes = 0;
+  for (let i = 1; i <= nowIdx; i++) {
+    ema[i] = alpha * series[i] + (1 - alpha) * ema[i - 1];
+    sumSqRes += (series[i] - ema[i]) ** 2;
+  }
+  const sigma = Math.sqrt(sumSqRes / nowIdx);
+  return { ema, sigma, projBuckets: 0 };  // projBuckets set by caller
+}
+
+// Compute when cumulative usage is projected to reach 100% based on EMA slope.
+// Returns { exceedTime: Date } if cap is predicted before window_end, or null otherwise.
+function computeExceedance(data) {
+  if (!data) return null;
+  const { window_start, window_end, quota_pct, bucket_minutes, buckets } = data;
+  if (!quota_pct || quota_pct <= 0) return null;  // quota API unavailable
+
+  const startMs = new Date(window_start).getTime();
+  const endMs   = new Date(window_end).getTime();
+  const bucketMs = bucket_minutes * 60000;
+  const allTimes = [];
+  for (let t = startMs; t < endMs; t += bucketMs) allTimes.push(t);
+
+  const nowMs = Date.now();
+  const nowIndex = allTimes.reduce((acc, t, i) => t <= nowMs ? i : acc, -1);
+  if (nowIndex < 2) return null;
+
+  // Aggregate all groups into a single raw series
+  const lookup = {};
+  for (const b of buckets) {
+    const k = new Date(b.time).getTime();
+    lookup[k] = (lookup[k] || 0) + b.tokens;
+  }
+  const aggRaw = allTimes.map(t => lookup[t] || 0);
+  const totalTokens = aggRaw.reduce((a, b) => a + b, 0);
+  if (totalTokens === 0) return null;
+
+  // Normalize to quota % — same formula as cumulative chart
+  const norm = quota_pct / totalTokens;
+  let running = 0;
+  const cumSeries = aggRaw.map(v => { running += v; return running * norm; });
+
+  const emaResult = _computeEma(cumSeries, nowIndex);
+  if (!emaResult) return null;
+
+  const { ema } = emaResult;
+  const slope = nowIndex > 0 ? ema[nowIndex] - ema[nowIndex - 1] : 0;
+  if (slope <= 0) return null;  // usage declining, won't cap
+
+  const actualAtNow = cumSeries[nowIndex];
+  if (actualAtNow >= 100) return null;  // already at limit
+
+  const stepsToHundred = (100 - actualAtNow) / slope;
+  const exceedMs = allTimes[nowIndex] + stepsToHundred * bucketMs;
+
+  if (exceedMs >= endMs) return null;  // won't cap before window resets
+  return { exceedTime: new Date(exceedMs) };
+}
+
+function updateExceedanceWarnings() {
+  [
+    { id: '5h', state: exceedanceState['5h'], quota: quotaState.five },
+    { id: '7d', state: exceedanceState['7d'], quota: quotaState.seven },
+  ].forEach(({ id, state, quota }) => {
+    const el = document.getElementById('exceedance' + id);
+    if (!el) return;
+
+    if (!state || !state.exceedTime) {
+      el.style.display = 'none';
+      el.classList.remove('urgent');
+      return;
+    }
+
+    const msUntil = state.exceedTime - Date.now();
+    if (msUntil < 0) {
+      // Projection already passed — chart data will update on next refresh
+      el.style.display = 'none';
+      el.classList.remove('urgent');
+      return;
+    }
+
+    const timeStr = state.exceedTime.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    el.textContent = 'Projected to cap ~' + timeStr;
+    el.style.display = '';
+
+    if (msUntil < 30 * 60000) {
+      el.style.color = CLAUDE_RED;
+      el.classList.add('urgent');
+    } else {
+      el.style.color = CLAUDE_AMBER;
+      el.classList.remove('urgent');
+    }
   });
 }
 
@@ -445,8 +550,7 @@ function buildWindowChart(data, canvasId, maHalf) {
     const d = new Date(t);
     if (bucket_minutes < 60) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     // 60-min buckets (7d chart): show weekday + date + hour
-    return d.toLocaleDateString([], { weekday: 'short', month: 'numeric', day: 'numeric' })
-      + ' ' + d.toLocaleTimeString([], { hour: 'numeric' });
+    return d.toLocaleDateString([], { weekday: 'short', month: 'numeric', day: 'numeric' });
   });
 
   // Group colors
@@ -540,25 +644,18 @@ function buildWindowChart(data, canvasId, maHalf) {
     emaInput = _movingAverage(aggRaw.map(v => v / bucket_minutes), maHalf);
   }
 
-  function computeEma(series, nowIdx) {
-    if (nowIdx < 2) return null;
-    const alpha = 0.3;
-    const ema = [series[0]];
-    let sumSqRes = 0;
-    for (let i = 1; i <= nowIdx; i++) {
-      ema[i] = alpha * series[i] + (1 - alpha) * ema[i - 1];
-      sumSqRes += (series[i] - ema[i]) ** 2;
-    }
-    const sigma = Math.sqrt(sumSqRes / nowIdx);
-    // Fixed projection interval: 1h for 5-min buckets, 1d for 60-min buckets
-    const projBuckets = Math.min(
+  function computeEmaLocal(series, nowIdx) {
+    const result = _computeEma(series, nowIdx);
+    if (!result) return null;
+    // Override projBuckets using bucket_minutes from this chart's closure
+    result.projBuckets = Math.min(
       bucket_minutes < 60 ? Math.round(60 / bucket_minutes) : 24,
       series.length - 1 - nowIdx
     );
-    return { ema, sigma, projBuckets };
+    return result;
   }
 
-  const emaResult = nowIndex >= 0 ? computeEma(emaInput, nowIndex) : null;
+  const emaResult = nowIndex >= 0 ? computeEmaLocal(emaInput, nowIndex) : null;
 
   if (emaResult) {
     const { ema, sigma, projBuckets } = emaResult;

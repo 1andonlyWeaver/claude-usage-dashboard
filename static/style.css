@@ -276,6 +276,19 @@ body {
   color: var(--text-muted);
   min-height: 18px;
 }
+.gauge-exceedance {
+  font-size: 0.72rem;
+  font-weight: 500;
+  margin-top: 3px;
+  min-height: 16px;
+}
+@keyframes pulse-warn {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+.gauge-exceedance.urgent {
+  animation: pulse-warn 2s ease-in-out infinite;
+}
 .divider-vert {
   width: 1px;
   background: var(--border-subtle);
