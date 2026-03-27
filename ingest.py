@@ -217,6 +217,16 @@ def ingest_file(conn, file_path: str, project_name: str) -> int:
                 cache_creation = usage.get('cache_creation', {})
                 server_tool_use = usage.get('server_tool_use', {})
 
+                input_tokens = usage.get('input_tokens', 0)
+                cache_creation_tokens = usage.get('cache_creation_input_tokens', 0)
+                cache_read_tokens = usage.get('cache_read_input_tokens', 0)
+                output_tokens = usage.get('output_tokens', 0)
+
+                # Skip messages with no token usage — these are streaming fragments
+                # or synthetic entries that add noise without contributing to analytics.
+                if not (input_tokens or cache_creation_tokens or cache_read_tokens or output_tokens):
+                    continue
+
                 record = {
                     'msg_id': msg_id or f"{session_id}_{timestamp}",
                     'timestamp': local_iso,
@@ -226,10 +236,10 @@ def ingest_file(conn, file_path: str, project_name: str) -> int:
                     'session_id': session_id,
                     'project': project_name,
                     'model': model,
-                    'input_tokens': usage.get('input_tokens', 0),
-                    'cache_creation_tokens': usage.get('cache_creation_input_tokens', 0),
-                    'cache_read_tokens': usage.get('cache_read_input_tokens', 0),
-                    'output_tokens': usage.get('output_tokens', 0),
+                    'input_tokens': input_tokens,
+                    'cache_creation_tokens': cache_creation_tokens,
+                    'cache_read_tokens': cache_read_tokens,
+                    'output_tokens': output_tokens,
                     'cache_5m_tokens': cache_creation.get('ephemeral_5m_input_tokens', 0),
                     'cache_1h_tokens': cache_creation.get('ephemeral_1h_input_tokens', 0),
                     'entrypoint': obj.get('entrypoint', ''),

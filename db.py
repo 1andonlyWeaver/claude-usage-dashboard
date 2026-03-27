@@ -234,11 +234,11 @@ def window_tokens(window_start: str, window_end: str, bucket_minutes: int,
 
     # SQLite time bucket expression
     if bucket_minutes == 60:
-        bucket_expr = "strftime('%Y-%m-%dT%H:00', timestamp)"
+        bucket_expr = "strftime('%Y-%m-%dT%H:00:00', timestamp)"
     else:
         bucket_expr = (
             f"strftime('%Y-%m-%dT%H:', timestamp) || "
-            f"printf('%02d', (CAST(strftime('%M', timestamp) AS INTEGER) / {bucket_minutes}) * {bucket_minutes})"
+            f"printf('%02d:00', (CAST(strftime('%M', timestamp) AS INTEGER) / {bucket_minutes}) * {bucket_minutes})"
         )
 
     if group_by == 'token_type':
