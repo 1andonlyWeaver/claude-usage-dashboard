@@ -33,7 +33,8 @@ ingest.py    ETL pipeline — scans ~/.claude/projects/**/*.jsonl, deduplicates,
 templates/   Jinja2 HTML (single index.html)
 static/      dashboard.js (Chart.js, quota polling), style.css (glassmorphism dark theme)
 data/        usage.db — auto-created on first run; not committed
-scripts/     start-dashboard.bat (Task Scheduler launch), register-task.ps1 (one-time setup)
+scripts/     launcher.py (Task Scheduler entry point — port check, spawns server, stays alive so TS tracks it)
+             register-task.ps1 (one-time setup), start-dashboard.bat (legacy manual launcher)
 logs/        dashboard.log — server output when run via Task Scheduler; not committed
 ```
 
@@ -78,14 +79,24 @@ When updating pricing, change it in **both** `db.py` and `ingest.py`.
 
 ## Server Restart
 
-Changes to `app.py`, `db.py`, or `ingest.py` require a server restart to take effect (FastAPI loads these once at startup). After making any such change, automatically flag that a restart is needed and offer to restart the server. The server runs on port 8080; the process can be identified via `netstat -ano | grep :8080` and killed by PID before relaunching with `conda activate claude-usage-dashboard && python app.py --port 8080`.
+Changes to `app.py`, `db.py`, or `ingest.py` require a server restart to take effect (FastAPI loads these once at startup). After making any such change, automatically flag that a restart is needed and offer to restart the server.
+
+**When running under Task Scheduler (normal):**
+```powershell
+Stop-ScheduledTask -TaskName ClaudeUsageDashboard   # graceful stop
+Start-ScheduledTask -TaskName ClaudeUsageDashboard  # start
+(Get-ScheduledTask -TaskName ClaudeUsageDashboard).State  # check status
+```
+
+**When running manually:**
+The server runs on port 8080; the process can be identified via `netstat -ano | grep :8080` and killed by PID before relaunching with `conda activate claude-usage-dashboard && python app.py --port 8080`.
 
 ## Gotchas
 
 - **Force re-ingest required** after schema migrations or `extract_project_name` changes — unchanged files are skipped otherwise. Use `POST /api/refresh?force=true` or delete `ingest_meta` rows manually.
 - **Project name resolution** uses filesystem greedy-match: `C--Users-weaverjc-Projects-march-madness` → resolves by checking real directories on disk, so project names only resolve correctly on the machine where the paths exist.
 - **Schema migration** is handled automatically by `_migrate_db()` in `ingest.py` via `PRAGMA table_info` + `ALTER TABLE`. New columns default to 0/empty for pre-migration rows.
-- **Auto-start**: Registered in Windows Task Scheduler as `ClaudeUsageDashboard`. To re-register on a new machine, run `powershell -ExecutionPolicy Bypass -File scripts\register-task.ps1`.
+- **Auto-start**: Registered in Windows Task Scheduler as `ClaudeUsageDashboard`. `launcher.py` is the entry point — it checks whether port 8080 is already in use, then spawns the server and waits (keeping the task in "Running" state so TS can enforce RestartCount and IgnoreNew). To re-register on a new machine, run `powershell -ExecutionPolicy Bypass -File scripts\register-task.ps1`.
 
 ## API Endpoints
 
