@@ -490,7 +490,12 @@ function updateExceedanceWarnings() {
       return;
     }
 
-    const timeStr = state.exceedTime.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    let timeStr;
+    if (id === '7d') {
+      timeStr = state.exceedTime.toLocaleDateString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+    } else {
+      timeStr = state.exceedTime.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    }
     el.textContent = 'Projected to cap ~' + timeStr;
     el.style.display = '';
 
