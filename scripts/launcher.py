@@ -31,18 +31,16 @@ if port_in_use(PORT):
     sys.exit(0)
 
 log("Starting dashboard server...")
-# Use sys.executable (pythonw.exe when run via Task Scheduler) so the child process
-# also has no console window. CREATE_NO_WINDOW suppresses any accidental console.
-# On Windows 8+ nested jobs are supported, so CREATE_BREAKAWAY_FROM_JOB is not needed
-# and can raise Access Denied when Task Scheduler's job disallows it.
-try:
-    proc = subprocess.Popen(
-        [sys.executable, "app.py", "--port", str(PORT)],
-        cwd=str(REPO_DIR),
-        stdout=open(LOG_FILE, "a"),
-        stderr=subprocess.STDOUT,
-        creationflags=subprocess.CREATE_NO_WINDOW,
-    )
-    log(f"Dashboard process launched (PID {proc.pid}).")
-except Exception as e:
-    log(f"ERROR launching dashboard: {e}")
+# Run app.py as a child of this pythonw.exe process. The launcher stays alive via
+# proc.wait() so Task Scheduler can properly track lifecycle, enforce RestartCount,
+# and honour IgnoreNew. No special creation flags needed — child inherits the
+# windowless state from pythonw.exe.
+proc = subprocess.Popen(
+    [sys.executable, "app.py", "--port", str(PORT)],
+    cwd=str(REPO_DIR),
+    stdout=open(LOG_FILE, "a"),
+    stderr=subprocess.STDOUT,
+)
+log(f"Dashboard process launched (PID {proc.pid}).")
+proc.wait()
+log(f"Dashboard process exited (code {proc.returncode}).")
