@@ -3,12 +3,14 @@
 
 $repoDir  = Split-Path $PSScriptRoot
 $pythonw  = "$env:USERPROFILE\miniconda3\envs\claude-usage-dashboard\pythonw.exe"
+$launcher = "$repoDir\scripts\launcher.py"
 
-# Launch pythonw.exe directly — it has no console window, so Task Scheduler
-# will not open or keep any visible window.
+# Run via pythonw.exe (no console window) through a launcher script that checks
+# whether port 8080 is already in use before starting, preventing silent failures
+# when the server is already running.
 $action = New-ScheduledTaskAction `
     -Execute $pythonw `
-    -Argument "app.py --port 8080" `
+    -Argument $launcher `
     -WorkingDirectory $repoDir
 
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME

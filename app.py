@@ -173,6 +173,15 @@ def _fetch_usage_sync() -> dict:
         return {"ok": False, "error": str(ex), "retry_after": None}
 
 
+def _read_disk_cache_data() -> dict | None:
+    """Read the quota disk cache, returning its data dict regardless of age, or None on failure."""
+    try:
+        saved = json.loads(QUOTA_CACHE_FILE.read_text())
+        return saved.get("data") or None
+    except Exception:
+        return None
+
+
 async def _get_usage_data() -> dict:
     """Return cached usage data, refreshing from the API when the cache is stale.
 
@@ -191,6 +200,10 @@ async def _get_usage_data() -> dict:
     if now < cache["retry_after"]:
         if cache["data"]:
             return cache["data"]
+        # No in-memory data — fall back to disk cache so UI shows real values
+        disk = _read_disk_cache_data()
+        if disk:
+            return {**disk, "error": cache["error"] or "rate-limited"}
         return {"error": cache["error"] or "rate-limited",
                 "five_hour_pct": 0, "seven_day_pct": 0}
 
@@ -204,6 +217,9 @@ async def _get_usage_data() -> dict:
         if now < cache["retry_after"]:
             if cache["data"]:
                 return cache["data"]
+            disk = _read_disk_cache_data()
+            if disk:
+                return {**disk, "error": cache["error"] or "rate-limited"}
             return {"error": cache["error"] or "rate-limited",
                     "five_hour_pct": 0, "seven_day_pct": 0}
 
@@ -248,9 +264,12 @@ async def _get_usage_data() -> dict:
             cache["retry_after"] = now + retry_secs
             print(f"[quota {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] fetch failed ({result['error']}), fail #{cache['fail_count']}, retry in {retry_secs}s")
             cache["error"] = result["error"]
-            # Return stale data if available, otherwise an error shell
+            # Return stale in-memory data if available, then try disk cache, then error shell
             if cache["data"]:
                 return {**cache["data"], "error": result["error"]}
+            disk = _read_disk_cache_data()
+            if disk:
+                return {**disk, "error": result["error"]}
             return {"error": result["error"], "five_hour_pct": 0, "seven_day_pct": 0}
 
 
