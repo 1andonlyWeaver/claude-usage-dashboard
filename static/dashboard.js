@@ -423,7 +423,7 @@ function _computeEma(series, nowIdx) {
 // Returns { exceedTime: Date } if cap is predicted before window_end, or null otherwise.
 function computeExceedance(data) {
   if (!data) return null;
-  const { window_start, window_end, quota_pct, bucket_minutes, buckets } = data;
+  const { window_start, window_end, quota_pct, bucket_minutes, buckets, other_pct } = data;
   if (!quota_pct || quota_pct <= 0) return null;  // quota API unavailable
 
   const startMs = new Date(window_start).getTime();
@@ -446,10 +446,12 @@ function computeExceedance(data) {
   const totalTokens = aggRaw.reduce((a, b) => a + b, 0);
   if (totalTokens === 0) return null;
 
-  // Normalize to quota % — same formula as cumulative chart
-  const norm = quota_pct / totalTokens;
+  // Normalize local tokens to their portion of quota, then offset by other_pct
+  const otherOffset = other_pct || 0;
+  const localPct = quota_pct - otherOffset;
+  const norm = localPct / totalTokens;
   let running = 0;
-  const cumSeries = aggRaw.map(v => { running += v; return running * norm; });
+  const cumSeries = aggRaw.map(v => { running += v; return running * norm + otherOffset; });
 
   const emaResult = _computeEma(cumSeries, nowIndex);
   if (!emaResult) return null;
@@ -510,7 +512,8 @@ function updateExceedanceWarnings() {
 }
 
 function buildWindowChart(data, canvasId, maHalf) {
-  const { window_start, window_end, quota_pct, bucket_minutes, buckets, value_type } = data;
+  const { window_start, window_end, quota_pct, bucket_minutes, buckets, value_type, other_pct: rawOtherPct } = data;
+  const otherPct = rawOtherPct || 0;
 
   // Generate all time labels for the window
   const startMs = new Date(window_start).getTime();
@@ -566,6 +569,7 @@ function buildWindowChart(data, canvasId, maHalf) {
   };
 
   function groupColor(g, i) {
+    if (g === 'Other') return 'rgba(150,150,150,0.7)';
     if (windowStack === 'token_type' || windowStack === 'none') return tokenTypeColors[g] || STACK_PALETTE[i % STACK_PALETTE.length];
     return STACK_PALETTE[i % STACK_PALETTE.length];
   }
@@ -575,33 +579,54 @@ function buildWindowChart(data, canvasId, maHalf) {
   const quotaAvailable = quota_pct > 0;
 
   if (isCumulative) {
-    // Determine effective normalization factor (local quota % per token)
-    // If quota_pct is 0 (API unreachable), use norm=1 so charts show raw token totals
-    // instead of multiplying everything by zero and flatlining.
+    // Determine effective normalization factor (local quota % per token).
+    // When other_pct is detected, local tokens map to (quota_pct - other_pct) so the
+    // "Other" flat band accounts for the remainder. Falls back to quota_pct when no
+    // other usage is detected (other_pct = 0).
+    // If quota_pct is 0 (API unreachable), use norm=1 so charts show raw token totals.
+    const localPct = quotaAvailable ? quota_pct - otherPct : 0;
     const effectiveNorm = (quotaAvailable && totalTokensInWindow > 0)
-        ? quota_pct / totalTokensInWindow
+        ? localPct / totalTokensInWindow
         : (totalTokensInWindow > 0 ? 1 : 0);
 
-    // Running sum per group, normalized to quota contribution; truncated at nowIndex
+    // Running sum per group, normalized to local quota contribution, offset by other_pct;
+    // truncated at nowIndex
     const norm = effectiveNorm;
     datasets = groupOrder.map((g, i) => {
       const color = groupColor(g, i);
       let running = 0;
       const cumData = rawByGroup[g].map((v, idx) => {
         running += v;
-        return idx <= nowIndex ? running * norm : null;
+        return idx <= nowIndex ? running * norm + otherPct : null;
       });
+      // When "Other" band is present, local groups stack on top of it (fill: '-1' for first)
+      const hasOtherBand = quotaAvailable && otherPct > 0;
       return {
         label: g,
         data: cumData,
         backgroundColor: hexAlpha(color.startsWith('rgba') ? CLAUDE_ORANGE : color, stacked ? 0.4 : 0.3),
         borderColor: color,
         borderWidth: 1.5,
-        fill: stacked ? (i === 0 ? 'origin' : '-1') : false,
+        fill: stacked ? (hasOtherBand || i > 0 ? '-1' : 'origin') : false,
         tension: 0.3,
         pointRadius: 0,
       };
     });
+
+    // Prepend flat "Other / Unknown" band at the bottom when external usage detected
+    if (quotaAvailable && otherPct > 0) {
+      const otherData = allTimes.map((_, idx) => idx <= nowIndex ? otherPct : null);
+      datasets.unshift({
+        label: 'Other',
+        data: otherData,
+        backgroundColor: 'rgba(150,150,150,0.25)',
+        borderColor: 'rgba(150,150,150,0.5)',
+        borderWidth: 1.5,
+        fill: 'origin',
+        tension: 0,
+        pointRadius: 0,
+      });
+    }
 
     // Reference line: linear 0% → 100% across window
     const refData = allTimes.map((t, i) => (i / (allTimes.length - 1 || 1)) * 100);
@@ -638,13 +663,14 @@ function buildWindowChart(data, canvasId, maHalf) {
 
   // ── EMA Projection ───────────────────────────────────────────
   // Aggregate total across all groups for EMA input
-  const aggRaw = allTimes.map((_, i) => groupOrder.reduce((s, g) => s + rawByGroup[g][i], 0));
-  const emaNorm = (quotaAvailable && totalTokensInWindow > 0) ? quota_pct / totalTokensInWindow : (totalTokensInWindow > 0 ? 1 : 0);
+  const aggRaw = allTimes.map((_, i) => groupOrder.filter(g => g !== 'Other').reduce((s, g) => s + rawByGroup[g][i], 0));
+  const emaLocalPct = quotaAvailable ? quota_pct - otherPct : 0;
+  const emaNorm = (quotaAvailable && totalTokensInWindow > 0) ? emaLocalPct / totalTokensInWindow : (totalTokensInWindow > 0 ? 1 : 0);
 
   let emaInput;
   if (isCumulative) {
     let running = 0;
-    emaInput = aggRaw.map(v => { running += v; return running * emaNorm; });
+    emaInput = aggRaw.map(v => { running += v; return running * emaNorm + otherPct; });
   } else {
     emaInput = _movingAverage(aggRaw.map(v => v / bucket_minutes), maHalf);
   }
@@ -675,7 +701,7 @@ function buildWindowChart(data, canvasId, maHalf) {
       if (step < 0 || step > projBuckets) return null;
       if (step === 0) return actualAtNow;
       return isCumulative
-        ? Math.min(Math.max(actualAtNow + slope * step, 0), 100)
+        ? Math.min(Math.max(actualAtNow + slope * step, otherPct), 100)
         : Math.max(actualAtNow, 0);
     });
 
@@ -692,7 +718,7 @@ function buildWindowChart(data, canvasId, maHalf) {
       if (step < 0 || step > projBuckets) return null;
       const base = projLineData[i];
       const band = sigma * 1.5 * Math.sqrt(step);  // 0 at step=0, fans out
-      return isCumulative ? Math.max(base - band, actualAtNow) : Math.max(base - band, 0);
+      return isCumulative ? Math.max(base - band, Math.max(actualAtNow, otherPct)) : Math.max(base - band, 0);
     });
 
     // Gradient factories using scriptable context (chart area available after layout)

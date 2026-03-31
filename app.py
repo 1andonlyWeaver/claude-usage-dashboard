@@ -454,6 +454,7 @@ async def window(
     we = window_end.strftime('%Y-%m-%dT%H:%M:%S')
 
     buckets = db.window_tokens(ws, we, bucket_minutes, group_by_param)
+    gap_info = db.detect_other_pct(ws, we, type)
 
     return {
         "window_start": ws,
@@ -462,6 +463,8 @@ async def window(
         "bucket_minutes": bucket_minutes,
         "buckets": buckets,
         "value_type": "cost" if group_by_param == "model" else "tokens",
+        "other_pct": gap_info["other_pct"],
+        "has_snapshots": gap_info["has_snapshots"],
     }
 
 

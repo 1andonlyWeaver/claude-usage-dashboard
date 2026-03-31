@@ -77,6 +77,12 @@ def init_db(conn):
             last_modified REAL
         );
 
+        CREATE TABLE IF NOT EXISTS quota_snapshots (
+            timestamp TEXT PRIMARY KEY,
+            five_hour_pct REAL,
+            seven_day_pct REAL
+        );
+
     """)
     _migrate_db(conn)
     conn.commit()

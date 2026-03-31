@@ -321,6 +321,46 @@ def window_tokens(window_start: str, window_end: str, bucket_minutes: int,
     return [{'time': r['time'], 'group': r['grp'], 'tokens': r['tokens'] or 0} for r in rows]
 
 
+def detect_other_pct(window_start: str, window_end: str, window_type: str) -> dict:
+    """Detect external/other usage by finding quota increases during periods with no local activity.
+
+    Compares consecutive quota snapshots within the window. When quota % increased but no local
+    messages were recorded in that interval, the increase is attributed to other sources.
+
+    Returns dict with keys:
+        other_pct: float — quota % attributable to external/unknown sources
+        has_snapshots: bool — whether enough snapshot data was available
+    """
+    conn = get_conn()
+    pct_col = 'five_hour_pct' if window_type == '5h' else 'seven_day_pct'
+    rows = conn.execute(
+        f"SELECT timestamp, {pct_col} as pct FROM quota_snapshots "
+        "WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp",
+        (window_start, window_end)
+    ).fetchall()
+    conn.close()
+
+    if len(rows) < 2:
+        return {"other_pct": 0.0, "has_snapshots": False}
+
+    other_pct = 0.0
+    conn = get_conn()
+    for i in range(len(rows) - 1):
+        t1, pct1 = rows[i]['timestamp'], rows[i]['pct']
+        t2, pct2 = rows[i + 1]['timestamp'], rows[i + 1]['pct']
+        quota_delta = (pct2 or 0) - (pct1 or 0)
+        if quota_delta <= 0.1:
+            continue
+        count = conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE timestamp >= ? AND timestamp < ?",
+            (t1, t2)
+        ).fetchone()[0]
+        if count == 0:
+            other_pct += quota_delta
+    conn.close()
+    return {"other_pct": other_pct, "has_snapshots": True}
+
+
 def entrypoint_stats(days: int = 30) -> dict:
     """Return counts of sessions by entrypoint."""
     conn = get_conn()
