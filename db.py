@@ -119,7 +119,8 @@ def session_list(days: int = 30) -> list[dict]:
                date,
                MAX(entrypoint) as entrypoint,
                MAX(speed) as speed,
-               MAX(git_branch) as git_branch
+               MAX(git_branch) as git_branch,
+               MAX(source) as source
         FROM messages
         WHERE date >= ?
         GROUP BY session_id
@@ -332,6 +333,23 @@ def entrypoint_stats(days: int = 30) -> dict:
     """, (_since_date(days),)).fetchall()
     conn.close()
     return {r['entrypoint'] or 'unknown': r['session_count'] for r in rows}
+
+
+def by_source(days: int = 90) -> list[dict]:
+    """Return token totals grouped by source (claude-code vs claude-desktop)."""
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT COALESCE(source, 'claude-code') as source,
+               SUM(input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens) as total_tokens,
+               COUNT(DISTINCT session_id) as session_count,
+               COUNT(*) as message_count
+        FROM messages
+        WHERE date >= ?
+        GROUP BY COALESCE(source, 'claude-code')
+        ORDER BY total_tokens DESC
+    """, (_since_date(days),)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def db_stats() -> dict:

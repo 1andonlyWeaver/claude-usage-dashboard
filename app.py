@@ -360,6 +360,11 @@ async def cost(days: int = 30):
     return db.estimate_cost(days)
 
 
+@app.get("/api/sources")
+async def sources(days: int = 90):
+    return db.by_source(days)
+
+
 @app.get("/api/stats")
 async def stats():
     return db.db_stats()

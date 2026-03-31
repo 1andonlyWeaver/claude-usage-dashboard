@@ -18,6 +18,7 @@ except ImportError:
         return json_lib.loads(s)
 
 PROJECTS_DIR = Path(os.path.expanduser("~")) / ".claude" / "projects"
+DESKTOP_SESSIONS_DIR = Path(os.environ.get("APPDATA", "")) / "Claude" / "local-agent-mode-sessions"
 DB_PATH = Path(__file__).parent / "data" / "usage.db"
 
 # API pricing per 1M tokens (input, output)
@@ -61,7 +62,8 @@ def init_db(conn):
             speed TEXT DEFAULT 'standard',
             git_branch TEXT DEFAULT '',
             web_search_count INTEGER DEFAULT 0,
-            web_fetch_count INTEGER DEFAULT 0
+            web_fetch_count INTEGER DEFAULT 0,
+            source TEXT DEFAULT 'claude-code'
         );
         CREATE INDEX IF NOT EXISTS idx_date ON messages(date);
         CREATE INDEX IF NOT EXISTS idx_project ON messages(project);
@@ -91,6 +93,7 @@ def _migrate_db(conn):
         ('git_branch', "TEXT DEFAULT ''"),
         ('web_search_count', 'INTEGER DEFAULT 0'),
         ('web_fetch_count', 'INTEGER DEFAULT 0'),
+        ('source', "TEXT DEFAULT 'claude-code'"),
     ]
     for col, typedef in new_cols:
         if col not in existing:
@@ -174,7 +177,45 @@ def parse_timestamp(ts: str):
         return None, None, None, None
 
 
-def ingest_file(conn, file_path: str, project_name: str) -> int:
+_UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
+
+def _is_uuid(name: str) -> bool:
+    return bool(_UUID_RE.match(name))
+
+
+def _load_desktop_session_meta(org_dir: Path) -> dict:
+    """Parse companion JSON files in an org dir, keyed by session dir name (e.g. 'local_<uuid>')."""
+    meta = {}
+    for json_file in org_dir.glob("local_*.json"):
+        try:
+            with open(json_file, encoding='utf-8', errors='replace') as f:
+                d = loads(f.read())
+            key = json_file.stem  # e.g. 'local_023d3861-...'
+            meta[key] = {
+                'title': d.get('title', ''),
+                'userSelectedFolders': d.get('userSelectedFolders', []),
+            }
+        except Exception:
+            pass
+    return meta
+
+
+def _desktop_project_name(meta: dict) -> str:
+    """Derive a project display name from Desktop session metadata."""
+    title = meta.get('title', '').strip()
+    if title:
+        return f"Desktop: {title}"
+    folders = meta.get('userSelectedFolders', [])
+    if folders:
+        last = Path(folders[0]).name
+        return f"Desktop: {last}" if last else "Desktop: Untitled"
+    return "Desktop: Untitled"
+
+
+def ingest_file(conn, file_path: str, project_name: str,
+                source: str = 'claude-code',
+                timestamp_key: str = 'timestamp',
+                session_id_key: str = 'sessionId') -> int:
     """Parse a single JSONL file and insert new messages. Returns count inserted."""
     count = 0
 
@@ -204,8 +245,8 @@ def ingest_file(conn, file_path: str, project_name: str) -> int:
 
                 msg_id = msg.get('id')
                 model = msg.get('model', 'unknown')
-                timestamp = obj.get('timestamp', '')
-                session_id = obj.get('sessionId', '')
+                timestamp = obj.get(timestamp_key, '')
+                session_id = obj.get(session_id_key, '')
 
                 if not timestamp or not session_id:
                     continue
@@ -242,11 +283,12 @@ def ingest_file(conn, file_path: str, project_name: str) -> int:
                     'output_tokens': output_tokens,
                     'cache_5m_tokens': cache_creation.get('ephemeral_5m_input_tokens', 0),
                     'cache_1h_tokens': cache_creation.get('ephemeral_1h_input_tokens', 0),
-                    'entrypoint': obj.get('entrypoint', ''),
+                    'entrypoint': obj.get('entrypoint', '') or ('desktop' if source == 'claude-desktop' else ''),
                     'speed': usage.get('speed', 'standard'),
                     'git_branch': obj.get('gitBranch', ''),
                     'web_search_count': server_tool_use.get('web_search_requests', 0),
                     'web_fetch_count': server_tool_use.get('web_fetch_requests', 0),
+                    'source': source,
                 }
                 # Keep last occurrence (streaming sends multiple chunks)
                 messages[record['msg_id']] = record
@@ -262,8 +304,8 @@ def ingest_file(conn, file_path: str, project_name: str) -> int:
                 (msg_id, timestamp, date, hour, day_of_week, session_id, project, model,
                  input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
                  cache_5m_tokens, cache_1h_tokens, entrypoint, speed, git_branch,
-                 web_search_count, web_fetch_count)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 web_search_count, web_fetch_count, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 record['msg_id'], record['timestamp'], record['date'],
                 record['hour'], record['day_of_week'], record['session_id'],
@@ -273,6 +315,7 @@ def ingest_file(conn, file_path: str, project_name: str) -> int:
                 record['cache_5m_tokens'], record['cache_1h_tokens'],
                 record['entrypoint'], record['speed'], record['git_branch'],
                 record['web_search_count'], record['web_fetch_count'],
+                record['source'],
             ))
             count += 1
         except Exception:
@@ -295,36 +338,55 @@ def run_ingest(progress_callback=None, force=False):
         conn.execute("DELETE FROM ingest_meta")
         conn.commit()
 
-    # Find all non-subagent JSONL files
+    # Find all JSONL files: (file_path, project_name, source, timestamp_key, session_id_key)
     all_files = []
     for project_dir in PROJECTS_DIR.iterdir():
         if not project_dir.is_dir():
             continue
         project_name = extract_project_name(project_dir.name)
         for jsonl_file in project_dir.glob("*.jsonl"):
-            all_files.append((str(jsonl_file), project_name))
+            all_files.append((str(jsonl_file), project_name, 'claude-code', 'timestamp', 'sessionId'))
+
+    # Scan Claude Desktop Cowork/Agent session audit files
+    if DESKTOP_SESSIONS_DIR.exists():
+        for account_dir in DESKTOP_SESSIONS_DIR.iterdir():
+            if not account_dir.is_dir() or not _is_uuid(account_dir.name):
+                continue
+            for org_dir in account_dir.iterdir():
+                if not org_dir.is_dir() or not _is_uuid(org_dir.name):
+                    continue
+                session_meta = _load_desktop_session_meta(org_dir)
+                for session_dir in org_dir.iterdir():
+                    if not session_dir.is_dir() or not session_dir.name.startswith('local_'):
+                        continue
+                    audit_file = session_dir / 'audit.jsonl'
+                    if audit_file.exists():
+                        meta = session_meta.get(session_dir.name, {})
+                        project_name = _desktop_project_name(meta)
+                        all_files.append((str(audit_file), project_name, 'claude-desktop', '_audit_timestamp', 'session_id'))
 
     # Check which files need re-ingesting
     cursor = conn.execute("SELECT file_path, file_size, last_modified FROM ingest_meta")
     meta_cache = {row[0]: (row[1], row[2]) for row in cursor}
 
     to_process = []
-    for file_path, project_name in all_files:
+    for file_path, project_name, source, ts_key, sid_key in all_files:
         try:
             stat = os.stat(file_path)
             cached = meta_cache.get(file_path)
             if cached is None or cached[0] != stat.st_size or cached[1] != stat.st_mtime:
-                to_process.append((file_path, project_name, stat.st_size, stat.st_mtime))
+                to_process.append((file_path, project_name, source, ts_key, sid_key, stat.st_size, stat.st_mtime))
         except OSError:
             pass
 
     stats = {'total_files': len(all_files), 'processed': 0, 'messages': 0, 'skipped': len(all_files) - len(to_process)}
 
-    for i, (file_path, project_name, fsize, fmtime) in enumerate(to_process):
+    for i, (file_path, project_name, source, ts_key, sid_key, fsize, fmtime) in enumerate(to_process):
         if progress_callback:
             progress_callback(i, len(to_process), file_path)
 
-        count = ingest_file(conn, file_path, project_name)
+        count = ingest_file(conn, file_path, project_name, source=source,
+                            timestamp_key=ts_key, session_id_key=sid_key)
         stats['messages'] += count
         stats['processed'] += 1
 

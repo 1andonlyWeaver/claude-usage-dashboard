@@ -1031,9 +1031,12 @@ async function loadSessions(days) {
     const endDt = new Date(s.end_time);
     const durationMin = Math.max(1, Math.round((endDt - startDt) / 60000));
 
+    const sourceBadge = s.source === 'claude-desktop'
+      ? '<span class="session-badge badge-desktop">Desktop</span>'
+      : '';
     const entrypointBadge = s.entrypoint && s.entrypoint.includes('vscode')
       ? '<span class="session-badge badge-vscode">VS Code</span>'
-      : s.entrypoint && !s.entrypoint.includes('vscode') && s.entrypoint !== ''
+      : s.entrypoint && !s.entrypoint.includes('vscode') && s.entrypoint !== 'desktop' && s.entrypoint !== ''
         ? '<span class="session-badge badge-cli">CLI</span>'
         : '';
     const speedBadge = s.speed === 'fast'
@@ -1046,7 +1049,7 @@ async function loadSessions(days) {
         <div class="session-project">${escHtml(s.project)}</div>
         <div class="session-time">${startDt.toLocaleDateString()} ${startDt.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})} · ${durationMin}m · ${s.message_count} msgs${s.git_branch ? ' · ' + escHtml(s.git_branch) : ''}</div>
       </div>
-      <div class="session-badges">${entrypointBadge}${speedBadge}</div>
+      <div class="session-badges">${sourceBadge}${entrypointBadge}${speedBadge}</div>
       <div class="session-tokens">${fmtShort(s.total_tokens)}</div>
       <div class="session-model ${modelClass ? modelClass+'-model' : ''}">${shortModelName(s.model)}</div>
     `;

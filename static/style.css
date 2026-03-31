@@ -642,6 +642,7 @@ body {
 .badge-vscode { color: #6B9FD4; background: rgba(107,159,212,0.12); }
 .badge-cli { color: var(--text-muted); }
 .badge-fast { color: #7BC87B; background: rgba(123,200,123,0.12); }
+.badge-desktop { color: #A78BFA; background: rgba(167,139,250,0.12); }
 
 /* Skeleton loading */
 .skeleton-row {
