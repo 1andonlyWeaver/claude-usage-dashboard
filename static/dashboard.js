@@ -692,7 +692,7 @@ function buildWindowChart(data, canvasId, maHalf) {
       if (step < 0 || step > projBuckets) return null;
       const base = projLineData[i];
       const band = sigma * 1.5 * Math.sqrt(step);  // 0 at step=0, fans out
-      return Math.max(base - band, 0);
+      return isCumulative ? Math.max(base - band, actualAtNow) : Math.max(base - band, 0);
     });
 
     // Gradient factories using scriptable context (chart area available after layout)
