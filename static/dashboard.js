@@ -89,16 +89,18 @@ async function fetchQuota() {
     document.getElementById('gauge5h').classList.toggle('stale', hasError);
     document.getElementById('gauge7d').classList.toggle('stale', hasError);
 
+    const hasData = data.five_hour_resets_at != null;
     if (hasError) {
       document.getElementById('lastUpdated').textContent = 'Quota unavailable: ' + data.error;
       _setQuotaPollRate(QUOTA_POLL_ERROR);
-      return;
+      if (!hasData) return;
+    } else {
+      _setQuotaPollRate(QUOTA_POLL_NORMAL);
     }
-    _setQuotaPollRate(QUOTA_POLL_NORMAL);
 
     quotaState = {
-      five: { pct: data.five_hour_pct, resetsAt: new Date(data.five_hour_resets_at) },
-      seven: { pct: data.seven_day_pct, resetsAt: new Date(data.seven_day_resets_at) },
+      five: { pct: data.five_hour_pct, resetsAt: advanceStaleResetTime(new Date(data.five_hour_resets_at), 5 * 3600000) },
+      seven: { pct: data.seven_day_pct, resetsAt: advanceStaleResetTime(new Date(data.seven_day_resets_at), 7 * 24 * 3600000) },
     };
     updateGauge('5h', quotaState.five.pct);
     updateGauge('7d', quotaState.seven.pct);
@@ -244,6 +246,13 @@ function updateExtraUsage(data) {
   const used  = data.extra_usage_used  != null ? '$' + (data.extra_usage_used  / 100).toFixed(2) : '—';
   const pct   = data.extra_usage_utilization != null ? ' (' + Math.round(data.extra_usage_utilization) + '%)' : '';
   el.textContent = `Overuse: ${used} / ${limit}${pct}`;
+}
+
+function advanceStaleResetTime(date, windowMs) {
+  const now = Date.now();
+  let t = date.getTime();
+  while (t <= now) t += windowMs;
+  return new Date(t);
 }
 
 function formatCountdown(date) {

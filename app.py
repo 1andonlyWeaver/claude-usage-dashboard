@@ -256,10 +256,14 @@ async def _get_usage_data() -> dict:
             )
             return parsed
         else:
-            # Exponential backoff: double the wait per consecutive failure, capped at CACHE_MAX_RETRY
+            # Exponential backoff for transient failures; 401 stays flat (auth errors
+            # don't benefit from long waits and may resolve on the next poll).
             cache["fail_count"] = cache.get("fail_count", 0) + 1
             api_retry = result.get("retry_after") or 0
-            backoff = min(CACHE_MIN_RETRY * (2 ** (cache["fail_count"] - 1)), CACHE_MAX_RETRY)
+            if result.get("error") == "http-401":
+                backoff = CACHE_MIN_RETRY
+            else:
+                backoff = min(CACHE_MIN_RETRY * (2 ** (cache["fail_count"] - 1)), CACHE_MAX_RETRY)
             retry_secs = max(api_retry, backoff)
             cache["retry_after"] = now + retry_secs
             print(f"[quota {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] fetch failed ({result['error']}), fail #{cache['fail_count']}, retry in {retry_secs}s")
@@ -309,7 +313,14 @@ async def refresh(force: bool = Query(default=False)):
 
     Use ?force=true to clear ingest_meta and re-process all files (needed after
     schema migrations or project name changes).
+
+    Also resets the quota fetch backoff so a stuck quota error is retried immediately.
     """
+    # Clear quota backoff so the next poll retries the live API immediately.
+    _usage_cache["retry_after"] = 0.0
+    _usage_cache["fail_count"] = 0
+    _usage_cache["fetched_at"] = 0.0
+
     if _ingest_status.get("running"):
         return {"message": "Ingest already running"}
     thread = threading.Thread(target=lambda: _run_ingest_background(force=force), daemon=True)
