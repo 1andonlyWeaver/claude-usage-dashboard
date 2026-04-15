@@ -19,6 +19,42 @@ except ImportError:
 
 PROJECTS_DIR = Path(os.path.expanduser("~")) / ".claude" / "projects"
 DESKTOP_SESSIONS_DIR = Path(os.environ.get("APPDATA", "")) / "Claude" / "local-agent-mode-sessions"
+
+
+def _get_wsl_projects_dir():
+    """Return the WSL ~/.claude/projects Path if accessible, else None.
+
+    Scans /home/ inside the Ubuntu distro via UNC path rather than running
+    wsl.exe, so it works regardless of whether the Linux username matches the
+    Windows username (e.g. on a different machine).
+    """
+    for prefix in [r"\\wsl.localhost\Ubuntu", r"\\wsl$\Ubuntu"]:
+        home_root = Path(prefix) / "home"
+        try:
+            if not home_root.exists():
+                continue
+            for user_dir in home_root.iterdir():
+                wsl_projects = user_dir / ".claude" / "projects"
+                try:
+                    if wsl_projects.exists():
+                        return wsl_projects
+                except (OSError, PermissionError):
+                    pass
+            break  # found the UNC prefix, no need to try the fallback
+        except (OSError, PermissionError):
+            pass
+    return None
+
+
+def get_project_dirs() -> list:
+    """Return list of all ~/.claude/projects roots to ingest (Windows + any WSL distros)."""
+    dirs = [PROJECTS_DIR]
+    wsl = _get_wsl_projects_dir()
+    if wsl:
+        dirs.append(wsl)
+    return dirs
+
+
 DB_PATH = Path(__file__).parent / "data" / "usage.db"
 
 # API pricing per 1M tokens (input, output)
@@ -106,6 +142,49 @@ def _migrate_db(conn):
             conn.execute(f'ALTER TABLE messages ADD COLUMN {col} {typedef}')
 
 
+def _greedy_resolve(base_path: Path, rest: str) -> str:
+    """Resolve a dash-encoded path suffix against base_path using greedy filesystem matching.
+
+    Each '-' in rest may be a path separator OR a literal hyphen in a directory name.
+    We try to match the shortest prefix of remaining tokens to a real directory at each step.
+    """
+    if not base_path.exists():
+        return rest  # filesystem not accessible
+
+    tokens = rest.split('-')
+    resolved = []
+    current = base_path
+    i = 0
+
+    while i < len(tokens):
+        matched = False
+        for j in range(i + 1, len(tokens) + 1):
+            candidate = '-'.join(tokens[i:j])
+            if (current / candidate).is_dir():
+                resolved.append(candidate)
+                current = current / candidate
+                i = j
+                matched = True
+                break
+        if not matched:
+            resolved.append('-'.join(tokens[i:]))
+            break
+
+    return ' / '.join(resolved) if resolved else 'Home'
+
+
+def _get_wsl_home(username: str):
+    """Return the WSL home Path for username if accessible, else None."""
+    for prefix in [r"\\wsl.localhost\Ubuntu", r"\\wsl$\Ubuntu"]:
+        p = Path(prefix) / "home" / username
+        try:
+            if p.exists():
+                return p
+        except (OSError, PermissionError):
+            pass
+    return None
+
+
 def extract_project_name(dir_name: str) -> str:
     """Convert encoded directory name to a readable path using filesystem resolution.
 
@@ -113,16 +192,56 @@ def extract_project_name(dir_name: str) -> str:
     dashes replacing path separators. We resolve ambiguous dashes by checking which
     segments correspond to real directories on disk.
 
-    Examples:
+    Windows Claude Code examples:
       C--Users-weaverjc                              → Home
       C--Users-weaverjc-Projects                    → Projects
       C--Users-weaverjc-Projects-Personal-foo-bar   → Projects / Personal / foo-bar
       c--Users-weaverjc-Projects-march-madness       → Projects / march-madness
+
+    WSL Claude Code examples (leading '-' encodes the leading '/'):
+      -home-weaverjc-Projects-email                 → Projects / email
+      -mnt-c-Users-weaverjc-Projects-www            → Projects / www  (same as Windows)
+      -home-weaverjc--claude                        → .claude
     """
     if 'ssh-' in dir_name:
         return 'ssh-session'
 
-    # Parse the encoded dir name.
+    # --- WSL POSIX-encoded paths: start with '-' but not '--' ---
+    # Format: -<posix-path-with-dashes>
+    if dir_name.startswith('-') and not dir_name.startswith('--'):
+        # /mnt/<drive>/... → treat as Windows path, reuse Windows resolution
+        m_mnt = re.match(r'^-mnt-([a-zA-Z])-(.+)$', dir_name)
+        if m_mnt:
+            drive = m_mnt.group(1).upper()
+            rest = m_mnt.group(2)
+            # Check for Users/<username> prefix
+            m_users = re.match(r'^Users-(\w+)(-(.+))?$', rest)
+            if m_users:
+                username = m_users.group(1)
+                sub = m_users.group(3) or ''
+                if not sub:
+                    return 'Home'
+                return _greedy_resolve(Path(f'{drive}:\\Users\\{username}'), sub)
+            else:
+                return _greedy_resolve(Path(f'{drive}:\\'), rest)
+
+        # /home/<username>/... → resolve via WSL UNC path
+        m_home = re.match(r'^-home-(\w+)(-(.+))?$', dir_name)
+        if m_home:
+            username = m_home.group(1)
+            rest = m_home.group(3) or ''
+            if not rest:
+                return 'Home'
+            wsl_home = _get_wsl_home(username)
+            if wsl_home:
+                return _greedy_resolve(wsl_home, rest)
+            # WSL not reachable — plain display
+            return rest.replace('-', ' / ')
+
+        # Other POSIX paths (e.g. /root/...) — strip leading '-', plain display
+        return dir_name[1:].replace('-', ' / ')
+
+    # --- Windows-encoded paths ---
     # Two formats:
     #   {Drive}--Users-{username}[-{rest}]  e.g. C--Users-weaverjc-Projects-foo
     #   {Drive}--{rest}                      e.g. u--Projects-WCAG-PDF
@@ -135,40 +254,13 @@ def extract_project_name(dir_name: str) -> str:
         rest = m_users.group(4) or ''
         if not rest:
             return 'Home'
-        base_path = Path(f'{drive}:\\Users\\{username}')
+        return _greedy_resolve(Path(f'{drive}:\\Users\\{username}'), rest)
     elif m_drive:
         drive = m_drive.group(1).upper()
         rest = m_drive.group(2)
-        base_path = Path(f'{drive}:\\')
+        return _greedy_resolve(Path(f'{drive}:\\'), rest)
     else:
         return dir_name  # unknown format
-
-    if not base_path.exists():
-        # Filesystem not accessible — fall back to simple display
-        return rest
-
-    tokens = rest.split('-')
-    resolved = []
-    current = base_path
-    i = 0
-
-    while i < len(tokens):
-        # Try growing a candidate from tokens[i] onward, shortest match first
-        matched = False
-        for j in range(i + 1, len(tokens) + 1):
-            candidate = '-'.join(tokens[i:j])
-            if (current / candidate).is_dir():
-                resolved.append(candidate)
-                current = current / candidate
-                i = j
-                matched = True
-                break
-        if not matched:
-            # No directory match at any length — consume remaining tokens as final component
-            resolved.append('-'.join(tokens[i:]))
-            break
-
-    return ' / '.join(resolved) if resolved else 'Home'
 
 
 def parse_timestamp(ts: str):
@@ -346,12 +438,17 @@ def run_ingest(progress_callback=None, force=False):
 
     # Find all JSONL files: (file_path, project_name, source, timestamp_key, session_id_key)
     all_files = []
-    for project_dir in PROJECTS_DIR.iterdir():
-        if not project_dir.is_dir():
+    for projects_root in get_project_dirs():
+        try:
+            project_dirs = list(projects_root.iterdir())
+        except (OSError, PermissionError):
             continue
-        project_name = extract_project_name(project_dir.name)
-        for jsonl_file in project_dir.glob("*.jsonl"):
-            all_files.append((str(jsonl_file), project_name, 'claude-code', 'timestamp', 'sessionId'))
+        for project_dir in project_dirs:
+            if not project_dir.is_dir():
+                continue
+            project_name = extract_project_name(project_dir.name)
+            for jsonl_file in project_dir.glob("*.jsonl"):
+                all_files.append((str(jsonl_file), project_name, 'claude-code', 'timestamp', 'sessionId'))
 
     # Scan Claude Desktop Cowork/Agent session audit files
     if DESKTOP_SESSIONS_DIR.exists():
