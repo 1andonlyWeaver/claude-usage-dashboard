@@ -1,0 +1,9 @@
+# Normalize all text files to LF in the repository
+* text=auto eol=lf
+
+# Windows batch files require CRLF to execute correctly on Windows
+*.bat text eol=crlf
+
+# Binary files — no line ending conversion
+*.db binary
+*.pyc binary
