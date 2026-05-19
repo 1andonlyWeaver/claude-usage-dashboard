@@ -7,6 +7,7 @@ import threading
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -29,6 +30,14 @@ CACHE_MAX_RETRY = 3600    # maximum retry backoff (1 hour)
 QUOTA_CACHE_FILE = Path(__file__).parent / "data" / "quota_cache.json"
 QUOTA_CACHE_MAX_STALE = 600  # seconds: accept disk-cached data up to 10 min old on startup
 
+# OAuth token refresh — reverse-engineered from public Claude Code clients.
+# If Anthropic changes these, refresh will fail and the dashboard falls back to
+# needing the CLI to refresh the token.
+OAUTH_REFRESH_URL = "https://claude.ai/v1/oauth/token"
+OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+TOKEN_REFRESH_LEEWAY = 120        # refresh if accessToken expires within this many seconds
+TOKEN_REFRESH_MIN_INTERVAL = 60   # never attempt refresh more than once per this many seconds
+
 app = FastAPI(title="Claude Usage Dashboard")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
@@ -46,6 +55,10 @@ _usage_cache: dict = {
     "fail_count": 0,     # consecutive failure count for exponential backoff
 }
 _fetch_lock = asyncio.Lock()  # prevents concurrent API calls when cache is stale
+
+# OAuth token refresh state
+_token_refresh_lock = threading.Lock()
+_last_token_refresh_attempt = 0.0  # monotonic time of last attempt; throttles refresh
 
 # Seed in-memory cache from disk on startup so restarts don't lose last known quota
 try:
@@ -117,20 +130,112 @@ def _periodic_ingest():
     t.start()
 
 
-def _read_oauth_token() -> str | None:
-    """Extract the OAuth access token from ~/.claude/.credentials.json."""
+def _read_credentials() -> dict | None:
+    """Return the full credentials JSON, or None if missing/malformed."""
     try:
-        raw = json.loads(CREDENTIALS_FILE.read_text())
-        return raw.get("claudeAiOauth", {}).get("accessToken") or None
+        return json.loads(CREDENTIALS_FILE.read_text())
     except Exception:
         return None
 
 
-def _fetch_usage_sync() -> dict:
+def _write_credentials_atomic(updated: dict) -> bool:
+    """Atomically rewrite ~/.claude/.credentials.json. Returns True on success."""
+    try:
+        tmp = CREDENTIALS_FILE.with_suffix(CREDENTIALS_FILE.suffix + ".tmp")
+        tmp.write_text(json.dumps(updated, indent=2))
+        tmp.replace(CREDENTIALS_FILE)
+        return True
+    except Exception as ex:
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f"[oauth {ts}] failed to write credentials: {ex}")
+        return False
+
+
+def _refresh_oauth_token() -> bool:
+    """Refresh the OAuth access token using the stored refreshToken.
+
+    Calls Anthropic's OAuth token endpoint and rewrites ~/.claude/.credentials.json
+    with the new accessToken/expiresAt on success. Throttled to one attempt per
+    TOKEN_REFRESH_MIN_INTERVAL seconds to prevent tight loops if refresh fails.
+    Returns True on success.
+    """
+    global _last_token_refresh_attempt
+    with _token_refresh_lock:
+        now = time.monotonic()
+        if now - _last_token_refresh_attempt < TOKEN_REFRESH_MIN_INTERVAL:
+            return False
+        _last_token_refresh_attempt = now
+
+        creds = _read_credentials()
+        if not creds:
+            return False
+        oauth = creds.get("claudeAiOauth") or {}
+        refresh_token = oauth.get("refreshToken")
+        if not refresh_token:
+            return False
+
+        body = urllib.parse.urlencode({
+            "grant_type": "refresh_token",
+            "client_id": OAUTH_CLIENT_ID,
+            "refresh_token": refresh_token,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            OAUTH_REFRESH_URL,
+            data=body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except Exception as ex:
+            print(f"[oauth {ts}] refresh failed: {ex}")
+            return False
+
+        new_access = payload.get("access_token")
+        if not new_access:
+            print(f"[oauth {ts}] refresh response missing access_token")
+            return False
+
+        expires_in = int(payload.get("expires_in") or 36000)
+        new_expires_at = int(time.time() * 1000) + expires_in * 1000
+
+        oauth["accessToken"] = new_access
+        if payload.get("refresh_token"):
+            oauth["refreshToken"] = payload["refresh_token"]
+        oauth["expiresAt"] = new_expires_at
+        creds["claudeAiOauth"] = oauth
+
+        if not _write_credentials_atomic(creds):
+            return False
+        print(f"[oauth {ts}] refreshed token (expires in {expires_in}s)")
+        return True
+
+
+def _read_oauth_token() -> str | None:
+    """Return a valid accessToken, refreshing pre-emptively if it's about to expire."""
+    creds = _read_credentials()
+    if not creds:
+        return None
+    oauth = creds.get("claudeAiOauth") or {}
+    token = oauth.get("accessToken")
+    expires_at_ms = oauth.get("expiresAt") or 0
+    seconds_left = (expires_at_ms / 1000) - time.time()
+    if not token or seconds_left < TOKEN_REFRESH_LEEWAY:
+        if _refresh_oauth_token():
+            creds = _read_credentials() or {}
+            token = (creds.get("claudeAiOauth") or {}).get("accessToken")
+    return token or None
+
+
+def _fetch_usage_sync(_already_retried: bool = False) -> dict:
     """Call the Anthropic usage API synchronously. Returns a result dict:
     On success: {"ok": True, "data": {...}, "retry_after": None}
     On rate-limit: {"ok": False, "error": "rate-limited", "retry_after": <seconds>}
     On other failure: {"ok": False, "error": "<message>", "retry_after": None}
+
+    On 401, attempts a one-shot OAuth refresh and retries the request once.
     """
     token = _read_oauth_token()
     if not token:
@@ -165,6 +270,10 @@ def _fetch_usage_sync() -> dict:
                 retry_secs = 300
             print(f"[quota {ts}] 429 - Retry-After: {retry_after_raw!r}, all headers: {all_headers}")
             return {"ok": False, "error": "rate-limited", "retry_after": retry_secs}
+        if e.code == 401 and not _already_retried:
+            print(f"[quota {ts}] HTTP 401 - attempting OAuth refresh")
+            if _refresh_oauth_token():
+                return _fetch_usage_sync(_already_retried=True)
         print(f"[quota {ts}] HTTP {e.code}")
         return {"ok": False, "error": f"http-{e.code}", "retry_after": None}
     except Exception as ex:
@@ -286,6 +395,9 @@ async def startup():
         thread.start()
     else:
         _ingest_status["done"] = True
+    # Pre-refresh the OAuth token so the first /api/quota poll doesn't pay the latency
+    # (or fail with 401 when the token expired while the machine was off).
+    threading.Thread(target=_read_oauth_token, daemon=True).start()
     t = threading.Timer(90, _periodic_ingest)
     t.daemon = True
     t.start()

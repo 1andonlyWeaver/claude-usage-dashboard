@@ -91,7 +91,8 @@ async function fetchQuota() {
 
     const hasData = data.five_hour_resets_at != null;
     if (hasError) {
-      document.getElementById('lastUpdated').textContent = 'Quota unavailable: ' + data.error;
+      document.getElementById('lastUpdated').textContent =
+        'Quota unavailable: ' + data.error + (hasData ? '' : ' — retrying');
       _setQuotaPollRate(QUOTA_POLL_ERROR);
       if (!hasData) return;
     } else {
