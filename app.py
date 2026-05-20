@@ -179,10 +179,16 @@ def _refresh_oauth_token() -> bool:
             "client_id": OAUTH_CLIENT_ID,
             "refresh_token": refresh_token,
         }).encode("utf-8")
+        # claude.ai is behind Cloudflare and 403s the default Python-urllib User-Agent.
+        # Mimic a generic browser-ish UA so the request gets through.
         req = urllib.request.Request(
             OAUTH_REFRESH_URL,
             data=body,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+                "User-Agent": "claude-usage-dashboard/1.0",
+            },
             method="POST",
         )
         ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
