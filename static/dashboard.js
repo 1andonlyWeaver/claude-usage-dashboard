@@ -90,6 +90,7 @@ async function fetchQuota() {
     document.getElementById('gauge7d').classList.toggle('stale', hasError);
 
     const hasData = data.five_hour_resets_at != null;
+    document.getElementById('windowInfo').classList.toggle('stale', hasError);
     if (hasError) {
       document.getElementById('lastUpdated').textContent =
         'Quota unavailable: ' + data.error + (hasData ? '' : ' — retrying');
@@ -109,6 +110,7 @@ async function fetchQuota() {
     updateIdealTick('7d', quotaState.seven.resetsAt, 7 * 24 * 3600000);
     updateForecasts();
     updateExtraUsage(data);
+    updateWindowRanges();
     document.getElementById('lastUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString();
   } catch(e) {
     document.getElementById('lastUpdated').textContent = 'Error fetching quota';
@@ -174,7 +176,35 @@ function updateCountdowns() {
     document.getElementById('countdown7d').textContent = 'Resets ' + formatCountdown(quotaState.seven.resetsAt);
     updateIdealTick('7d', quotaState.seven.resetsAt, 7 * 24 * 3600000);
   }
+  updateWindowRanges();
   updateExceedanceWarnings();
+}
+
+function updateWindowRanges() {
+  const fiveEl = document.getElementById('window5hRange');
+  const sevenEl = document.getElementById('window7dRange');
+  if (!fiveEl || !sevenEl) return;
+
+  const fmtTime = d => d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const fmtDate = d => d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const fmtWeekday = d => d.toLocaleDateString([], { weekday: 'short' });
+  const sameDay = (a, b) =>
+    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+
+  if (quotaState.five) {
+    const end = quotaState.five.resetsAt;
+    const start = new Date(end.getTime() - 5 * 3600000);
+    const endLabel = sameDay(start, end) ? fmtTime(end) : `${fmtTime(end)} ${fmtWeekday(end)}`;
+    fiveEl.innerHTML = `<span class="window-label">5h</span>${fmtTime(start)} → ${endLabel}`;
+  }
+  if (quotaState.seven) {
+    const end = quotaState.seven.resetsAt;
+    const start = new Date(end.getTime() - 7 * 24 * 3600000);
+    const startTime = fmtTime(start);
+    const endTime = fmtTime(end);
+    const startLabel = startTime === endTime ? fmtDate(start) : `${fmtDate(start)} ${startTime}`;
+    sevenEl.innerHTML = `<span class="window-label">7d</span>${startLabel} → ${fmtDate(end)} ${endTime}`;
+  }
 }
 
 function updateForecasts() {

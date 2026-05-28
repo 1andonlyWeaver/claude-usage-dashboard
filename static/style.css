@@ -124,6 +124,33 @@ body {
   color: var(--text-muted);
   font-family: var(--font-mono);
 }
+.window-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: opacity 0.2s;
+}
+.window-info.stale {
+  opacity: 0.4;
+}
+.window-range {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  line-height: 1.2;
+  color: var(--text-primary);
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 3px 10px;
+  white-space: nowrap;
+}
+.window-range .window-label {
+  color: var(--text-muted);
+  margin-right: 6px;
+}
+@media (max-width: 720px) {
+  .window-info { display: none; }
+}
 .btn-refresh {
   display: flex;
   align-items: center;
