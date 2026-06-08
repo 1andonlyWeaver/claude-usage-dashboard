@@ -637,7 +637,10 @@ function buildWindowChart(data, canvasId, maHalf) {
       let running = 0;
       const cumData = rawByGroup[g].map((v, idx) => {
         running += v;
-        return idx <= nowIndex ? running * norm + otherPct : null;
+        // In stacked (grouped) mode, each group is a slice that Chart.js sums; the flat "Other"
+        // band already supplies the otherPct baseline once, so only the non-stacked single-line
+        // view adds otherPct here (otherwise it would be counted once per category).
+        return idx <= nowIndex ? running * norm + (stacked ? 0 : otherPct) : null;
       });
       // When "Other" band is present, local groups stack on top of it (fill: '-1' for first)
       const hasOtherBand = quotaAvailable && otherPct > 0;
