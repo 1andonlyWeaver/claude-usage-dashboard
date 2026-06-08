@@ -11,6 +11,14 @@ const CLAUDE_CREAM   = 'rgba(250,240,230,0.7)';
 const CLAUDE_RED     = '#D95F5F';
 const CLAUDE_PURPLE  = '#9B7FC8';
 
+// Per-family shade palettes for distinguishing model versions (e.g. Opus 4.8 vs 4.7).
+// Index 0 is the canonical brand color; later indices are darker/lighter variants.
+const FAMILY_SHADES = {
+  Opus:   ['#9B7FC8', '#6F4FA0', '#C3AEE6', '#4E3080'],
+  Sonnet: ['#E07A5F', '#B85A3E', '#F2A48C', '#8E3D22'],
+  Haiku:  ['#C9A96E', '#A2854A', '#E6CF9C', '#7A5F2C'],
+};
+
 const ARC_TOTAL      = 377;   // total arc length for 270° arc on r=80 (circumference≈503, arc=377, gap=126)
 const DAY_LABELS     = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 
@@ -566,11 +574,17 @@ function buildWindowChart(data, canvasId, maHalf) {
   const nowMs = Date.now();
   const nowIndex = allTimes.reduce((acc, t, i) => t <= nowMs ? i : acc, -1);
 
+  // For model stacking the API returns raw model IDs as groups; collapse them to
+  // version labels so dated/undated variants merge into one series (e.g. "Opus 4.8").
+  // Other stack modes (token_type/project/none) pass the group through unchanged.
+  const groupLabel = g => (windowStack === 'model' ? shortModelName(g) : g);
+
   // Collect unique groups preserving order
   const groupOrder = [];
   const seen = new Set();
   for (const b of buckets) {
-    if (!seen.has(b.group)) { groupOrder.push(b.group); seen.add(b.group); }
+    const g = groupLabel(b.group);
+    if (!seen.has(g)) { groupOrder.push(g); seen.add(g); }
   }
   if (groupOrder.length === 0) groupOrder.push('total');
 
@@ -578,8 +592,9 @@ function buildWindowChart(data, canvasId, maHalf) {
   const lookup = {};
   for (const b of buckets) {
     const k = new Date(b.time).getTime();
+    const g = groupLabel(b.group);
     if (!lookup[k]) lookup[k] = {};
-    lookup[k][b.group] = (lookup[k][b.group] || 0) + b.tokens;
+    lookup[k][g] = (lookup[k][g] || 0) + b.tokens;
   }
 
   // Fill arrays: allTimes x groupOrder
@@ -973,9 +988,10 @@ async function loadModels(days = 90) {
   if (modelChart) modelChart.destroy();
   const ctx = document.getElementById('modelChart').getContext('2d');
 
-  const labels = data.map(r => shortModelName(r.model));
-  const values = data.map(r => r.total_tokens);
-  const colors = data.map(r => modelColor(r.model));
+  const agg = aggregateByLabel(data, 'total_tokens');
+  const labels = agg.map(r => r.label);
+  const values = agg.map(r => r.value);
+  const colors = agg.map(r => modelColor(r.model));
 
   modelChart = new Chart(ctx, {
     type: 'doughnut',
@@ -996,20 +1012,45 @@ async function loadModels(days = 90) {
   });
 }
 
+// Map a full model ID to a version-aware label, e.g.
+//   claude-opus-4-8            -> "Opus 4.8"
+//   claude-haiku-4-5-20251001  -> "Haiku 4.5"   (snapshot date dropped)
+// The label doubles as the canonical per-version key: dated and undated IDs of the
+// same version collapse to one label, which is what drives the merge in the charts.
 function shortModelName(model) {
   if (!model) return 'Unknown';
-  if (model.includes('opus')) return 'Opus';
-  if (model.includes('haiku')) return 'Haiku';
-  if (model.includes('sonnet')) return 'Sonnet';
-  return model.split('-').slice(-2).join('-');
+  const fam = model.includes('opus') ? 'Opus'
+            : model.includes('sonnet') ? 'Sonnet'
+            : model.includes('haiku') ? 'Haiku' : null;
+  if (!fam) return model.split('-').slice(-2).join('-');
+  const m = model.match(/(?:opus|sonnet|haiku)-(\d+)-(\d+)/);
+  return m ? `${fam} ${m[1]}.${m[2]}` : fam;
 }
 
+// Color a model by its version: pick a shade from the family palette, keyed
+// deterministically off the major.minor version so the same version always gets the
+// same color across every chart. Consecutive versions land on distinct shades.
 function modelColor(model) {
   if (!model) return CLAUDE_CREAM;
-  if (model.includes('opus'))   return CLAUDE_PURPLE;
-  if (model.includes('haiku'))  return CLAUDE_AMBER;
-  if (model.includes('sonnet')) return CLAUDE_ORANGE;
-  return CLAUDE_CREAM;
+  const fam = shortModelName(model).split(' ')[0];
+  const shades = FAMILY_SHADES[fam];
+  if (!shades) return CLAUDE_CREAM;
+  const m = shortModelName(model).match(/(\d+)\.(\d+)/);
+  const idx = m ? (parseInt(m[1], 10) * 10 + parseInt(m[2], 10)) % shades.length : 0;
+  return shades[idx];
+}
+
+// Group rows by their version label, summing valueKey. Returns one entry per version
+// (with a representative raw `model` for coloring), sorted by descending value.
+function aggregateByLabel(rows, valueKey) {
+  const map = new Map();
+  for (const r of rows) {
+    const label = shortModelName(r.model);
+    const cur = map.get(label);
+    if (cur) cur.value += (r[valueKey] || 0);
+    else map.set(label, { label, model: r.model, value: (r[valueKey] || 0) });
+  }
+  return [...map.values()].sort((a, b) => b.value - a.value);
 }
 
 // ─── Heatmap ─────────────────────────────────────────────────
@@ -1200,12 +1241,12 @@ async function loadCost() {
 
   const breakdown = document.getElementById('costBreakdown');
   breakdown.innerHTML = '';
-  for (const row of data.breakdown) {
+  for (const row of aggregateByLabel(data.breakdown, 'cost')) {
     const div = document.createElement('div');
     div.className = 'cost-row';
     div.innerHTML = `
-      <span class="cost-model">${shortModelName(row.model)}</span>
-      <span class="cost-model-val">$${row.cost.toFixed(2)}</span>
+      <span class="cost-model">${row.label}</span>
+      <span class="cost-model-val">$${row.value.toFixed(2)}</span>
     `;
     breakdown.appendChild(div);
   }

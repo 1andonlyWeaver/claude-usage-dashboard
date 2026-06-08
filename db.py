@@ -10,16 +10,40 @@ DB_PATH = Path(__file__).parent / "data" / "usage.db"
 # API pricing per 1M tokens (input_price, output_price, cache_create_mult, cache_read_mult)
 # Cache creation tiers (5m and 1h ephemeral) are both charged at 1.25x input price.
 # Cache read is charged at 0.10x input price.
+# Family rates are the source of truth; the exact-ID dict below holds overrides only.
+OPUS_PRICING =   (15.00, 75.00, 1.25, 0.10)
+SONNET_PRICING = (3.00,  15.00, 1.25, 0.10)
+HAIKU_PRICING =  (0.25,  1.25,  1.25, 0.10)
+
 MODEL_PRICING = {
-    "claude-opus-4-6":           (15.00, 75.00, 1.25, 0.10),
-    "claude-opus-4-5":           (15.00, 75.00, 1.25, 0.10),
-    "claude-opus-4-5-20251101":  (15.00, 75.00, 1.25, 0.10),
-    "claude-sonnet-4-6":         (3.00,  15.00, 1.25, 0.10),
-    "claude-sonnet-4-5":         (3.00,  15.00, 1.25, 0.10),
-    "claude-haiku-4-5":          (0.25,  1.25,  1.25, 0.10),
-    "claude-haiku-4-5-20251001": (0.25,  1.25,  1.25, 0.10),
+    "claude-opus-4-6":           OPUS_PRICING,
+    "claude-opus-4-5":           OPUS_PRICING,
+    "claude-opus-4-5-20251101":  OPUS_PRICING,
+    "claude-sonnet-4-6":         SONNET_PRICING,
+    "claude-sonnet-4-5":         SONNET_PRICING,
+    "claude-haiku-4-5":          HAIKU_PRICING,
+    "claude-haiku-4-5-20251001": HAIKU_PRICING,
 }
-DEFAULT_PRICING = (3.00, 15.00, 1.25, 0.10)
+DEFAULT_PRICING = SONNET_PRICING
+
+
+def price_for_model(model: str):
+    """Return (input, output, cache_create_mult, cache_read_mult) for a model.
+
+    Exact-ID overrides in MODEL_PRICING win; otherwise fall back to the model
+    family (opus/sonnet/haiku) so new versions are never silently mis-tiered;
+    otherwise DEFAULT_PRICING.
+    """
+    if model in MODEL_PRICING:
+        return MODEL_PRICING[model]
+    m = (model or "").lower()
+    if "opus" in m:
+        return OPUS_PRICING
+    if "sonnet" in m:
+        return SONNET_PRICING
+    if "haiku" in m:
+        return HAIKU_PRICING
+    return DEFAULT_PRICING
 
 
 def get_conn():
@@ -190,7 +214,7 @@ def estimate_cost(days: int = 30) -> dict:
 
     for row in rows:
         model = row['model']
-        pricing = MODEL_PRICING.get(model, DEFAULT_PRICING)
+        pricing = price_for_model(model)
         input_price, output_price, cache_create_mult, cache_read_mult = pricing
 
         # Use tier-specific cache counts when available, fall back to aggregated column
@@ -286,7 +310,7 @@ def window_tokens(window_start: str, window_end: str, bucket_minutes: int,
         results = []
         for r in rows:
             model = r['grp']
-            inp_price, out_price, cache_create_mult, cache_read_mult = MODEL_PRICING.get(model, DEFAULT_PRICING)
+            inp_price, out_price, cache_create_mult, cache_read_mult = price_for_model(model)
             cost = (
                 (r['input_tokens'] or 0) / 1_000_000 * inp_price +
                 (r['cache_creation_tokens'] or 0) / 1_000_000 * inp_price * cache_create_mult +

@@ -57,7 +57,9 @@ def get_project_dirs() -> list:
 
 DB_PATH = Path(__file__).parent / "data" / "usage.db"
 
-# API pricing per 1M tokens (input, output)
+# API pricing per 1M tokens (input, output).
+# NOTE: currently unused — cost is computed at query time in db.py via price_for_model().
+# Kept in sync with db.py for documentation parity only.
 MODEL_PRICING = {
     "claude-opus-4-6": (15.00, 75.00),
     "claude-opus-4-5": (15.00, 75.00),
