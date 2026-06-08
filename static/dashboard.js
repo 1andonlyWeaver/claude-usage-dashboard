@@ -917,8 +917,14 @@ function buildWindowChart(data, canvasId, maHalf) {
 }
 
 // ─── Projects chart ──────────────────────────────────────────
-async function loadProjects() {
-  const data = await apiFetch('/api/projects?days=90');
+function setProjectDays(days, btn) {
+  document.querySelectorAll('#projectDaySelector .day-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  loadProjects(days);
+}
+
+async function loadProjects(days = 90) {
+  const data = await apiFetch('/api/projects?days=' + days);
   if (projectChart) projectChart.destroy();
   const ctx = document.getElementById('projectChart').getContext('2d');
   const labels = data.map(r => r.project);
@@ -956,8 +962,14 @@ async function loadProjects() {
 }
 
 // ─── Models chart ────────────────────────────────────────────
-async function loadModels() {
-  const data = await apiFetch('/api/models?days=90');
+function setModelDays(days, btn) {
+  document.querySelectorAll('#modelDaySelector .day-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  loadModels(days);
+}
+
+async function loadModels(days = 90) {
+  const data = await apiFetch('/api/models?days=' + days);
   if (modelChart) modelChart.destroy();
   const ctx = document.getElementById('modelChart').getContext('2d');
 

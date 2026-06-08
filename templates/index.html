@@ -134,6 +134,11 @@
         <div class="card chart-card">
           <div class="card-header">
             <h2 class="card-title">By Model</h2>
+            <div class="day-selector" id="modelDaySelector">
+              <button class="day-btn" onclick="setModelDays(7, this)">7d</button>
+              <button class="day-btn" onclick="setModelDays(30, this)">30d</button>
+              <button class="day-btn active" onclick="setModelDays(90, this)">90d</button>
+            </div>
           </div>
           <div class="chart-wrap chart-wrap-donut">
             <canvas id="modelChart"></canvas>
@@ -184,6 +189,11 @@
         <div class="card chart-card">
           <div class="card-header">
             <h2 class="card-title">By Project</h2>
+            <div class="day-selector" id="projectDaySelector">
+              <button class="day-btn" onclick="setProjectDays(7, this)">7d</button>
+              <button class="day-btn" onclick="setProjectDays(30, this)">30d</button>
+              <button class="day-btn active" onclick="setProjectDays(90, this)">90d</button>
+            </div>
           </div>
           <div class="chart-wrap chart-wrap-tall">
             <canvas id="projectChart"></canvas>
