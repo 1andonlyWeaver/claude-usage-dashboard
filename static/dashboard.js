@@ -12,11 +12,12 @@ const CLAUDE_RED     = '#D95F5F';
 const CLAUDE_PURPLE  = '#9B7FC8';
 
 // Per-family shade palettes for distinguishing model versions (e.g. Opus 4.8 vs 4.7).
-// Index 0 is the canonical brand color; later indices are darker/lighter variants.
+// Ordered darkest → lightest: the newest version in a family gets index 0 (darkest),
+// each older version steps one shade lighter, clamped at the lightest.
 const FAMILY_SHADES = {
-  Opus:   ['#9B7FC8', '#6F4FA0', '#C3AEE6', '#4E3080'],
-  Sonnet: ['#E07A5F', '#B85A3E', '#F2A48C', '#8E3D22'],
-  Haiku:  ['#C9A96E', '#A2854A', '#E6CF9C', '#7A5F2C'],
+  Opus:   ['#4E3080', '#6F4FA0', '#9B7FC8', '#C3AEE6'],
+  Sonnet: ['#8E3D22', '#B85A3E', '#E07A5F', '#F2A48C'],
+  Haiku:  ['#7A5F2C', '#A2854A', '#C9A96E', '#E6CF9C'],
 };
 
 const ARC_TOTAL      = 377;   // total arc length for 270° arc on r=80 (circumference≈503, arc=377, gap=126)
@@ -991,7 +992,7 @@ async function loadModels(days = 90) {
   const agg = aggregateByLabel(data, 'total_tokens');
   const labels = agg.map(r => r.label);
   const values = agg.map(r => r.value);
-  const colors = agg.map(r => modelColor(r.model));
+  const colors = modelColors(agg);
 
   modelChart = new Chart(ctx, {
     type: 'doughnut',
@@ -1027,17 +1028,36 @@ function shortModelName(model) {
   return m ? `${fam} ${m[1]}.${m[2]}` : fam;
 }
 
-// Color a model by its version: pick a shade from the family palette, keyed
-// deterministically off the major.minor version so the same version always gets the
-// same color across every chart. Consecutive versions land on distinct shades.
-function modelColor(model) {
-  if (!model) return CLAUDE_CREAM;
-  const fam = shortModelName(model).split(' ')[0];
-  const shades = FAMILY_SHADES[fam];
-  if (!shades) return CLAUDE_CREAM;
+// Extract the major.minor version code (e.g. "Opus 4.8" -> 48), or null.
+function versionCode(model) {
   const m = shortModelName(model).match(/(\d+)\.(\d+)/);
-  const idx = m ? (parseInt(m[1], 10) * 10 + parseInt(m[2], 10)) % shades.length : 0;
-  return shades[idx];
+  return m ? parseInt(m[1], 10) * 10 + parseInt(m[2], 10) : null;
+}
+
+// Color each row's model by version recency: within each family, the newest
+// version (highest major.minor present) gets the darkest shade and older versions
+// step lighter. Ranking is relative to the versions actually present, so the
+// ordering is correct in every time-window filter without a hardcoded "newest".
+function modelColors(rows) {
+  const codesByFam = {};
+  for (const r of rows) {
+    const fam = shortModelName(r.model).split(' ')[0];
+    const code = versionCode(r.model);
+    if (code === null) continue;
+    (codesByFam[fam] ||= new Set()).add(code);
+  }
+  const rankByFam = {};
+  for (const fam in codesByFam) {
+    const desc = [...codesByFam[fam]].sort((a, b) => b - a); // newest first
+    rankByFam[fam] = new Map(desc.map((c, i) => [c, i]));
+  }
+  return rows.map(r => {
+    const fam = shortModelName(r.model).split(' ')[0];
+    const shades = FAMILY_SHADES[fam];
+    if (!shades) return CLAUDE_CREAM;
+    const rank = rankByFam[fam]?.get(versionCode(r.model)) ?? 0;
+    return shades[Math.min(rank, shades.length - 1)];
+  });
 }
 
 // Group rows by their version label, summing valueKey. Returns one entry per version
