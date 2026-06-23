@@ -27,6 +27,7 @@ USAGE_API_BETA_HEADER = "oauth-2025-04-20"
 CACHE_MAX_AGE = 360       # seconds before re-fetching
 CACHE_MIN_RETRY = 300     # minimum seconds between failed attempts (5 min)
 CACHE_MAX_RETRY = 3600    # maximum retry backoff (1 hour)
+AUTH_RETRY = 30           # short backoff for auth errors (login-required) so re-login is picked up quickly
 QUOTA_CACHE_FILE = Path(__file__).parent / "data" / "quota_cache.json"
 QUOTA_CACHE_MAX_STALE = 600  # seconds: accept disk-cached data up to 10 min old on startup
 
@@ -59,6 +60,7 @@ _fetch_lock = asyncio.Lock()  # prevents concurrent API calls when cache is stal
 # OAuth token refresh state
 _token_refresh_lock = threading.Lock()
 _last_token_refresh_attempt = 0.0  # monotonic time of last attempt; throttles refresh
+_auth_dead = False  # True once a refresh returns invalid_grant — refresh token revoked, re-login required
 
 # Seed in-memory cache from disk on startup so restarts don't lose last known quota
 try:
@@ -159,7 +161,7 @@ def _refresh_oauth_token() -> bool:
     TOKEN_REFRESH_MIN_INTERVAL seconds to prevent tight loops if refresh fails.
     Returns True on success.
     """
-    global _last_token_refresh_attempt
+    global _last_token_refresh_attempt, _auth_dead
     with _token_refresh_lock:
         now = time.monotonic()
         if now - _last_token_refresh_attempt < TOKEN_REFRESH_MIN_INTERVAL:
@@ -195,6 +197,18 @@ def _refresh_oauth_token() -> bool:
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode("utf-8", "replace")
+            except Exception:
+                pass
+            print(f"[oauth {ts}] refresh failed: HTTP {e.code} - {body[:300]}")
+            # invalid_grant (or 401) means the stored refresh token is revoked/expired:
+            # no amount of retrying will help — the user must re-login via the CLI.
+            if "invalid_grant" in body or e.code == 401:
+                _auth_dead = True
+            return False
         except Exception as ex:
             print(f"[oauth {ts}] refresh failed: {ex}")
             return False
@@ -215,24 +229,42 @@ def _refresh_oauth_token() -> bool:
 
         if not _write_credentials_atomic(creds):
             return False
+        _auth_dead = False  # a fresh token was minted — clear any prior dead-token state
         print(f"[oauth {ts}] refreshed token (expires in {expires_in}s)")
         return True
 
 
-def _read_oauth_token() -> str | None:
-    """Return a valid accessToken, refreshing pre-emptively if it's about to expire."""
+def _read_oauth_token() -> tuple[str | None, str]:
+    """Return (accessToken, status), refreshing pre-emptively if it's about to expire.
+
+    status is one of:
+      'ok'             — a usable token is available
+      'login-required' — token is expired and the refresh token is dead (re-login needed)
+      'no-credentials' — no credentials file or no stored token
+    """
+    global _auth_dead
     creds = _read_credentials()
     if not creds:
-        return None
+        return None, "no-credentials"
     oauth = creds.get("claudeAiOauth") or {}
     token = oauth.get("accessToken")
+    if not token:
+        return None, "no-credentials"
     expires_at_ms = oauth.get("expiresAt") or 0
     seconds_left = (expires_at_ms / 1000) - time.time()
-    if not token or seconds_left < TOKEN_REFRESH_LEEWAY:
-        if _refresh_oauth_token():
-            creds = _read_credentials() or {}
-            token = (creds.get("claudeAiOauth") or {}).get("accessToken")
-    return token or None
+    if seconds_left >= TOKEN_REFRESH_LEEWAY:
+        _auth_dead = False  # comfortably-valid token present; clear any stale dead-token flag
+        return token, "ok"
+    # Expired or near-expiry — attempt a refresh (throttled internally).
+    if _refresh_oauth_token():
+        creds = _read_credentials() or {}
+        token = (creds.get("claudeAiOauth") or {}).get("accessToken")
+        return token, "ok"
+    # Refresh didn't succeed. If the token is actually expired and the refresh token is
+    # known-dead, the user must re-login; otherwise keep using the still-valid token.
+    if seconds_left < 0 and _auth_dead:
+        return token, "login-required"
+    return token, "ok"
 
 
 def _fetch_usage_sync(_already_retried: bool = False) -> dict:
@@ -243,9 +275,13 @@ def _fetch_usage_sync(_already_retried: bool = False) -> dict:
 
     On 401, attempts a one-shot OAuth refresh and retries the request once.
     """
-    token = _read_oauth_token()
+    token, auth_status = _read_oauth_token()
+    if auth_status == "login-required":
+        # Access token expired and refresh token is dead — calling the API just yields a
+        # 429/401 that masks the real cause, so surface the actionable error directly.
+        return {"ok": False, "error": "login-required", "retry_after": None}
     if not token:
-        return {"ok": False, "error": "no-credentials", "retry_after": None}
+        return {"ok": False, "error": auth_status, "retry_after": None}
 
     req = urllib.request.Request(
         USAGE_API_URL,
@@ -280,6 +316,8 @@ def _fetch_usage_sync(_already_retried: bool = False) -> dict:
             print(f"[quota {ts}] HTTP 401 - attempting OAuth refresh")
             if _refresh_oauth_token():
                 return _fetch_usage_sync(_already_retried=True)
+            if _auth_dead:
+                return {"ok": False, "error": "login-required", "retry_after": None}
         print(f"[quota {ts}] HTTP {e.code}")
         return {"ok": False, "error": f"http-{e.code}", "retry_after": None}
     except Exception as ex:
@@ -375,7 +413,11 @@ async def _get_usage_data() -> dict:
             # don't benefit from long waits and may resolve on the next poll).
             cache["fail_count"] = cache.get("fail_count", 0) + 1
             api_retry = result.get("retry_after") or 0
-            if result.get("error") == "http-401":
+            if result.get("error") in ("login-required", "no-credentials"):
+                # Auth errors resolve via re-login, not waiting. Re-check often and cheaply
+                # (the dead-token short-circuit spends no network) so recovery is near-automatic.
+                backoff = AUTH_RETRY
+            elif result.get("error") == "http-401":
                 backoff = CACHE_MIN_RETRY
             else:
                 backoff = min(CACHE_MIN_RETRY * (2 ** (cache["fail_count"] - 1)), CACHE_MAX_RETRY)

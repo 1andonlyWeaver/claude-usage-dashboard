@@ -101,8 +101,10 @@ async function fetchQuota() {
     const hasData = data.five_hour_resets_at != null;
     document.getElementById('windowInfo').classList.toggle('stale', hasError);
     if (hasError) {
-      document.getElementById('lastUpdated').textContent =
-        'Quota unavailable: ' + data.error + (hasData ? '' : ' — retrying');
+      const authError = data.error === 'login-required' || data.error === 'no-credentials';
+      document.getElementById('lastUpdated').textContent = authError
+        ? '⚠ Re-login required — run "claude auth login", then press R'
+        : 'Quota unavailable: ' + data.error + (hasData ? '' : ' — retrying');
       _setQuotaPollRate(QUOTA_POLL_ERROR);
       if (!hasData) return;
     } else {
