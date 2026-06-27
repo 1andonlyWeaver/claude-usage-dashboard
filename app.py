@@ -451,9 +451,26 @@ async def startup():
     t.start()
 
 
+def _asset_url(rel_path: str) -> str:
+    """Cache-busted URL for a file under static/, e.g. /static/dashboard.js?v=<token>.
+
+    The token is derived from the file's mtime+size, so it changes whenever the
+    asset changes (edit, pull, checkout). This forces browsers to refetch instead
+    of serving a stale cached copy — StaticFiles sends no Cache-Control header, so
+    without this a browser can keep an old dashboard.js across reloads.
+    """
+    f = BASE_DIR / "static" / rel_path
+    try:
+        st = f.stat()
+        token = f"{int(st.st_mtime)}-{st.st_size}"
+    except OSError:
+        token = "0"
+    return f"/static/{rel_path}?v={token}"
+
+
 @app.get("/")
 async def index(request: Request):
-    return templates.TemplateResponse(request, "index.html")
+    return templates.TemplateResponse(request, "index.html", {"asset_url": _asset_url})
 
 
 @app.get("/api/quota")
