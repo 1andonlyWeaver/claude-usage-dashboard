@@ -61,7 +61,8 @@ messages (id, msg_id UNIQUE, timestamp, date, hour, day_of_week,
           input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
           cache_5m_tokens, cache_1h_tokens,
           entrypoint, speed, git_branch,
-          web_search_count, web_fetch_count)
+          web_search_count, web_fetch_count,
+          source)
 
 ingest_meta (file_path PRIMARY KEY, file_size, last_modified)
 ```
@@ -83,9 +84,16 @@ Changes to `app.py`, `db.py`, or `ingest.py` require a server restart to take ef
 
 **When running under Task Scheduler (normal):**
 ```powershell
-Stop-ScheduledTask -TaskName ClaudeUsageDashboard   # graceful stop
-Start-ScheduledTask -TaskName ClaudeUsageDashboard  # start
-(Get-ScheduledTask -TaskName ClaudeUsageDashboard).State  # check status
+Stop-ScheduledTask  -TaskName ClaudeUsageDashboard   # stops launcher; its job object kills the server too
+Start-ScheduledTask -TaskName ClaudeUsageDashboard   # launcher re-spawns the server
+# Verify it actually bound the port — task State can read "Ready" transiently while the
+# launcher is still starting uvicorn, so check the listener rather than the task State:
+Get-NetTCPConnection -LocalPort 8080 -State Listen -ErrorAction SilentlyContinue
+```
+
+`launcher.py` binds the server to a Windows Job Object (`KILL_ON_JOB_CLOSE`), so stopping the task reliably tears the server down instead of orphaning it on port 8080. If you ever still find a stale listener after a stop (e.g. one started by an older launcher build), free the port manually before starting again:
+```powershell
+Get-NetTCPConnection -LocalPort 8080 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
 ```
 
 **When running manually:**
@@ -96,11 +104,11 @@ The server runs on port 8080; the process can be identified via `netstat -ano | 
 - **Force re-ingest required** after schema migrations or `extract_project_name` changes — unchanged files are skipped otherwise. Use `POST /api/refresh?force=true` or delete `ingest_meta` rows manually.
 - **Project name resolution** uses filesystem greedy-match: `C--Users-weaverjc-Projects-march-madness` → resolves by checking real directories on disk, so project names only resolve correctly on the machine where the paths exist.
 - **Schema migration** is handled automatically by `_migrate_db()` in `ingest.py` via `PRAGMA table_info` + `ALTER TABLE`. New columns default to 0/empty for pre-migration rows.
-- **Auto-start**: Registered in Windows Task Scheduler as `ClaudeUsageDashboard`. `launcher.py` is the entry point — it checks whether port 8080 is already in use, then spawns the server and waits (keeping the task in "Running" state so TS can enforce RestartCount and IgnoreNew). To re-register on a new machine, run `powershell -ExecutionPolicy Bypass -File scripts\register-task.ps1`.
+- **Auto-start**: Registered in Windows Task Scheduler as `ClaudeUsageDashboard`. `launcher.py` is the entry point — it checks whether port 8080 is already in use, then spawns the server and waits (keeping the task in "Running" state so TS can enforce RestartCount and IgnoreNew). The server is assigned to a `KILL_ON_JOB_CLOSE` Windows Job Object so it dies with the launcher; otherwise `Stop-ScheduledTask` would kill only the launcher and orphan the server on the port. To re-register on a new machine, run `powershell -ExecutionPolicy Bypass -File scripts\register-task.ps1`.
 
 ## API Endpoints
 
-`/api/quota`, `/api/ingest-status`, `/api/refresh` (POST), `/api/daily`, `/api/projects`, `/api/models`, `/api/heatmap`, `/api/sessions`, `/api/session/{id}`, `/api/rate`, `/api/cost`, `/api/stats`, `/api/window`
+`/api/quota`, `/api/ingest-status`, `/api/refresh` (POST), `/api/daily`, `/api/projects`, `/api/models`, `/api/heatmap`, `/api/sessions`, `/api/session/{id}`, `/api/rate`, `/api/cost`, `/api/sources`, `/api/stats`, `/api/window`
 
 `/api/window?type=5h|7d&group_by=none|token_type|project|model` — token buckets within the current quota window (5-min or 60-min buckets).
 
