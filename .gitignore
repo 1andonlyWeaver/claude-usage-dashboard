@@ -22,3 +22,9 @@ Thumbs.db
 # Claude / AI
 .claude/
 .superpowers/
+
+# MCP / tooling artifacts
+.playwright-mcp/
+
+# Local dashboard screenshots
+dashboard-*.png
