@@ -15,6 +15,7 @@ const CLAUDE_PURPLE  = '#9B7FC8';
 // Ordered darkest → lightest: the newest version in a family gets index 0 (darkest),
 // each older version steps one shade lighter, clamped at the lightest.
 const FAMILY_SHADES = {
+  Fable:  ['#1C6B63', '#2E8B7F', '#5CB3A6', '#8FD4C8'],
   Opus:   ['#4E3080', '#6F4FA0', '#9B7FC8', '#C3AEE6'],
   Sonnet: ['#8E3D22', '#B85A3E', '#E07A5F', '#F2A48C'],
   Haiku:  ['#7A5F2C', '#A2854A', '#C9A96E', '#E6CF9C'],
@@ -1016,24 +1017,37 @@ async function loadModels(days = 90) {
 }
 
 // Map a full model ID to a version-aware label, e.g.
-//   claude-opus-4-8            -> "Opus 4.8"
+//   claude-opus-4-8            -> "Opus 4.8"    (major-minor version)
 //   claude-haiku-4-5-20251001  -> "Haiku 4.5"   (snapshot date dropped)
+//   claude-fable-5             -> "Fable 5"     (single-part version)
+//   claude-sonnet-5            -> "Sonnet 5"    (single-part version)
 // The label doubles as the canonical per-version key: dated and undated IDs of the
 // same version collapse to one label, which is what drives the merge in the charts.
 function shortModelName(model) {
   if (!model) return 'Unknown';
   const fam = model.includes('opus') ? 'Opus'
             : model.includes('sonnet') ? 'Sonnet'
-            : model.includes('haiku') ? 'Haiku' : null;
+            : model.includes('haiku') ? 'Haiku'
+            : model.includes('fable') ? 'Fable' : null;
   if (!fam) return model.split('-').slice(-2).join('-');
-  const m = model.match(/(?:opus|sonnet|haiku)-(\d+)-(\d+)/);
-  return m ? `${fam} ${m[1]}.${m[2]}` : fam;
+  // The number groups after the family name are the version (major, optional
+  // minor) — join up to two with a dot. An 8-digit trailing group is a snapshot
+  // date, not a version, so drop it. This handles both major-minor IDs
+  // (opus-4-8) and single-part IDs (fable-5, sonnet-5).
+  const tail = model.slice(model.toLowerCase().indexOf(fam.toLowerCase()) + fam.length);
+  const parts = (tail.match(/\d+/g) || []).filter(n => n.length < 8);
+  return parts.length ? `${fam} ${parts.slice(0, 2).join('.')}` : fam;
 }
 
-// Extract the major.minor version code (e.g. "Opus 4.8" -> 48), or null.
+// Extract a comparable version code (e.g. "Opus 4.8" -> 48, "Fable 5" -> 50), or
+// null. Codes are only ever compared within one family, so a single-part version
+// is scaled to the same 10x-major basis as major.minor.
 function versionCode(model) {
-  const m = shortModelName(model).match(/(\d+)\.(\d+)/);
-  return m ? parseInt(m[1], 10) * 10 + parseInt(m[2], 10) : null;
+  const label = shortModelName(model);
+  const mm = label.match(/(\d+)\.(\d+)/);
+  if (mm) return parseInt(mm[1], 10) * 10 + parseInt(mm[2], 10);
+  const maj = label.match(/(\d+)/);
+  return maj ? parseInt(maj[1], 10) * 10 : null;
 }
 
 // Color each row's model by version recency: within each family, the newest
@@ -1168,7 +1182,7 @@ async function loadSessions(days) {
     row.className = 'session-row';
     row.onclick = () => openPanel(s);
 
-    const modelClass = s.model.includes('opus') ? 'opus' : s.model.includes('haiku') ? 'haiku' : '';
+    const modelClass = s.model.includes('fable') ? 'fable' : s.model.includes('opus') ? 'opus' : s.model.includes('haiku') ? 'haiku' : '';
     const dot = `<div class="session-dot ${modelClass}"></div>`;
 
     const startDt = new Date(s.start_time);

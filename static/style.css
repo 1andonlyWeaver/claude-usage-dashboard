@@ -617,6 +617,7 @@ body {
   background: var(--claude-orange);
   flex-shrink: 0;
 }
+.session-dot.fable { background: #5CB3A6; }
 .session-dot.opus { background: #9B7FC8; }
 .session-dot.haiku { background: var(--claude-amber); }
 .session-info { overflow: hidden; }
@@ -649,6 +650,7 @@ body {
   border-radius: 4px;
   white-space: nowrap;
 }
+.session-model.fable-model { color: #8FD4C8; background: rgba(46,139,127,0.12); }
 .session-model.opus-model { color: #C4A8E8; background: rgba(155,127,200,0.12); }
 .session-model.haiku-model { color: var(--claude-amber); background: rgba(201,169,110,0.12); }
 

@@ -11,11 +11,13 @@ DB_PATH = Path(__file__).parent / "data" / "usage.db"
 # Cache creation tiers (5m and 1h ephemeral) are both charged at 1.25x input price.
 # Cache read is charged at 0.10x input price.
 # Family rates are the source of truth; the exact-ID dict below holds overrides only.
+FABLE_PRICING =  (10.00, 50.00, 1.25, 0.10)
 OPUS_PRICING =   (15.00, 75.00, 1.25, 0.10)
 SONNET_PRICING = (3.00,  15.00, 1.25, 0.10)
 HAIKU_PRICING =  (0.25,  1.25,  1.25, 0.10)
 
 MODEL_PRICING = {
+    "claude-fable-5":            FABLE_PRICING,
     "claude-opus-4-6":           OPUS_PRICING,
     "claude-opus-4-5":           OPUS_PRICING,
     "claude-opus-4-5-20251101":  OPUS_PRICING,
@@ -37,6 +39,8 @@ def price_for_model(model: str):
     if model in MODEL_PRICING:
         return MODEL_PRICING[model]
     m = (model or "").lower()
+    if "fable" in m:
+        return FABLE_PRICING
     if "opus" in m:
         return OPUS_PRICING
     if "sonnet" in m:
