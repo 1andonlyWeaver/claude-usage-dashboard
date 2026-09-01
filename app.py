@@ -652,7 +652,10 @@ async def window(
 
     Returns:
         window_start, window_end: local-time ISO strings
-        quota_pct: current percentage of quota used
+        quota_pct: percentage of quota used, or None when that is unknown
+            (quota API unavailable, or the cached reading belongs to a window that
+            has since reset). 0 is a real reading — a window that just reset — and
+            must stay distinguishable from None.
         bucket_minutes: bucket size used
         buckets: list of {time, group, tokens}
     """
@@ -674,41 +677,41 @@ async def window(
         try:
             resets_utc = datetime.fromisoformat(quota["five_hour_resets_at"])
             resets_local = resets_utc.astimezone().replace(tzinfo=None)
-            quota_pct = quota.get("five_hour_pct", 0)
+            quota_pct = quota.get("five_hour_pct")
             period = timedelta(hours=5)
             if resets_local <= now_local:
                 # Cached resets_at has already passed — advance to the current window
                 while resets_local <= now_local:
                     resets_local += period
-                quota_pct = 0  # old pct belongs to the previous window
+                quota_pct = None  # old pct measured the previous window; this one is unknown
             window_end = resets_local
             window_start = resets_local - period
         except Exception:
             window_end = now_local
             window_start = now_local - timedelta(hours=5)
-            quota_pct = quota.get("five_hour_pct") or 0
+            quota_pct = quota.get("five_hour_pct")
     elif type == "7d" and quota.get("seven_day_resets_at"):
         try:
             resets_utc = datetime.fromisoformat(quota["seven_day_resets_at"])
             resets_local = resets_utc.astimezone().replace(tzinfo=None)
-            quota_pct = quota.get("seven_day_pct", 0)
+            quota_pct = quota.get("seven_day_pct")
             period = timedelta(days=7)
             if resets_local <= now_local:
                 # Cached resets_at has already passed — advance to the current window
                 while resets_local <= now_local:
                     resets_local += period
-                quota_pct = 0  # old pct belongs to the previous window
+                quota_pct = None  # old pct measured the previous window; this one is unknown
             window_end = resets_local
             window_start = resets_local - period
         except Exception:
             window_end = now_local
             window_start = now_local - timedelta(days=7)
-            quota_pct = quota.get("seven_day_pct") or 0
+            quota_pct = quota.get("seven_day_pct")
     else:
         window_end = now_local
         window_start = now_local - (timedelta(hours=5) if type == "5h" else timedelta(days=7))
         pct_key = "five_hour_pct" if type == "5h" else "seven_day_pct"
-        quota_pct = quota.get(pct_key) or 0
+        quota_pct = quota.get(pct_key)
 
     bucket_minutes = 5 if type == "5h" else 60
 

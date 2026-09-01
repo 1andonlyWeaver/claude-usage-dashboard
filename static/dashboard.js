@@ -511,7 +511,9 @@ function _computeEma(series, nowIdx) {
 function computeExceedance(data) {
   if (!data) return null;
   const { window_start, window_end, quota_pct, bucket_minutes, buckets, other_pct } = data;
-  if (!quota_pct || quota_pct <= 0) return null;  // quota API unavailable
+  // null means the quota API gave us nothing; 0 means the window just reset. Neither
+  // offers a slope worth extrapolating, but only null is actually missing data.
+  if (quota_pct == null || quota_pct <= 0) return null;
 
   const startMs = new Date(window_start).getTime();
   const endMs   = new Date(window_end).getTime();
@@ -669,16 +671,21 @@ function buildWindowChart(data, canvasId, maHalf) {
   }
 
   let datasets;
-  // When quota_pct is unavailable (API error), fall back to raw cumulative tokens
-  const quotaAvailable = quota_pct > 0;
+  // Fall back to raw cumulative tokens only when quota is genuinely missing. quota_pct
+  // is null for that; a real 0 means the window just reset and nothing is spent yet.
+  // Testing `> 0` made the charts announce an outage for the first minutes of every
+  // new window — the 7-day one did exactly that after its 2026-09-01 reset.
+  const quotaAvailable = quota_pct != null;
 
   if (isCumulative) {
     // Determine effective normalization factor (local quota % per token).
     // When other_pct is detected, local tokens map to (quota_pct - other_pct) so the
     // "Other" flat band accounts for the remainder. Falls back to quota_pct when no
     // other usage is detected (other_pct = 0).
-    // If quota_pct is 0 (API unreachable), use norm=1 so charts show raw token totals.
-    const localPct = quotaAvailable ? quota_pct - otherPct : 0;
+    // With no quota data at all, norm falls back to 1 so the chart plots raw tokens.
+    // Clamped at 0: a just-reset window can report less quota used than other_pct
+    // estimates, and a negative norm would drag the cumulative line below zero.
+    const localPct = quotaAvailable ? Math.max(quota_pct - otherPct, 0) : 0;
     const effectiveNorm = (quotaAvailable && totalTokensInWindow > 0)
         ? localPct / totalTokensInWindow
         : (totalTokensInWindow > 0 ? 1 : 0);
@@ -761,7 +768,7 @@ function buildWindowChart(data, canvasId, maHalf) {
   // ── EMA Projection ───────────────────────────────────────────
   // Aggregate total across all groups for EMA input
   const aggRaw = allTimes.map((_, i) => groupOrder.filter(g => g !== 'Other').reduce((s, g) => s + rawByGroup[g][i], 0));
-  const emaLocalPct = quotaAvailable ? quota_pct - otherPct : 0;
+  const emaLocalPct = quotaAvailable ? Math.max(quota_pct - otherPct, 0) : 0;
   const emaNorm = (quotaAvailable && totalTokensInWindow > 0) ? emaLocalPct / totalTokensInWindow : (totalTokensInWindow > 0 ? 1 : 0);
 
   let emaInput;
