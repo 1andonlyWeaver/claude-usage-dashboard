@@ -172,6 +172,26 @@ body {
 }
 .btn-refresh svg { flex-shrink: 0; }
 
+/* ─── Quota auth banner ─── */
+.auth-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 18px;
+  background: rgba(217,95,95,0.1);
+  border: 1px solid rgba(217,95,95,0.3);
+  border-radius: var(--radius-sm);
+  margin-bottom: 20px;
+  font-size: 0.8rem;
+  color: var(--claude-red);
+}
+.auth-banner code {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(217,95,95,0.14);
+  font-size: 0.95em;
+}
+
 /* ─── Ingest banner ─── */
 .ingest-banner {
   display: flex;

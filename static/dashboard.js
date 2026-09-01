@@ -92,10 +92,30 @@ function startQuotaPolling() {
 
 let quotaState = { five: null, seven: null };
 
+// Without live quota the session charts silently switch their y-axis to raw tokens, which
+// looks like a rendering quirk rather than a signed-out dashboard. Say so out loud.
+function setAuthBanner(error) {
+  const banner = document.getElementById('authBanner');
+  const msg = document.getElementById('authMsg');
+  if (!banner || !msg) return;
+  if (error !== 'login-required' && error !== 'no-credentials') {
+    banner.style.display = 'none';
+    return;
+  }
+  msg.innerHTML = error === 'no-credentials'
+    ? 'No Claude credentials found — quota is unavailable, so the session charts are '
+      + 'plotting raw tokens instead of % of quota. Sign in with <code>claude auth login</code>.'
+    : 'Signed out of the quota API (stored token expired) — the session charts are '
+      + 'plotting raw tokens instead of % of quota. Run <code>claude auth login</code>; '
+      + 'the dashboard picks the new token up within a minute.';
+  banner.style.display = 'flex';
+}
+
 async function fetchQuota() {
   try {
     const data = await apiFetch('/api/quota');
     const hasError = !!data.error;
+    setAuthBanner(data.error);
     document.getElementById('gauge5h').classList.toggle('stale', hasError);
     document.getElementById('gauge7d').classList.toggle('stale', hasError);
 
@@ -123,7 +143,12 @@ async function fetchQuota() {
     updateForecasts();
     updateExtraUsage(data);
     updateWindowRanges();
-    document.getElementById('lastUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString();
+    // Only stamp a fresh "Updated" time on a clean fetch. When resets_at came from cache
+    // this line used to run even on error, overwriting the re-login warning set above and
+    // leaving a signed-out dashboard looking freshly updated.
+    if (!hasError) {
+      document.getElementById('lastUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString();
+    }
   } catch(e) {
     document.getElementById('lastUpdated').textContent = 'Error fetching quota';
   }
@@ -133,6 +158,15 @@ function updateGauge(id, pct) {
   const arc = document.getElementById('arc' + id);
   const pctEl = document.getElementById('pct' + id);
   if (!arc || !pctEl) return;
+
+  // The server nulls a pct once its rolling window has fully elapsed, so the value is
+  // unknown rather than zero. Show the same "—" placeholder the gauge starts with.
+  if (pct == null) {
+    arc.style.strokeDashoffset = ARC_TOTAL;
+    arc.classList.remove('danger');
+    pctEl.textContent = '—';
+    return;
+  }
 
   const offset = ARC_TOTAL - (ARC_TOTAL * Math.min(pct, 100) / 100);
   arc.style.strokeDashoffset = offset;
@@ -231,6 +265,7 @@ function updateForecasts() {
   ].forEach(({ id, q }) => {
     const el = document.getElementById('forecast' + id);
     if (!el || !q) return;
+    if (q.pct == null) { el.textContent = ''; return; }  // usage unknown — nothing to forecast
     const pctRemaining = 100 - q.pct;
     if (pctRemaining <= 0) {
       el.textContent = 'Limit reached';

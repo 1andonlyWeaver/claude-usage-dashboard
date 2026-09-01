@@ -9,7 +9,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
@@ -30,6 +30,12 @@ CACHE_MAX_RETRY = 3600    # maximum retry backoff (1 hour)
 AUTH_RETRY = 30           # short backoff for auth errors (login-required) so re-login is picked up quickly
 QUOTA_CACHE_FILE = Path(__file__).parent / "data" / "quota_cache.json"
 QUOTA_CACHE_MAX_STALE = 600  # seconds: accept disk-cached data up to 10 min old on startup
+# A quota percentage describes a fixed rolling window, so a cached figure is wrong — not
+# merely stale — once that window has rolled over. _bound_stale_quota normally decides that
+# from the reading's own resets_at; these lengths are the fallback bound for readings whose
+# resets_at is missing or unparseable.
+FIVE_HOUR_WINDOW = 5 * 3600
+SEVEN_DAY_WINDOW = 7 * 24 * 3600
 
 # OAuth token refresh — reverse-engineered from public Claude Code clients.
 # If Anthropic changes these, refresh will fail and the dashboard falls back to
@@ -61,6 +67,7 @@ _fetch_lock = asyncio.Lock()  # prevents concurrent API calls when cache is stal
 _token_refresh_lock = threading.Lock()
 _last_token_refresh_attempt = 0.0  # monotonic time of last attempt; throttles refresh
 _auth_dead = False  # True once a refresh returns invalid_grant — refresh token revoked, re-login required
+_auth_dead_creds_sig = None  # credentials-file signature when _auth_dead was set; a change means a re-login may have landed
 
 # Seed in-memory cache from disk on startup so restarts don't lose last known quota
 try:
@@ -153,6 +160,19 @@ def _write_credentials_atomic(updated: dict) -> bool:
         return False
 
 
+def _credentials_signature() -> tuple | None:
+    """(mtime, size) of the credentials file, or None if it can't be stat'd.
+
+    Used to tell whether `claude auth login` has rewritten the file since we last found
+    the stored refresh token to be expired.
+    """
+    try:
+        st = CREDENTIALS_FILE.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
 def _refresh_oauth_token() -> bool:
     """Refresh the OAuth access token using the stored refreshToken.
 
@@ -161,8 +181,19 @@ def _refresh_oauth_token() -> bool:
     TOKEN_REFRESH_MIN_INTERVAL seconds to prevent tight loops if refresh fails.
     Returns True on success.
     """
-    global _last_token_refresh_attempt, _auth_dead
+    global _last_token_refresh_attempt, _auth_dead, _auth_dead_creds_sig
     with _token_refresh_lock:
+        if _auth_dead:
+            if _credentials_signature() == _auth_dead_creds_sig:
+                # The stored refresh token is expired and nothing has rewritten the
+                # credentials file since we learned that. Re-POSTing it every minute can
+                # only fail again — wait for `claude auth login` to replace the file.
+                return False
+            # Credentials changed on disk, so a re-login may have landed. Retry now rather
+            # than waiting out the throttle left over from the last doomed attempt.
+            _auth_dead = False
+            _auth_dead_creds_sig = None
+            _last_token_refresh_attempt = 0.0
         now = time.monotonic()
         if now - _last_token_refresh_attempt < TOKEN_REFRESH_MIN_INTERVAL:
             return False
@@ -208,6 +239,7 @@ def _refresh_oauth_token() -> bool:
             # no amount of retrying will help — the user must re-login via the CLI.
             if "invalid_grant" in body or e.code == 401:
                 _auth_dead = True
+                _auth_dead_creds_sig = _credentials_signature()
             return False
         except Exception as ex:
             print(f"[oauth {ts}] refresh failed: {ex}")
@@ -230,6 +262,7 @@ def _refresh_oauth_token() -> bool:
         if not _write_credentials_atomic(creds):
             return False
         _auth_dead = False  # a fresh token was minted — clear any prior dead-token state
+        _auth_dead_creds_sig = None
         print(f"[oauth {ts}] refreshed token (expires in {expires_in}s)")
         return True
 
@@ -242,7 +275,7 @@ def _read_oauth_token() -> tuple[str | None, str]:
       'login-required' — token is expired and the refresh token is dead (re-login needed)
       'no-credentials' — no credentials file or no stored token
     """
-    global _auth_dead
+    global _auth_dead, _auth_dead_creds_sig
     creds = _read_credentials()
     if not creds:
         return None, "no-credentials"
@@ -254,6 +287,7 @@ def _read_oauth_token() -> tuple[str | None, str]:
     seconds_left = (expires_at_ms / 1000) - time.time()
     if seconds_left >= TOKEN_REFRESH_LEEWAY:
         _auth_dead = False  # comfortably-valid token present; clear any stale dead-token flag
+        _auth_dead_creds_sig = None
         return token, "ok"
     # Expired or near-expiry — attempt a refresh (throttled internally).
     if _refresh_oauth_token():
@@ -326,11 +360,54 @@ def _fetch_usage_sync(_already_retried: bool = False) -> dict:
         return {"ok": False, "error": str(ex), "retry_after": None}
 
 
+def _resets_at_passed(value) -> bool:
+    """True when an ISO-8601 reset timestamp lies in the past.
+
+    Unparseable, absent, or naive timestamps return False, leaving the age bound as the
+    fallback rather than blanking a figure we can't actually date.
+    """
+    if not value:
+        return False
+    try:
+        return datetime.fromisoformat(value) <= datetime.now(timezone.utc)
+    except (TypeError, ValueError):
+        return False
+
+
+def _bound_stale_quota(data: dict, age: float) -> dict:
+    """Null out cached percentages that no longer describe the current window.
+
+    A pct is dropped when its own resets_at has passed (the window has rolled over) or
+    when `age` — how old `data` is, in seconds — exceeds the window length. The resets_at
+    check is the load-bearing one: a figure fetched an hour before a reset is wrong two
+    hours later even though its age is nowhere near the window. Keeping such a figure
+    shows a confidently wrong number (a logged-out dashboard frozen at last week's 10%
+    looks identical to a working one), so the pct is dropped and the UI renders the "—"
+    placeholder. resets_at is left intact so the frontend can still derive the current
+    window boundaries.
+    """
+    out = dict(data)
+    for prefix, window in (("five_hour", FIVE_HOUR_WINDOW), ("seven_day", SEVEN_DAY_WINDOW)):
+        if out.get(prefix + "_pct") is None:
+            continue
+        if age >= window or _resets_at_passed(out.get(prefix + "_resets_at")):
+            out[prefix + "_pct"] = None
+    return out
+
+
 def _read_disk_cache_data() -> dict | None:
-    """Read the quota disk cache, returning its data dict regardless of age, or None on failure."""
+    """Read the quota disk cache, or None on failure.
+
+    Data is returned regardless of age so a transient failure still shows the last known
+    figures, but percentages older than the window they describe are blanked by
+    _bound_stale_quota rather than served as if they were current.
+    """
     try:
         saved = json.loads(QUOTA_CACHE_FILE.read_text())
-        return saved.get("data") or None
+        data = saved.get("data") or None
+        if not data:
+            return None
+        return _bound_stale_quota(data, max(0.0, time.time() - saved.get("time", 0)))
     except Exception:
         return None
 
@@ -352,7 +429,7 @@ async def _get_usage_data() -> dict:
     # Respect rate-limit backoff
     if now < cache["retry_after"]:
         if cache["data"]:
-            return cache["data"]
+            return _bound_stale_quota(cache["data"], now - cache["fetched_at"])
         # No in-memory data — fall back to disk cache so UI shows real values
         disk = _read_disk_cache_data()
         if disk:
@@ -369,7 +446,7 @@ async def _get_usage_data() -> dict:
             return cache["data"]
         if now < cache["retry_after"]:
             if cache["data"]:
-                return cache["data"]
+                return _bound_stale_quota(cache["data"], now - cache["fetched_at"])
             disk = _read_disk_cache_data()
             if disk:
                 return {**disk, "error": cache["error"] or "rate-limited"}
@@ -423,11 +500,16 @@ async def _get_usage_data() -> dict:
                 backoff = min(CACHE_MIN_RETRY * (2 ** (cache["fail_count"] - 1)), CACHE_MAX_RETRY)
             retry_secs = max(api_retry, backoff)
             cache["retry_after"] = now + retry_secs
-            print(f"[quota {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] fetch failed ({result['error']}), fail #{cache['fail_count']}, retry in {retry_secs}s")
+            # An unchanging failure logged every poll grew dashboard.log past 45 MB during
+            # a multi-day logged-out stretch. Log the transition, then only a periodic
+            # heartbeat, so an ongoing outage stays visible without flooding the file.
+            if cache["error"] != result["error"] or cache["fail_count"] % 60 == 1:
+                print(f"[quota {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] fetch failed ({result['error']}), fail #{cache['fail_count']}, retry in {retry_secs}s")
             cache["error"] = result["error"]
             # Return stale in-memory data if available, then try disk cache, then error shell
             if cache["data"]:
-                return {**cache["data"], "error": result["error"]}
+                return {**_bound_stale_quota(cache["data"], now - cache["fetched_at"]),
+                        "error": result["error"]}
             disk = _read_disk_cache_data()
             if disk:
                 return {**disk, "error": result["error"]}
@@ -578,15 +660,14 @@ async def window(
 
     # If quota API returned an error, try the disk cache for window boundaries
     if quota.get("error") and not quota.get("five_hour_resets_at"):
-        try:
-            disk = json.loads(QUOTA_CACHE_FILE.read_text()).get("data", {})
-            # Merge cached resets_at and pct values the live response is missing
-            for key in ("five_hour_resets_at", "seven_day_resets_at",
-                        "five_hour_pct", "seven_day_pct"):
-                if not quota.get(key):
-                    quota[key] = disk.get(key)
-        except Exception:
-            pass
+        # Read via _read_disk_cache_data so percentages whose window has already elapsed
+        # come back as None and are skipped, rather than seeding the chart with a figure
+        # from a window that has since reset.
+        disk = _read_disk_cache_data() or {}
+        for key in ("five_hour_resets_at", "seven_day_resets_at",
+                    "five_hour_pct", "seven_day_pct"):
+            if not quota.get(key) and disk.get(key) is not None:
+                quota[key] = disk[key]
 
     now_local = datetime.now()
     if type == "5h" and quota.get("five_hour_resets_at"):
