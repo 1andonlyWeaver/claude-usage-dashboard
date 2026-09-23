@@ -541,6 +541,8 @@ def build_request(conn, session_id: str, date: str, index: dict):
     if main is None:
         return None, None, "no_source"
     ctx = _day_context(conn, session_id, date)
+    if ctx["judged_through"] is None:  # the day's messages moved to another session id
+        return None, ctx, "no_messages"
     day = summarize_day(main, date)
     if day is None:
         return None, ctx, "no_events"
@@ -578,9 +580,16 @@ def _record_failure(conn, session_id, date, error, attempted_at=None, meta=None,
     conn.commit()
 
 
+def _connect():
+    """A DB connection that waits out ingest writes instead of failing (and losing a paid result)."""
+    conn = db.get_conn()
+    conn.execute("PRAGMA busy_timeout = 30000")
+    return conn
+
+
 def judge_session_day(session_id, date, index, cli, runner=None, now_fn=datetime.now) -> str:
     """Judge one queued session-day and store the outcome. Returns 'done' or 'error'."""
-    conn = db.get_conn()
+    conn = _connect()
     try:
         text, ctx, problem = build_request(conn, session_id, date, index)
         if problem:
@@ -600,7 +609,7 @@ def judge_session_day(session_id, date, index, cli, runner=None, now_fn=datetime
 def _record_crash(session_id, date, ex, now_fn) -> None:
     """Count an unexpected exception as a failed attempt, so it backs off and hits the cap."""
     try:
-        conn = db.get_conn()
+        conn = _connect()
         try:
             _record_failure(conn, session_id, date, f"crash: {ex}"[:200], _ts(now_fn()))
         finally:
@@ -616,9 +625,17 @@ def judge_pending(limit: int, cli: str, index: dict, runner=None, now_fn=datetim
     """
     if limit <= 0:
         return {}
-    conn = db.get_conn()
+    conn = _connect()
     try:
+        # Claim the rows (stamp them as started) in one write transaction, so another process
+        # running the backfill can't take them too and in-flight calls count toward the cap.
+        conn.execute("BEGIN IMMEDIATE")
         rows = [(r["session_id"], r["date"]) for r in pending_rows(conn, limit, now_fn())]
+        started = _ts(now_fn())
+        conn.executemany(
+            "UPDATE person_hour_estimates SET last_attempt_at = ? WHERE session_id = ? AND date = ?",
+            [(started, sid, date) for sid, date in rows])
+        conn.commit()
     finally:
         conn.close()
 

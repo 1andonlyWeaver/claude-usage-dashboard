@@ -97,3 +97,39 @@ def test_judge_pending_records_unexpected_crashes(conn, tmp_path, monkeypatch):
     row = _row(conn, "s1")
     assert row["status"] == "error" and row["attempts"] == 1
     assert row["error"] == "crash: disk on fire" and row["last_attempt_at"] == "2026-09-20T12:00:00"
+
+
+def test_judge_pending_claims_rows_before_calling(conn, tmp_path):
+    index = {}
+    for sid in ("a", "b"):
+        index.update(queued_session(conn, tmp_path, sid, NOW))
+    seen = []
+
+    class Watching(FakeRun):
+        def __call__(self, cmd, **kwargs):
+            c = ph.db.get_conn()
+            seen.append((ph.calls_last_hour(c, NOW), len(ph.pending_rows(c, 10, NOW))))
+            c.close()
+            return super().__call__(cmd, **kwargs)
+
+    ph.judge_pending(2, "claude", index, runner=Watching(stdout=envelope(GOOD_ESTIMATE)),
+                     now_fn=lambda: NOW)
+    # While any call runs, both rows already count toward the cap and nobody else can take them.
+    assert len(seen) == 2 and all(calls == 2 and waiting == 0 for calls, waiting in seen)
+
+
+def test_day_with_no_transcript_events_fails_for_good(conn, tmp_path):
+    index = queued_session(conn, tmp_path, "s1", NOW)
+    add_message(conn, "s1", "2026-09-19T08:00:00")  # the DB has a day the transcript lacks
+    ph.discover(conn, NOW, index)
+    assert _judge(index, FakeRun(), date="2026-09-19") == "error"
+    assert _row(conn, "s1", "2026-09-19")["error"] == "no_events"
+
+
+def test_day_whose_messages_moved_is_not_judged(conn, tmp_path):
+    index = queued_session(conn, tmp_path, "s1", NOW)
+    conn.execute("UPDATE messages SET session_id = 's2'")  # a resumed session re-ingested them
+    conn.commit()
+    run = FakeRun()
+    assert _judge(index, run) == "error"
+    assert _row(conn, "s1")["error"] == "no_messages" and run.calls == []
