@@ -12,10 +12,13 @@ def test_index_sessions_maps_ids_to_main_files(tmp_path):
     assert index == {"s1": a, "s2": b}
 
 
-def test_subagent_files(tmp_path):
+def test_subagent_files_include_workflow_agents_but_not_journals(tmp_path):
     main = write_jsonl(tmp_path / "p" / "s1.jsonl", [])
-    sub = write_jsonl(tmp_path / "p" / "s1" / "subagents" / "agent-1.jsonl", [])
-    assert ph.subagent_files(main) == [sub]
+    direct = write_jsonl(tmp_path / "p" / "s1" / "subagents" / "agent-1.jsonl", [])
+    nested = write_jsonl(
+        tmp_path / "p" / "s1" / "subagents" / "workflows" / "wf_a" / "agent-2.jsonl", [])
+    write_jsonl(tmp_path / "p" / "s1" / "subagents" / "workflows" / "wf_a" / "journal.jsonl", [])
+    assert ph.subagent_files(main) == sorted([direct, nested])
 
 
 def test_human_text_accepts_typed_prompts_only():
@@ -25,11 +28,22 @@ def test_human_text_accepts_typed_prompts_only():
     assert ph.human_text(user(T, "x", isMeta=True)) is None
     assert ph.human_text(user(T, "x", isSidechain=True)) is None
     assert ph.human_text(assistant(T, text("hi"))) is None
+    assert ph.human_text(user(T, "recap of earlier work", isCompactSummary=True)) is None
+    assert ph.human_text(user(T, "[Request interrupted by user for tool use]")) is None
+    assert ph.human_text({"type": "user", "message": "not a dict"}) is None
+    assert ph.human_text(user(T, [{"type": "text", "text": None}, text("b")])) == "b"
 
 
 def test_clean_prompt_strips_harness_blocks():
-    raw = "<system-reminder>ignore\nme</system-reminder>Fix the bug<command-name>/x</command-name>"
+    raw = "<system-reminder>ignore\nme</system-reminder>Fix the bug<bash-stdout>out</bash-stdout>"
     assert ph.clean_prompt(raw) == "Fix the bug"
+
+
+def test_clean_prompt_keeps_slash_commands_and_their_arguments():
+    raw = ("<command-message>review-pr</command-message>\n<command-name>/review-pr</command-name>\n"
+           "<command-args>PR 539</command-args>")
+    assert ph.clean_prompt(raw) == "/review-pr PR 539"
+    assert ph.clean_prompt("<command-name>/clear</command-name>") == "/clear"
 
 
 def test_is_scheduled_session(tmp_path):

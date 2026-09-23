@@ -41,8 +41,14 @@ TOKEN_MIN_SECONDS = 600    # never start a call on an OAuth token with less life
 # DEFAULT_LEVERAGE and MIN_SAMPLES_FOR_LEVERAGE live in db.py, which does the aggregation.
 
 SCHEDULED_PREFIX = "<scheduled-task"
+INTERRUPTED_PREFIX = "[Request interrupted by user"
+# A slash command arrives as <command-message>…</command-message><command-name>/x</command-name>
+# <command-args>…</command-args>; clean_prompt keeps it as "/x args" so the judge sees the ask.
+_SLASH_RE = re.compile(
+    r"<command-name>(.*?)</command-name>\s*(?:<command-args>(.*?)</command-args>)?", re.S)
 _TAG_RE = re.compile(
-    r"<(system-reminder|command-[a-z-]+|local-command-[a-z-]+|task-notification)\b[^>]*>.*?</\1>",
+    r"<(system-reminder|command-[a-z-]+|local-command-[a-z-]+|task-notification"
+    r"|bash-stdout|bash-stderr)\b[^>]*>.*?</\1>",
     re.S,
 )
 
@@ -61,8 +67,13 @@ def index_sessions(roots=None) -> dict:
 
 
 def subagent_files(main: Path) -> list:
-    """A session's subagent transcripts: <project>/<session_id>/subagents/*.jsonl."""
-    return sorted((main.parent / main.stem / "subagents").glob("*.jsonl"))
+    """A session's subagent transcripts, including workflow agents one level deeper.
+
+    Layout: <project>/<session_id>/subagents/agent-*.jsonl and
+    .../subagents/workflows/wf_*/agent-*.jsonl. A workflow's journal.jsonl is
+    bookkeeping, not a transcript, so only agent-*.jsonl files count.
+    """
+    return sorted((main.parent / main.stem / "subagents").rglob("agent-*.jsonl"))
 
 
 def _iter_json(path: Path):
@@ -82,23 +93,37 @@ def _iter_json(path: Path):
 
 
 def human_text(obj: dict):
-    """Raw text of a prompt the user typed; None for tool results, meta and sidechain entries."""
-    if obj.get("type") != "user" or obj.get("isSidechain") or obj.get("isMeta"):
+    """Raw text of a prompt the user typed.
+
+    None for tool results, meta, sidechain and compaction-summary entries (a compaction
+    summary recaps earlier work, which would otherwise be credited twice), interrupt
+    markers, and malformed entries.
+    """
+    if (obj.get("type") != "user" or obj.get("isSidechain") or obj.get("isMeta")
+            or obj.get("isCompactSummary")):
         return None
-    content = (obj.get("message") or {}).get("content")
+    message = obj.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
     if isinstance(content, list):
         if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
             return None
-        content = "\n".join(b.get("text", "") for b in content
+        content = "\n".join(b.get("text") or "" for b in content
                             if isinstance(b, dict) and b.get("type") == "text")
     if not isinstance(content, str):
         return None
-    return content.strip() or None
+    content = content.strip()
+    if not content or content.startswith(INTERRUPTED_PREFIX):
+        return None
+    return content
+
+
+def _slash_command(match) -> str:
+    return " ".join(p for p in (match.group(1).strip(), (match.group(2) or "").strip()) if p)
 
 
 def clean_prompt(text: str) -> str:
-    """Remove harness-injected blocks (system reminders, slash-command wrappers)."""
-    return _TAG_RE.sub("", text).strip()
+    """Keep slash commands as "/name args"; drop other harness-injected blocks."""
+    return _TAG_RE.sub("", _SLASH_RE.sub(_slash_command, text)).strip()
 
 
 def is_scheduled_session(main: Path) -> bool:
