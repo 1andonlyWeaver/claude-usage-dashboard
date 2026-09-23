@@ -60,7 +60,7 @@ def test_failures_count_attempts_and_stop_after_three(conn, tmp_path):
 def test_missing_transcript_fails_for_good_without_a_call(conn, tmp_path):
     queued_session(conn, tmp_path, "gone", NOW)  # queued while its transcript still existed
     run = FakeRun()
-    assert _judge({}, run, sid="gone") == "error"
+    assert _judge({}, run, sid="gone") == "skipped"
     row = _row(conn, "gone")
     assert row["error"] == "no_source" and row["attempts"] == ph.MAX_ATTEMPTS
     assert row["last_attempt_at"] is None and run.calls == []
@@ -122,7 +122,7 @@ def test_day_with_no_transcript_events_fails_for_good(conn, tmp_path):
     index = queued_session(conn, tmp_path, "s1", NOW)
     add_message(conn, "s1", "2026-09-19T08:00:00")  # the DB has a day the transcript lacks
     ph.discover(conn, NOW, index)
-    assert _judge(index, FakeRun(), date="2026-09-19") == "error"
+    assert _judge(index, FakeRun(), date="2026-09-19") == "skipped"
     assert _row(conn, "s1", "2026-09-19")["error"] == "no_events"
 
 
@@ -131,5 +131,5 @@ def test_day_whose_messages_moved_is_not_judged(conn, tmp_path):
     conn.execute("UPDATE messages SET session_id = 's2'")  # a resumed session re-ingested them
     conn.commit()
     run = FakeRun()
-    assert _judge(index, run) == "error"
+    assert _judge(index, run) == "skipped"
     assert _row(conn, "s1")["error"] == "no_messages" and run.calls == []

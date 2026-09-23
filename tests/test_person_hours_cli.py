@@ -29,7 +29,8 @@ def test_cli_judges_pending_session_days(conn, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(ph.subprocess, "run", FakeRun(stdout=envelope(GOOD_ESTIMATE)))
     assert ph.main(["--limit", "1"]) == 0
     assert ph.queue_counts(conn) == {"pending": 0, "errors": 0}
-    assert "1/1" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "1/1" in out and "1 judged this run" in out
 
 
 def test_cli_without_claude_exits_1(conn, tmp_path, monkeypatch):
@@ -68,3 +69,35 @@ def test_cli_waits_when_the_hourly_cap_is_reached(conn, tmp_path, monkeypatch):
     monkeypatch.setattr(ph.time, "sleep", fake_sleep)
     with pytest.raises(Waited):
         ph.main([])
+
+
+def test_cli_refreshes_the_transcript_index_each_pass(conn, tmp_path, monkeypatch):
+    first = queued_session(conn, tmp_path, "s1", NOW)
+    both = {**first, **queued_session(conn, tmp_path, "s2", NOW)}  # s2 queued by the worker meanwhile
+    seen = iter([first])
+    monkeypatch.setattr(ph, "index_sessions", lambda roots=None: next(seen, both))
+    monkeypatch.setattr(ph, "MAX_PER_TICK", 1)
+    monkeypatch.setattr(ph, "find_claude_cli", lambda: "claude")
+    monkeypatch.setattr(ph.subprocess, "run", FakeRun(stdout=envelope(GOOD_ESTIMATE)))
+    assert ph.main([]) == 0
+    status = {r["session_id"]: r["status"]
+              for r in conn.execute("SELECT session_id, status FROM person_hour_estimates")}
+    assert status == {"s1": "done", "s2": "done"}
+
+
+def test_cli_stops_after_a_pass_where_every_call_failed(conn, tmp_path, monkeypatch, capsys):
+    index = {}
+    for sid in ("a", "b", "c"):
+        index.update(queued_session(conn, tmp_path, sid, NOW))
+    monkeypatch.setattr(ph, "index_sessions", lambda roots=None: index)
+    monkeypatch.setattr(ph, "MAX_PER_TICK", 2)
+    monkeypatch.setattr(ph, "find_claude_cli", lambda: "claude")
+    monkeypatch.setattr(ph.subprocess, "run", FakeRun(stdout="Error: not logged in", returncode=1))
+    assert ph.main([]) == 1
+    assert "exit 1: Error: not logged in" in capsys.readouterr().err
+    assert ph.queue_counts(conn)["pending"] == 3  # c untouched; a and b wait to retry
+
+
+def test_cli_rejects_a_non_positive_limit():
+    with pytest.raises(SystemExit):
+        ph.main(["--limit", "0"])

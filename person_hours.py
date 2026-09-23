@@ -592,13 +592,13 @@ def _connect():
 
 
 def judge_session_day(session_id, date, index, cli, runner=None, now_fn=datetime.now) -> str:
-    """Judge one queued session-day and store the outcome. Returns 'done' or 'error'."""
+    """Judge one queued session-day and store the outcome: 'done', 'error' (the call failed) or 'skipped' (nothing to judge)."""
     conn = _connect()
     try:
         text, ctx, problem = build_request(conn, session_id, date, index)
         if problem:
             _record_failure(conn, session_id, date, problem, final=True)
-            return "error"
+            return "skipped"
         result = call_judge(text, cli, runner=runner)
         attempted_at = _ts(now_fn())
         if result["ok"]:
@@ -737,8 +737,11 @@ def main(argv=None) -> int:
                     help=f"queue session-days from the last DAYS days (default {BACKFILL_DAYS})")
     ap.add_argument("--limit", type=int, help="judge at most this many session-days")
     ap.add_argument("--dry-run", action="store_true",
-                    help="print what would be sent to Claude without calling it")
+                    help="print what would be sent to Claude without calling it (session-days are still queued)")
     args = ap.parse_args(argv)
+
+    if args.limit is not None and args.limit < 1:
+        ap.error("--limit must be at least 1")
 
     index = index_sessions()
     conn = _connect()
@@ -761,25 +764,58 @@ def main(argv=None) -> int:
     if cli is None:
         print("claude CLI not found on PATH or in ~/.local/bin", file=sys.stderr)
         return 1
-    print(f"Judging up to {total} session-days, at most {MAX_CALLS_PER_HOUR} calls per hour. "
-          "The 5-hour quota pause does not apply here.")
-    attempted = 0
-    while attempted < total:
-        outcome = judge_pending(min(MAX_PER_TICK, total - attempted), cli, index)
-        if outcome:
-            attempted += sum(outcome.values())
-            print(f"  {attempted}/{total} {outcome}")
-            continue
-        conn = _connect()
-        try:
-            capped = calls_last_hour(conn, datetime.now()) >= MAX_CALLS_PER_HOUR
-            ready = bool(pending_rows(conn, 1, datetime.now()))
-        finally:
-            conn.close()
-        if not (capped and ready):
-            break  # nothing left that can run now; the rest are waiting out a retry backoff
-        time.sleep(60)
+    print(f"Judging up to {total} session-days, at most {MAX_CALLS_PER_HOUR} per hour "
+          f"(about {total / MAX_CALLS_PER_HOUR:.1f} h). The 5-hour quota pause does not apply here.")
+    attempted = judged = 0
+    try:
+        while attempted < total:
+            # A fresh index each pass: the worker may queue sessions that started after launch.
+            outcome = judge_pending(min(MAX_PER_TICK, total - attempted), cli, index_sessions())
+            if outcome:
+                attempted += sum(outcome.values())
+                judged += outcome.get("done", 0)
+                print(f"  {attempted}/{total} {outcome}")
+                if outcome.get("error") and not outcome.get("done"):
+                    print(f"Stopping: every call in that pass failed. Last error: {_last_error()}",
+                          file=sys.stderr)
+                    return 1
+                continue
+            conn = _connect()
+            try:
+                capped = calls_last_hour(conn, datetime.now()) >= MAX_CALLS_PER_HOUR
+                ready = bool(pending_rows(conn, 1, datetime.now()))
+            finally:
+                conn.close()
+            if not (capped and ready):
+                break  # nothing left that can run now; the rest are waiting out a retry backoff
+            time.sleep(60)
+    except KeyboardInterrupt:
+        print("\nStopped. Session-days claimed but not finished are retried after an hour.")
+        return 130
+    _print_totals(judged)
     return 0
+
+
+def _last_error() -> str:
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT error FROM person_hour_estimates WHERE status = 'error'"
+                           " ORDER BY last_attempt_at DESC LIMIT 1").fetchone()
+    finally:
+        conn.close()
+    return row["error"] if row else "unknown"
+
+
+def _print_totals(judged: int) -> None:
+    conn = _connect()
+    try:
+        counts = queue_counts(conn)
+        ready = len(pending_rows(conn, max(counts["pending"], 1), datetime.now()))
+    finally:
+        conn.close()
+    print(f"Finished: {judged} judged this run, {counts['pending']} still waiting "
+          f"({counts['pending'] - ready} in the one-hour retry wait), "
+          f"{counts['errors']} failed for good. The dashboard's worker picks up the rest.")
 
 
 if __name__ == "__main__":
