@@ -445,11 +445,15 @@ body {
   flex: 1;
 }
 .cost-view[hidden] { display: none; }
-.unit-btn {
+/* .day-btn.unit-btn beats the later .day-btn rule, which otherwise wins on specificity ties. */
+.day-btn.unit-btn {
   font-family: var(--font-mono);
   padding: 3px 9px;
 }
-.unit-btn:focus-visible {
+.day-btn.unit-btn:not(.active) {
+  color: var(--text-secondary);  /* an unpressed toggle still needs 4.5:1 */
+}
+.day-btn.unit-btn:focus-visible {
   outline: 2px solid var(--claude-orange);
   outline-offset: 2px;
 }
@@ -482,8 +486,7 @@ body {
   line-height: 1.5;
 }
 /* New hours figures meet 4.5:1; the older --text-muted rows in the $ view are unchanged. */
-#hoursBreakdown .cost-model-val,
-#hoursBreakdown .cost-model {
+#hoursBreakdown .cost-model-val {
   color: var(--text-secondary);
 }
 
@@ -716,6 +719,7 @@ body {
   color: var(--text-primary);
   text-align: right;
   white-space: nowrap;
+  min-width: 6ch;
 }
 .session-hours .provisional {
   color: var(--text-secondary);

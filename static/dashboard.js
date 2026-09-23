@@ -69,6 +69,7 @@ async function initAll() {
     loadSessions(currentSessionDays),
     loadCost(),
   ]);
+  if (costUnit === 'hours') loadHours();  // e.g. after a manual refresh or when ingest finishes
   // Auto-refresh window charts every 60s (clear any prior interval to avoid stacking)
   if (_windowRefreshInterval) clearInterval(_windowRefreshInterval);
   _windowRefreshInterval = setInterval(() => {
@@ -1230,7 +1231,8 @@ async function loadSessions(days) {
     const hoursCell = s.person_hours == null ? ''
       : s.hours_status === 'done'
         ? `<span title="Estimated person-hours">${fmtHours(s.person_hours)}</span>`
-        : `<span class="provisional" title="Provisional: not yet estimated by Claude">~${fmtHours(s.person_hours)}</span>`;
+        : `<span class="provisional" title="${s.hours_status === 'partial'
+            ? 'Some days not yet estimated by Claude' : 'Provisional: not yet estimated by Claude'}">~${fmtHours(s.person_hours)}</span>`;
     row.innerHTML = `
       ${dot}
       <div class="session-info">
@@ -1392,6 +1394,7 @@ const HOURS_PAUSE_TEXT = {
 };
 
 function fmtHoursNum(h) {
+  if (h == null || isNaN(h)) return '—';
   return h >= 10 ? Math.round(h).toLocaleString() : h.toFixed(1);
 }
 
@@ -1447,7 +1450,9 @@ async function loadHours() {
     val.textContent = fmtHours(s.hours);
     sched.append(label, val);
   }
-  document.getElementById('hoursStatus').textContent = hoursStatusText(data);
+  const status = document.getElementById('hoursStatus');
+  const statusText = hoursStatusText(data);
+  if (status.textContent !== statusText) status.textContent = statusText;  // a live region: only speak changes
   document.getElementById('hoursModel').textContent = data.model ? shortModelName(data.model) : 'Sonnet';
 }
 
