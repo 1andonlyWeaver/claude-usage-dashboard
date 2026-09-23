@@ -127,15 +127,19 @@ Each worker tick:
 
 ### Locating the logs
 
-The main file is `<root>/*/<session_id>.jsonl` for each root in `ingest.get_project_dirs()`. Subagent files are `<root>/<project>/<session_id>/subagents/*.jsonl`. The summarizer reads both directly, so it does not depend on the ingest covering subagent logs.
+The main file is `<root>/*/<session_id>.jsonl` for each root in `ingest.get_project_dirs()`. Subagent transcripts are every `agent-*.jsonl` under `<root>/<project>/<session_id>/subagents/`, including workflow agents one level deeper in `subagents/workflows/wf_*/` (on this machine, 933 of 1,085 subagent transcripts). A workflow's `journal.jsonl` and the `*.meta.json` files are not transcripts. The summarizer reads the files directly, so it does not depend on the ingest covering subagent logs.
 
 ### Summary given to the judge
 
 Built from that day's events only. Capped at `SUMMARY_MAX_CHARS` (24,000); pilot summaries were 6–12K characters.
 
 - Project display name (from `messages.project`), and "day N of this session" when N > 1, with the previous day's summary line.
-- User requests, in order: all if 20 or fewer, otherwise the first 14 and last 5 with an omission marker. Each is clipped to 600 characters, with `<system-reminder>`, `<command-*>`, `<local-command-*>` and `<task-notification>` blocks stripped. Tool results and `isMeta` entries are not requests.
-- Files created or edited with +/− line counts from `structuredPatch` (edits) and `content` (Write `create`), top 40 by size. Excluded: paths under `~/.claude/projects/` (memory) and under the system temp directory (scratchpads). Worktree paths under `.claude/worktrees/` are kept.
+- User requests, in order: all if 20 or fewer, otherwise the first 14 and last 5 with an omission marker. Each is clipped to 600 characters.
+  - Requests include prompts typed while Claude was working, which Claude Code stores as `queued_command` attachments with `commandMode: "prompt"` (237 prompts on 87 of 293 recent session-days).
+  - Slash commands appear as `/name args`. Built-in session commands (`/model`, `/exit`, `/compact` and similar) are dropped.
+  - Stripped: `<system-reminder>`, `<command-*>`, `<local-command-*>`, `<task-notification>`, `<bash-stdout>` and `<bash-stderr>` blocks, and a leading desktop marker such as `<!-- attach -->`.
+  - Not requests: tool results, `isMeta` entries, compaction summaries (`isCompactSummary`, which recap earlier work) and `[Request interrupted by user…]` markers.
+- Files created or edited with +/− line counts from `structuredPatch` (edits, including Write overwrites) and `content` (Write `create`), top 40 by size, one entry per file however its path was spelled. Excluded: paths under `~/.claude/projects/` (memory), `~/.claude/plans/` (plan-mode files), the system temp directory and any `AppData/Local/Temp/` (scratchpads), and `/tmp/`. Worktree paths under `.claude/worktrees/` are kept.
 - Tool-call counts for the main thread and for subagents.
 - Shell command descriptions (the Bash tool's `description` input), first 40 distinct.
 - The last 3 assistant text messages, each clipped to 1,200 characters.
@@ -148,7 +152,7 @@ System prompt (`PROMPT_VERSION = 1`):
 ```
 You estimate how much human professional effort a piece of completed work represents.
 
-You will receive a structured record of Claude Code work: the user's requests, the files created or edited (with line counts), tool usage, the shell commands that were run, and the assistant's final messages. This may be one day of a longer session; estimate only the work in this record.
+You will receive a structured record of Claude Code work: the user's requests, the files created or edited (with line counts), tool usage, the shell commands that were run, and the assistant's final messages. This may be one day of a longer session; estimate only the work in this record. A line starting "Earlier in this session:" is context from a previous day, not work to count.
 
 Estimate how many hours a competent professional with the appropriate skills (for example a software engineer, systems administrator, or research analyst who knows this kind of work but has no AI tools) would need to accomplish the same outcomes without AI assistance.
 
@@ -173,12 +177,12 @@ claude -p --safe-mode --model sonnet --no-session-persistence --tools ""
 
 ### Validation
 
-Extract the first `{...}` object from `result` and require:
+Take the first `{...}` span in `result` that parses as a JSON object, ignoring code fences and prose around it (at most 20 candidate spans are tried). Raw newlines inside strings are tolerated. Then require:
 
-- `hours_low`, `hours_likely`, `hours_high` are numbers with `0 < low ≤ likely ≤ high ≤ 500`
+- `hours_low`, `hours_likely`, `hours_high` are JSON numbers (not booleans or strings) with `0 < low ≤ likely ≤ high ≤ 500`
 - `summary` is a non-empty string; `role` and `rationale` are strings
 
-Anything else counts as a failed attempt, as do timeouts, non-zero exits and refusals.
+Summary, role and rationale are clipped to 400, 80 and 1,200 characters. Validation never raises: anything else, including absurd numbers or deeply nested JSON, counts as a failed attempt, as do timeouts, non-zero exits and refusals.
 
 ### Worker
 
@@ -360,6 +364,7 @@ Following the worktree workflow (:8080 serves the main checkout):
 - A dollar value for the labor.
 - A 7/30/90 selector on the card (the 90-day backfill makes adding one later cheap).
 - Letting the user enter their own estimate for a session to calibrate the judge.
+- Resumed or forked sessions. Their transcript files repeat earlier entries (same `uuid`, original timestamps), so the same work can be judged under two sessions. In recent data this affects about 21 of 293 session-days. Fixing it needs a cross-file map of which session owns each entry; left for a follow-up.
 
 ## Related issues found during design
 
