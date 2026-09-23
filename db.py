@@ -3,6 +3,7 @@ Query helpers for the usage SQLite database.
 """
 import re
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -95,14 +96,23 @@ def get_conn():
     return conn
 
 
+def _query(sql: str, params=()) -> list[sqlite3.Row]:
+    """Run one query and return all its rows, closing the connection even on error.
+
+    An unclosed connection is only freed by the cyclic GC (it references itself through
+    its statement cache), so close explicitly rather than rely on going out of scope.
+    """
+    with closing(get_conn()) as conn:
+        return conn.execute(sql, params).fetchall()
+
+
 def _since_date(days: int) -> str:
     return (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
 
 
 def daily_tokens(days: int = 90) -> list[dict]:
     """Return daily token totals, newest first."""
-    conn = get_conn()
-    rows = conn.execute("""
+    rows = _query("""
         SELECT date,
                SUM(input_tokens) as input_tokens,
                SUM(cache_creation_tokens) as cache_creation_tokens,
@@ -113,15 +123,13 @@ def daily_tokens(days: int = 90) -> list[dict]:
         WHERE date >= ?
         GROUP BY date
         ORDER BY date ASC
-    """, (_since_date(days),)).fetchall()
-    conn.close()
+    """, (_since_date(days),))
     return [dict(r) for r in rows]
 
 
 def by_project(days: int = 90) -> list[dict]:
     """Return token totals grouped by project, sorted descending."""
-    conn = get_conn()
-    rows = conn.execute("""
+    rows = _query("""
         SELECT project,
                SUM(input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens) as total_tokens,
                COUNT(DISTINCT session_id) as session_count,
@@ -131,15 +139,13 @@ def by_project(days: int = 90) -> list[dict]:
         GROUP BY project
         ORDER BY total_tokens DESC
         LIMIT 15
-    """, (_since_date(days),)).fetchall()
-    conn.close()
+    """, (_since_date(days),))
     return [dict(r) for r in rows]
 
 
 def by_model(days: int = 90) -> list[dict]:
     """Return token totals grouped by model."""
-    conn = get_conn()
-    rows = conn.execute("""
+    rows = _query("""
         SELECT model,
                SUM(input_tokens) as input_tokens,
                SUM(cache_creation_tokens) as cache_creation_tokens,
@@ -151,30 +157,26 @@ def by_model(days: int = 90) -> list[dict]:
         WHERE date >= ?
         GROUP BY model
         ORDER BY total_tokens DESC
-    """, (_since_date(days),)).fetchall()
-    conn.close()
+    """, (_since_date(days),))
     return [dict(r) for r in rows]
 
 
 def session_heatmap(days: int = 90) -> list[dict]:
     """Return heatmap data: day_of_week x hour with token counts."""
-    conn = get_conn()
-    rows = conn.execute("""
+    rows = _query("""
         SELECT day_of_week, hour,
                COUNT(DISTINCT session_id) as session_count,
                SUM(input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens) as total_tokens
         FROM messages
         WHERE date >= ?
         GROUP BY day_of_week, hour
-    """, (_since_date(days),)).fetchall()
-    conn.close()
+    """, (_since_date(days),))
     return [dict(r) for r in rows]
 
 
 def session_list(days: int = 30) -> list[dict]:
     """Return per-session summary, most recent first."""
-    conn = get_conn()
-    rows = conn.execute("""
+    rows = _query("""
         SELECT session_id,
                project,
                model,
@@ -193,15 +195,13 @@ def session_list(days: int = 30) -> list[dict]:
         GROUP BY session_id
         ORDER BY start_time DESC
         LIMIT 200
-    """, (_since_date(days),)).fetchall()
-    conn.close()
+    """, (_since_date(days),))
     return [dict(r) for r in rows]
 
 
 def session_detail(session_id: str) -> list[dict]:
     """Return per-message breakdown for a session."""
-    conn = get_conn()
-    rows = conn.execute("""
+    rows = _query("""
         SELECT timestamp, model,
                input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
                input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens as total_tokens,
@@ -210,23 +210,20 @@ def session_detail(session_id: str) -> list[dict]:
         FROM messages
         WHERE session_id = ?
         ORDER BY timestamp ASC
-    """, (session_id,)).fetchall()
-    conn.close()
+    """, (session_id,))
     return [dict(r) for r in rows]
 
 
 def recent_rate(hours: int = 3) -> dict:
     """Return tokens per hour over the last N hours for forecasting."""
-    conn = get_conn()
     # messages.timestamp is naive local time, so the cutoff must be too.
     since = (datetime.now() - timedelta(hours=hours)).strftime('%Y-%m-%dT%H:%M:%S')
-    row = conn.execute("""
+    row = _query("""
         SELECT SUM(input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens) as total_tokens,
                COUNT(DISTINCT session_id) as sessions
         FROM messages
         WHERE timestamp >= ?
-    """, (since,)).fetchone()
-    conn.close()
+    """, (since,))[0]
     total = row['total_tokens'] or 0
     return {
         'tokens_per_hour': total / hours,
@@ -238,14 +235,12 @@ def recent_rate(hours: int = 3) -> dict:
 
 def estimate_cost(days: int = 30) -> dict:
     """Estimate API cost based on token counts and model pricing."""
-    conn = get_conn()
-    rows = conn.execute(f"""
+    rows = _query(f"""
         SELECT model, {_COST_COLUMNS}
         FROM messages
         WHERE date >= ?
         GROUP BY model
-    """, (_since_date(days),)).fetchall()
-    conn.close()
+    """, (_since_date(days),))
 
     total_cost = 0.0
     breakdown = []
@@ -275,8 +270,6 @@ def window_tokens(window_start: str, window_end: str, bucket_minutes: int,
 
     Returns list of {time, group, tokens} dicts.
     """
-    conn = get_conn()
-
     # SQLite time bucket expression
     if bucket_minutes == 60:
         bucket_expr = "strftime('%Y-%m-%dT%H:00:00', timestamp)"
@@ -287,7 +280,7 @@ def window_tokens(window_start: str, window_end: str, bucket_minutes: int,
         )
 
     if group_by == 'token_type':
-        rows = conn.execute(f"""
+        rows = _query(f"""
             SELECT {bucket_expr} as time,
                    'input' as grp,
                    SUM(input_tokens) as tokens
@@ -312,9 +305,9 @@ def window_tokens(window_start: str, window_end: str, bucket_minutes: int,
             FROM messages WHERE timestamp >= ? AND timestamp < ?
             GROUP BY time
             ORDER BY time, grp
-        """, (window_start, window_end) * 4).fetchall()
+        """, (window_start, window_end) * 4)
     elif group_by == 'model':
-        rows = conn.execute(f"""
+        rows = _query(f"""
             SELECT {bucket_expr} as time,
                    model as grp,
                    {_COST_COLUMNS}
@@ -322,12 +315,11 @@ def window_tokens(window_start: str, window_end: str, bucket_minutes: int,
             WHERE timestamp >= ? AND timestamp < ?
             GROUP BY time, model
             ORDER BY time
-        """, (window_start, window_end)).fetchall()
-        conn.close()
+        """, (window_start, window_end))
         return [{'time': r['time'], 'group': r['grp'], 'tokens': _group_cost(r['grp'], r)}
                 for r in rows]
     elif group_by == 'project':
-        rows = conn.execute(f"""
+        rows = _query(f"""
             SELECT {bucket_expr} as time,
                    project as grp,
                    SUM(input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens) as tokens
@@ -335,10 +327,10 @@ def window_tokens(window_start: str, window_end: str, bucket_minutes: int,
             WHERE timestamp >= ? AND timestamp < ?
             GROUP BY time, project
             ORDER BY time, tokens DESC
-        """, (window_start, window_end)).fetchall()
+        """, (window_start, window_end))
     else:
         # Total only
-        rows = conn.execute(f"""
+        rows = _query(f"""
             SELECT {bucket_expr} as time,
                    'total' as grp,
                    SUM(input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens) as tokens
@@ -346,9 +338,8 @@ def window_tokens(window_start: str, window_end: str, bucket_minutes: int,
             WHERE timestamp >= ? AND timestamp < ?
             GROUP BY time
             ORDER BY time
-        """, (window_start, window_end)).fetchall()
+        """, (window_start, window_end))
 
-    conn.close()
     return [{'time': r['time'], 'group': r['grp'], 'tokens': r['tokens'] or 0} for r in rows]
 
 
@@ -362,54 +353,48 @@ def detect_other_pct(window_start: str, window_end: str, window_type: str) -> di
         other_pct: float — quota % attributable to external/unknown sources
         has_snapshots: bool — whether enough snapshot data was available
     """
-    conn = get_conn()
     pct_col = 'five_hour_pct' if window_type == '5h' else 'seven_day_pct'
-    rows = conn.execute(
+    rows = _query(
         f"SELECT timestamp, {pct_col} as pct FROM quota_snapshots "
         "WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp",
         (window_start, window_end)
-    ).fetchall()
-    conn.close()
+    )
 
     if len(rows) < 2:
         return {"other_pct": 0.0, "has_snapshots": False}
 
     other_pct = 0.0
-    conn = get_conn()
-    for i in range(len(rows) - 1):
-        t1, pct1 = rows[i]['timestamp'], rows[i]['pct']
-        t2, pct2 = rows[i + 1]['timestamp'], rows[i + 1]['pct']
-        quota_delta = (pct2 or 0) - (pct1 or 0)
-        if quota_delta <= 0.1:
-            continue
-        count = conn.execute(
-            "SELECT COUNT(*) FROM messages WHERE timestamp >= ? AND timestamp < ?",
-            (t1, t2)
-        ).fetchone()[0]
-        if count == 0:
-            other_pct += quota_delta
-    conn.close()
+    with closing(get_conn()) as conn:
+        for i in range(len(rows) - 1):
+            t1, pct1 = rows[i]['timestamp'], rows[i]['pct']
+            t2, pct2 = rows[i + 1]['timestamp'], rows[i + 1]['pct']
+            quota_delta = (pct2 or 0) - (pct1 or 0)
+            if quota_delta <= 0.1:
+                continue
+            count = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE timestamp >= ? AND timestamp < ?",
+                (t1, t2)
+            ).fetchone()[0]
+            if count == 0:
+                other_pct += quota_delta
     return {"other_pct": other_pct, "has_snapshots": True}
 
 
 def entrypoint_stats(days: int = 30) -> dict:
     """Return counts of sessions by entrypoint."""
-    conn = get_conn()
-    rows = conn.execute("""
+    rows = _query("""
         SELECT entrypoint, COUNT(DISTINCT session_id) as session_count
         FROM messages
         WHERE date >= ?
         GROUP BY entrypoint
         ORDER BY session_count DESC
-    """, (_since_date(days),)).fetchall()
-    conn.close()
+    """, (_since_date(days),))
     return {r['entrypoint'] or 'unknown': r['session_count'] for r in rows}
 
 
 def by_source(days: int = 90) -> list[dict]:
     """Return token totals grouped by source (claude-code vs claude-desktop)."""
-    conn = get_conn()
-    rows = conn.execute("""
+    rows = _query("""
         SELECT COALESCE(source, 'claude-code') as source,
                SUM(input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens) as total_tokens,
                COUNT(DISTINCT session_id) as session_count,
@@ -418,8 +403,7 @@ def by_source(days: int = 90) -> list[dict]:
         WHERE date >= ?
         GROUP BY COALESCE(source, 'claude-code')
         ORDER BY total_tokens DESC
-    """, (_since_date(days),)).fetchall()
-    conn.close()
+    """, (_since_date(days),))
     return [dict(r) for r in rows]
 
 
@@ -427,10 +411,9 @@ def db_stats() -> dict:
     """Return basic DB stats."""
     if not DB_PATH.exists():
         return {'exists': False}
-    conn = get_conn()
-    row = conn.execute("SELECT COUNT(*) as count, MIN(date) as oldest, MAX(date) as newest FROM messages").fetchone()
-    meta = conn.execute("SELECT COUNT(*) as count FROM ingest_meta").fetchone()
-    conn.close()
+    with closing(get_conn()) as conn:
+        row = conn.execute("SELECT COUNT(*) as count, MIN(date) as oldest, MAX(date) as newest FROM messages").fetchone()
+        meta = conn.execute("SELECT COUNT(*) as count FROM ingest_meta").fetchone()
     return {
         'exists': True,
         'message_count': row['count'],

@@ -5,9 +5,11 @@ import asyncio
 import json
 import threading
 import time
+import traceback
 import urllib.request
 import urllib.error
 import urllib.parse
+from contextlib import closing
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
@@ -49,9 +51,11 @@ app = FastAPI(title="Claude Usage Dashboard")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
-# Ingest state
+# Ingest state. _ingest_lock is held for the whole of every ingest run (periodic, startup,
+# or /api/refresh), so two runs never write to the DB at once.
 _ingest_lock = threading.Lock()
 _ingest_status = {"running": False, "progress": 0, "total": 0, "done": False, "error": None}
+_last_ingest_error = None  # last logged ingest failure, so a repeat skips the traceback
 
 # Usage API cache: holds the last successful API response + metadata
 _usage_cache: dict = {
@@ -94,16 +98,30 @@ def _maybe_write_snapshot(five_pct: float, seven_pct: float) -> None:
     try:
         ts = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
         cutoff = (datetime.now() - timedelta(days=8)).strftime('%Y-%m-%dT%H:%M:%S')
-        conn = db.get_conn()
-        conn.execute(
-            "INSERT INTO quota_snapshots (timestamp, five_hour_pct, seven_day_pct) VALUES (?, ?, ?)",
-            (ts, five_pct, seven_pct),
-        )
-        conn.execute("DELETE FROM quota_snapshots WHERE timestamp < ?", (cutoff,))
-        conn.commit()
-        conn.close()
+        # closing() so a failed commit doesn't leave this connection holding its lock
+        with closing(db.get_conn()) as conn:
+            conn.execute(
+                "INSERT INTO quota_snapshots (timestamp, five_hour_pct, seven_day_pct) VALUES (?, ?, ?)",
+                (ts, five_pct, seven_pct),
+            )
+            conn.execute("DELETE FROM quota_snapshots WHERE timestamp < ?", (cutoff,))
+            conn.commit()
     except Exception:
         pass
+
+
+def _log_ingest_error(exc: Exception) -> None:
+    """Log a failed ingest run.
+
+    The traceback goes out only when the error differs from the last one logged, so a
+    failure that repeats every 90s stays visible without flooding dashboard.log.
+    """
+    global _last_ingest_error
+    msg = f"{type(exc).__name__}: {exc}"
+    print(f"[ingest {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] failed - {msg}")
+    if msg != _last_ingest_error:
+        traceback.print_exception(exc)
+    _last_ingest_error = msg
 
 
 def _run_ingest_background(force: bool = False):
@@ -117,26 +135,37 @@ def _run_ingest_background(force: bool = False):
         _ingest_status["total"] = total
 
     try:
-        stats = run_ingest(progress_callback=progress_cb, force=force)
+        with _ingest_lock:  # wait out a periodic run rather than write alongside it
+            stats = run_ingest(progress_callback=progress_cb, force=force)
         _ingest_status["done"] = True
         _ingest_status["stats"] = stats
     except Exception as e:
         _ingest_status["error"] = str(e)
+        _log_ingest_error(e)
     finally:
         _ingest_status["running"] = False
 
 
 def _periodic_ingest():
-    """Run an incremental ingest quietly in the background, then reschedule."""
-    from ingest import run_ingest
+    """Run an incremental ingest quietly in the background, then reschedule.
+
+    Skips this tick if another ingest holds _ingest_lock; the next tick is 90s away.
+    """
     try:
-        if not _ingest_status.get("running"):
-            run_ingest(force=False)
-    except Exception:
-        pass
-    t = threading.Timer(90, _periodic_ingest)
-    t.daemon = True
-    t.start()
+        from ingest import run_ingest
+        if _ingest_lock.acquire(blocking=False):
+            try:
+                run_ingest(force=False)
+            except Exception as e:
+                _log_ingest_error(e)
+            finally:
+                _ingest_lock.release()
+    finally:
+        # Reschedule no matter what, even if logging itself fails (under the launcher,
+        # stdout is a strict cp1252 file), or periodic ingest stops until a restart.
+        t = threading.Timer(90, _periodic_ingest)
+        t.daemon = True
+        t.start()
 
 
 def _read_credentials() -> dict | None:
