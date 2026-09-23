@@ -83,3 +83,25 @@ def test_hours_tick_reschedules_even_when_logging_fails(timers, monkeypatch):
         app._hours_tick()
     assert timers == [ph.TICK_SECONDS]
     assert not app._hours_lock.locked()
+
+
+def test_hours_tick_refreshes_a_token_that_would_expire_mid_tick(timers, monkeypatch):
+    lefts = iter([100.0, 30000.0])
+    refreshed, seen = [], []
+    monkeypatch.setattr(app, "_token_seconds_left", lambda: next(lefts))
+    monkeypatch.setattr(app, "_refresh_oauth_token", lambda: refreshed.append(1) or True)
+    monkeypatch.setattr(app, "_cached_five_hour_pct", lambda: 10.0)
+    monkeypatch.setattr(app.person_hours, "run_tick", lambda now, gates: seen.append(gates))
+    app._hours_tick()
+    assert refreshed == [1] and seen[0]["token_seconds_left"] == 30000.0
+
+
+def test_hours_tick_ignores_auth_dead_after_a_relogin(timers, monkeypatch):
+    seen = []
+    monkeypatch.setattr(app, "_auth_dead", True)
+    monkeypatch.setattr(app, "_auth_dead_creds_sig", ("old",))
+    monkeypatch.setattr(app, "_credentials_signature", lambda: ("new",))
+    monkeypatch.setattr(app, "_cached_five_hour_pct", lambda: 10.0)
+    monkeypatch.setattr(app.person_hours, "run_tick", lambda now, gates: seen.append(gates))
+    app._hours_tick()
+    assert seen[0]["auth_dead"] is False

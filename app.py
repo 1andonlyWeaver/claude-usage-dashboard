@@ -584,7 +584,9 @@ def _hours_tick():
                     _refresh_oauth_token()
                     left = _token_seconds_left()
                 person_hours.run_tick(datetime.now(), {
-                    "auth_dead": _auth_dead,
+                    # A re-login rewrites the credentials file; don't stay paused until a
+                    # quota poll happens to notice.
+                    "auth_dead": _auth_dead and _credentials_signature() == _auth_dead_creds_sig,
                     "ingest_running": bool(_ingest_status.get("running")),
                     "five_hour_pct": _cached_five_hour_pct(),
                     "token_seconds_left": left,
@@ -604,16 +606,22 @@ def _hours_tick():
 async def startup():
     """Kick off ingest if DB is missing or stale, then schedule periodic ingest and judging."""
     stats = db.db_stats()
+    if stats.get("exists"):
+        # Existing DBs get newer tables (person_hour_estimates) before any request or the
+        # startup ingest needs them. run_ingest repeats this every 90 s, so a failure here
+        # (e.g. another process holding the write lock) is logged, not fatal.
+        try:
+            from ingest import _open_db, init_db
+            with _open_db() as conn:
+                init_db(conn)
+        except Exception as ex:
+            print(f"[startup {datetime.now():%Y-%m-%d %H:%M:%S}] schema check failed - "
+                  f"{type(ex).__name__}: {ex}")
     if not stats.get("exists") or stats.get("message_count", 0) == 0:
         thread = threading.Thread(target=_run_ingest_background, daemon=True)
         thread.start()
     else:
         _ingest_status["done"] = True
-    if stats.get("exists"):
-        # Existing DBs get newer tables (person_hour_estimates) before any request needs them.
-        from ingest import _open_db, init_db
-        with _open_db() as conn:
-            init_db(conn)
     # Pre-refresh the OAuth token so the first /api/quota poll doesn't pay the latency
     # (or fail with 401 when the token expired while the machine was off).
     threading.Thread(target=_read_oauth_token, daemon=True).start()
