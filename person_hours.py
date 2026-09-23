@@ -352,3 +352,59 @@ def parse_estimate(text: str):
             "role": _clip(role.strip(), MAX_ROLE_CHARS),
             "hours_low": float(low), "hours_likely": float(likely), "hours_high": float(high),
             "rationale": _clip(rationale.strip(), MAX_RATIONALE_CHARS)}, None
+
+
+# ─── Calling the judge via CLI ───────────────────────────────
+def find_claude_cli():
+    """Path to the claude CLI. Task Scheduler's PATH may lack ~/.local/bin, so check it too."""
+    found = shutil.which("claude")
+    if found:
+        return found
+    for name in ("claude.exe", "claude"):
+        candidate = Path.home() / ".local" / "bin" / name
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def call_judge(summary_text: str, cli: str, runner=None) -> dict:
+    """Run one headless judge call.
+
+    Returns {"ok": True, "estimate": {...}, "in_tokens", "out_tokens", "cost_usd", "model"}
+    or {"ok": False, "error": "...", ...usage when the CLI reported it}.
+    --safe-mode keeps the user's CLAUDE.md, plugins, hooks and MCP servers out of the
+    judge's context; --no-session-persistence keeps the call out of ~/.claude/projects,
+    so the dashboard never ingests its own judge sessions.
+    """
+    runner = runner or subprocess.run
+    cmd = [cli, "-p", "--safe-mode", "--model", JUDGE_MODEL, "--no-session-persistence",
+           "--tools", "", "--system-prompt", SYSTEM_PROMPT, "--output-format", "json"]
+    try:
+        proc = runner(cmd, input=summary_text, capture_output=True, encoding="utf-8",
+                      errors="replace", timeout=CALL_TIMEOUT_S, cwd=str(db.DB_PATH.parent),
+                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "timeout"}
+    except OSError as ex:
+        return {"ok": False, "error": f"launch: {ex}"}
+    try:
+        envelope = json.loads(proc.stdout)
+    except ValueError:
+        envelope = None
+    if not isinstance(envelope, dict):
+        detail = (proc.stderr or proc.stdout or "").strip()[:200]
+        return {"ok": False, "error": f"exit {proc.returncode}: {detail}"}
+    usage = envelope.get("usage") or {}
+    meta = {
+        "in_tokens": sum(usage.get(k) or 0 for k in
+                         ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")),
+        "out_tokens": usage.get("output_tokens") or 0,
+        "cost_usd": envelope.get("total_cost_usd"),
+        "model": next(iter(envelope.get("modelUsage") or {}), None),
+    }
+    if envelope.get("is_error"):
+        return {"ok": False, "error": f"cli: {str(envelope.get('result'))[:200]}", **meta}
+    estimate, error = parse_estimate(envelope.get("result") or "")
+    if error:
+        return {"ok": False, "error": error, **meta}
+    return {"ok": True, "estimate": estimate, **meta}
