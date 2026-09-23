@@ -98,3 +98,17 @@ def test_session_hours_lists_each_day(conn):
     assert days[1]["status"] == "provisional"
     assert days[1]["provisional_hours"] == round(0.1 * db.DEFAULT_LEVERAGE, 1)
     assert db.session_hours("nope") == []
+
+
+def test_leverage_is_cached_until_judged_estimates_change(conn, monkeypatch):
+    calls = []
+    real = db.leverage_from_rows
+    monkeypatch.setattr(db, "leverage_from_rows", lambda rows: calls.append(1) or real(rows))
+    add_message(conn, "s1", f"{_day(1)}T10:00:00")
+    db.person_hours(30)
+    db.session_list(7)
+    db.session_hours("s1")
+    assert len(calls) == 1
+    _estimate(conn, "s1", _day(1), 6.0)
+    db.person_hours(30)
+    assert len(calls) == 2

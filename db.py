@@ -480,6 +480,25 @@ def leverage_from_rows(rows) -> dict:
             for group, v in samples.items()}
 
 
+_leverage_cache: dict = {"key": None, "value": None}
+
+
+def _leverage(conn) -> dict:
+    """Leverage over the last 90 days, recomputed only when judged estimates change.
+
+    It needs a 90-day window query (~130 ms on real data); caching it keeps the session list,
+    which loads on every page view, as fast as it was before person-hours.
+    """
+    count, latest = conn.execute(
+        "SELECT COUNT(*), MAX(last_attempt_at) FROM person_hour_estimates WHERE status = 'done'"
+    ).fetchone()
+    key = (str(DB_PATH), _since_date(LEVERAGE_LOOKBACK_DAYS), count, latest)
+    if _leverage_cache["key"] != key:
+        rows = _session_day_rows(conn, _since_date(LEVERAGE_LOOKBACK_DAYS))
+        _leverage_cache.update(key=key, value=leverage_from_rows(rows))
+    return _leverage_cache["value"]
+
+
 def _day_hours(r, leverage) -> tuple[float, bool]:
     """(hours, judged) for a session-day: the judge's figure, else active hours x leverage.
 
@@ -526,14 +545,12 @@ def hours_summary(rows, leverage) -> dict:
 def person_hours(days: int = 30) -> dict:
     """Figures for the cost card's person-hours view."""
     with closing(get_conn()) as conn:
-        rows = _session_day_rows(conn, _since_date(max(days, LEVERAGE_LOOKBACK_DAYS)))
+        rows = _session_day_rows(conn, _since_date(days))
+        leverage = _leverage(conn)
         latest = conn.execute(
             "SELECT model FROM person_hour_estimates WHERE status = 'done' AND model IS NOT NULL"
             " ORDER BY last_attempt_at DESC LIMIT 1").fetchone()
-    lookback = _since_date(LEVERAGE_LOOKBACK_DAYS)
-    leverage = leverage_from_rows([r for r in rows if r["date"] >= lookback])
-    since = _since_date(days)
-    out = hours_summary([r for r in rows if r["date"] >= since], leverage)
+    out = hours_summary(rows, leverage)
     out["days"] = days
     out["model"] = latest["model"] if latest else None
     return out
@@ -541,13 +558,9 @@ def person_hours(days: int = 30) -> dict:
 
 def _session_hours_map(conn, since: str) -> dict:
     """session_id -> (person_hours, 'done' | 'provisional' | 'partial') for days since `since`."""
-    lookback = _since_date(LEVERAGE_LOOKBACK_DAYS)
-    rows = _session_day_rows(conn, min(since, lookback))
-    leverage = leverage_from_rows([r for r in rows if r["date"] >= lookback])
+    leverage = _leverage(conn)
     acc: dict[str, list] = {}
-    for r in rows:
-        if r["date"] < since:
-            continue
+    for r in _session_day_rows(conn, since):
         hours, judged = _day_hours(r, leverage)
         entry = acc.setdefault(r["session_id"], [0.0, 0, 0])
         entry[0] += hours
@@ -560,7 +573,7 @@ def _session_hours_map(conn, since: str) -> dict:
 def session_hours(session_id: str) -> list[dict]:
     """Per-day person-hours for one session (the drill-down panel)."""
     with closing(get_conn()) as conn:
-        leverage = leverage_from_rows(_session_day_rows(conn, _since_date(LEVERAGE_LOOKBACK_DAYS)))
+        leverage = _leverage(conn)
         rows = _session_day_rows(conn, "0000-00-00", session_id=session_id)
     out = []
     for r in rows:
