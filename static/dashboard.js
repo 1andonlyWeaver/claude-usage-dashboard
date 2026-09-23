@@ -54,6 +54,7 @@ window.addEventListener('DOMContentLoaded', () => {
     if (e.key === 'r' || e.key === 'R') { if (!e.target.matches('input,textarea')) triggerRefresh(); }
     if (e.key === 'Escape') closePanel();
   });
+  setCostUnit(savedCostUnit());
   initAll();
   startQuotaPolling();
   checkIngestStatus();
@@ -70,7 +71,10 @@ async function initAll() {
   ]);
   // Auto-refresh window charts every 60s (clear any prior interval to avoid stacking)
   if (_windowRefreshInterval) clearInterval(_windowRefreshInterval);
-  _windowRefreshInterval = setInterval(loadWindowCharts, 60000);
+  _windowRefreshInterval = setInterval(() => {
+    loadWindowCharts();
+    if (costUnit === 'hours') loadHours();
+  }, 60000);
 }
 
 // ─── Quota polling ───────────────────────────────────────────
@@ -1308,6 +1312,100 @@ async function loadCost() {
     `;
     breakdown.appendChild(div);
   }
+}
+
+// ─── Person-hours view ───────────────────────────────────────
+const COST_UNIT_KEY = 'costCardUnit';
+let costUnit = 'cost';   // 'cost' | 'hours'
+
+function savedCostUnit() {
+  try { return localStorage.getItem(COST_UNIT_KEY) === 'hours' ? 'hours' : 'cost'; }
+  catch { return 'cost'; }
+}
+
+function setCostUnit(unit) {
+  costUnit = unit;
+  try { localStorage.setItem(COST_UNIT_KEY, unit); } catch { /* storage blocked: in-page choice still applies */ }
+  const hours = unit === 'hours';
+  for (const [id, on] of [['unitCost', !hours], ['unitHours', hours]]) {
+    const btn = document.getElementById(id);
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-pressed', String(on));
+  }
+  document.getElementById('costView').hidden = hours;
+  document.getElementById('hoursView').hidden = !hours;
+  document.getElementById('costTitle').textContent = hours ? 'Person-hours' : 'Est. API Cost';
+  document.getElementById('costIcon').textContent = hours ? '◷' : '✦';
+  if (hours) loadHours();
+}
+
+const HOURS_PAUSE_TEXT = {
+  quota: 'Paused: 5-hour quota ≥ 80%',
+  auth: 'Paused: sign in to Claude Code to resume',
+  token: 'Paused until the login token refreshes',
+  ingest: 'Paused while session files are parsed',
+  failing: 'Paused: recent estimate calls failed; retrying hourly',
+  disabled: 'Paused: estimates are turned off on this server',
+};
+
+function fmtHoursNum(h) {
+  return h >= 10 ? Math.round(h).toLocaleString() : h.toFixed(1);
+}
+
+function fmtHours(h) {
+  return h == null ? '—' : fmtHoursNum(h) + ' h';
+}
+
+function hoursStatusText(data) {
+  const w = data.worker;
+  if (w.state === 'unavailable') return 'Claude CLI not found, showing provisional estimates';
+  if (w.state === 'paused') return HOURS_PAUSE_TEXT[w.reason] || 'Paused';
+  if (w.pending > 0) return `Backfilling · ${w.pending} left`;
+  const p = data.interactive.provisional_days;
+  return p > 0 ? `${p} session-day${p === 1 ? '' : 's'} provisional` : '';
+}
+
+async function loadHours() {
+  let data;
+  try {
+    data = await apiFetch('/api/hours?days=30');
+  } catch (e) {
+    document.getElementById('hoursStatus').textContent = "Couldn't load person-hours.";
+    return;
+  }
+  document.getElementById('hoursAmount').textContent = '~' + fmtHours(data.interactive.hours);
+  const sub = [`≈ ${data.work_weeks.toFixed(1)} work-weeks`];
+  if (data.leverage != null) sub.push(`${data.leverage.toFixed(1)}× your ${fmtHours(data.active_hours)} active`);
+  document.getElementById('hoursSub').textContent = sub.join(' · ');
+
+  const list = document.getElementById('hoursBreakdown');
+  list.innerHTML = '';
+  for (const p of data.by_project) {
+    const row = document.createElement('div');
+    row.className = 'cost-row';
+    const name = document.createElement('span');
+    name.className = 'cost-model';
+    name.textContent = p.project;
+    name.title = p.project;
+    const val = document.createElement('span');
+    val.className = 'cost-model-val';
+    val.textContent = fmtHours(p.hours);
+    row.append(name, val);
+    list.appendChild(row);
+  }
+
+  const s = data.scheduled;
+  const sched = document.getElementById('hoursScheduled');
+  sched.textContent = '';
+  if (s.runs) {
+    const label = document.createElement('span');
+    label.textContent = `+ ${s.runs} scheduled run${s.runs === 1 ? '' : 's'}`;
+    const val = document.createElement('span');
+    val.textContent = fmtHours(s.hours);
+    sched.append(label, val);
+  }
+  document.getElementById('hoursStatus').textContent = hoursStatusText(data);
+  document.getElementById('hoursModel').textContent = data.model ? shortModelName(data.model) : 'Sonnet';
 }
 
 // ─── Utilities ───────────────────────────────────────────────
