@@ -429,3 +429,75 @@ def call_judge(summary_text: str, cli: str, runner=None) -> dict:
     if error:
         return {"ok": False, "error": error, **meta}
     return {"ok": True, "estimate": estimate, **meta}
+
+
+# ─── Queue ───────────────────────────────────────────────────
+def _ts(dt: datetime) -> str:
+    """Local-time ISO string in the messages.timestamp format."""
+    return dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def discover(conn, now: datetime, index: dict, backfill_days: int = BACKFILL_DAYS) -> int:
+    """Queue quiet session-days: new ones, and judged ones with messages newer than the judgment.
+
+    Returns how many new session-days were queued.
+    """
+    since = (now - timedelta(days=backfill_days)).strftime("%Y-%m-%d")
+    quiet_before = _ts(now - timedelta(minutes=IDLE_MINUTES))
+    new = conn.execute("""
+        SELECT m.session_id, m.date
+        FROM messages m
+        LEFT JOIN person_hour_estimates e ON e.session_id = m.session_id AND e.date = m.date
+        WHERE COALESCE(m.source, 'claude-code') = 'claude-code'
+          AND m.date >= ? AND e.session_id IS NULL
+        GROUP BY m.session_id, m.date
+        HAVING MAX(m.timestamp) <= ?
+    """, (since, quiet_before)).fetchall()
+    scheduled = {}
+    for row in new:
+        sid = row["session_id"]
+        if sid not in scheduled:
+            main = index.get(sid)
+            scheduled[sid] = bool(main) and is_scheduled_session(main)
+        conn.execute(
+            "INSERT OR IGNORE INTO person_hour_estimates (session_id, date, status, is_scheduled)"
+            " VALUES (?, ?, 'pending', ?)", (sid, row["date"], int(scheduled[sid])))
+    conn.execute("""
+        UPDATE person_hour_estimates SET status = 'pending'
+        WHERE status = 'done' AND date >= ?
+          AND judged_through < (SELECT MAX(m.timestamp) FROM messages m
+                                WHERE m.session_id = person_hour_estimates.session_id
+                                  AND m.date = person_hour_estimates.date)
+          AND (SELECT MAX(m.timestamp) FROM messages m
+               WHERE m.session_id = person_hour_estimates.session_id
+                 AND m.date = person_hour_estimates.date) <= ?
+    """, (since, quiet_before))
+    conn.commit()
+    return len(new)
+
+
+def pending_rows(conn, limit: int) -> list:
+    """Session-days waiting for a judgment (or a retry), newest date first."""
+    return conn.execute("""
+        SELECT session_id, date FROM person_hour_estimates
+        WHERE status = 'pending' OR (status = 'error' AND attempts < ?)
+        ORDER BY date DESC, session_id
+        LIMIT ?
+    """, (MAX_ATTEMPTS, limit)).fetchall()
+
+
+def calls_last_hour(conn, now: datetime) -> int:
+    """Judge calls started in the last hour, for the rolling hourly cap."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM person_hour_estimates WHERE last_attempt_at >= ?",
+        (_ts(now - timedelta(hours=1)),)).fetchone()[0]
+
+
+def queue_counts(conn) -> dict:
+    """{"pending": waiting or retryable, "errors": failed for good}."""
+    row = conn.execute("""
+        SELECT SUM(CASE WHEN status = 'pending' OR (status = 'error' AND attempts < ?) THEN 1 ELSE 0 END),
+               SUM(CASE WHEN status = 'error' AND attempts >= ? THEN 1 ELSE 0 END)
+        FROM person_hour_estimates
+    """, (MAX_ATTEMPTS, MAX_ATTEMPTS)).fetchone()
+    return {"pending": row[0] or 0, "errors": row[1] or 0}
