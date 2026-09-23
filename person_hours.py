@@ -37,6 +37,7 @@ PROMPT_VERSION = 1
 SUMMARY_MAX_CHARS = 24000
 MAX_ATTEMPTS = 3
 RETRY_AFTER_MINUTES = 60   # a failed session-day is retried at most once per hour
+STOP_AFTER_FAILURES = 3  # failed calls in a row before the worker probes hourly / the CLI stops
 MAX_HOURS = 500            # sanity cap on one session-day's estimate
 CALL_TIMEOUT_S = 300
 # Never start a tick on an OAuth token that could expire before the tick's last call ends.
@@ -665,7 +666,7 @@ def judge_pending(limit: int, cli: str, index: dict, runner=None, now_fn=datetim
 
 
 # ─── Worker ──────────────────────────────────────────────────
-_worker = {"reason": None, "last_tick": None}
+_worker = {"reason": None, "last_tick": None, "failed_in_a_row": 0}
 
 
 def skip_reason(*, cli_found, auth_dead, ingest_running, five_hour_pct, token_seconds_left,
@@ -712,6 +713,10 @@ def run_tick(now: datetime, gates: dict, runner=None, now_fn=datetime.now) -> di
     `gates` carries the server's state: auth_dead, ingest_running, five_hour_pct and
     token_seconds_left. Queuing still happens while paused, so provisional numbers know
     which session-days are scheduled runs.
+
+    After STOP_AFTER_FAILURES failed calls in a row it judges at most one session-day an
+    hour (reason "failing" in between) until one succeeds, so a broken CLI or login can't
+    burn through the whole backlog's retries.
     """
     if gates["ingest_running"]:  # tables may be mid-rebuild on a first run; try next tick
         set_worker_reason("ingest", now)
@@ -722,16 +727,22 @@ def run_tick(now: datetime, gates: dict, runner=None, now_fn=datetime.now) -> di
         discover(conn, now, index)
         calls = calls_last_hour(conn, now)
     reason = skip_reason(cli_found=cli is not None, calls_last_hour=calls, **gates)
+    failing = _worker["failed_in_a_row"] >= STOP_AFTER_FAILURES
+    if not reason and failing and calls:
+        reason = "failing"  # after a run of failed calls, probe at most once an hour
     set_worker_reason(reason, now)
     if reason:
         return {"skipped": reason}
-    return judge_pending(min(MAX_PER_TICK, MAX_CALLS_PER_HOUR - calls), cli, index, runner, now_fn)
+    budget = 1 if failing else min(MAX_PER_TICK, MAX_CALLS_PER_HOUR - calls)
+    outcome = judge_pending(budget, cli, index, runner, now_fn)
+    if outcome.get("done"):
+        _worker["failed_in_a_row"] = 0
+    else:
+        _worker["failed_in_a_row"] += outcome.get("error", 0)
+    return outcome
 
 
 # ─── Command line ────────────────────────────────────────────
-STOP_AFTER_FAILURES = 3  # failed calls in a row (across passes) that end a backfill run
-
-
 def main(argv=None) -> int:
     """Queue and judge session-days by hand. Skips the quota pause; keeps the hourly cap.
 
@@ -746,6 +757,8 @@ def main(argv=None) -> int:
     ap.add_argument("--dry-run", action="store_true",
                     help="print what would be sent to Claude without calling it "
                          "(session-days are still queued)")
+    ap.add_argument("--retry-failed", action="store_true",
+                    help="give session-days whose judge calls failed for good another try")
     args = ap.parse_args(argv)
 
     if args.limit is not None and args.limit < 1:
@@ -754,6 +767,14 @@ def main(argv=None) -> int:
     index = index_sessions()
     with _db() as conn:
         init_db(conn)
+        if args.retry_failed:
+            requeued = conn.execute(
+                "UPDATE person_hour_estimates SET status = 'pending', attempts = 0, error = NULL"
+                " WHERE status = 'error' AND attempts >= ?"
+                " AND error NOT IN ('no_source', 'no_messages', 'no_events')",
+                (MAX_ATTEMPTS,)).rowcount
+            conn.commit()
+            print(f"Re-queued {requeued} session-day{'s' if requeued != 1 else ''} that had failed.")
         queued = discover(conn, datetime.now(), index, backfill_days=args.backfill)
         waiting = queue_counts(conn)["pending"]
         total = waiting if args.limit is None else min(waiting, args.limit)

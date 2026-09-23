@@ -123,3 +123,19 @@ def test_cli_keeps_going_after_an_isolated_failure(conn, tmp_path, monkeypatch):
 def test_cli_rejects_a_non_positive_limit():
     with pytest.raises(SystemExit):
         ph.main(["--limit", "0"])
+
+
+def test_cli_retry_failed_requeues_only_real_failures(conn, tmp_path, monkeypatch, capsys):
+    queued_session(conn, tmp_path, "a", NOW)
+    queued_session(conn, tmp_path, "b", NOW)
+    conn.execute("UPDATE person_hour_estimates SET status = 'error', attempts = 3,"
+                 " error = 'cli: boom' WHERE session_id = 'a'")
+    conn.execute("UPDATE person_hour_estimates SET status = 'error', attempts = 3,"
+                 " error = 'no_events' WHERE session_id = 'b'")
+    conn.commit()
+    monkeypatch.setattr(ph, "index_sessions", lambda roots=None: {})
+    assert ph.main(["--retry-failed", "--dry-run", "--limit", "1"]) == 0
+    status = {r["session_id"]: (r["status"], r["attempts"])
+              for r in conn.execute("SELECT session_id, status, attempts FROM person_hour_estimates")}
+    assert status == {"a": ("pending", 0), "b": ("error", 3)}
+    assert "Re-queued 1 session-day" in capsys.readouterr().out

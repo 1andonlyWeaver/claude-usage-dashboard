@@ -13,9 +13,9 @@ BASE = {**GATES, "cli_found": True, "calls_last_hour": 0}
 
 @pytest.fixture(autouse=True)
 def reset_worker():
-    ph._worker.update(reason=None, last_tick=None)
+    ph._worker.update(reason=None, last_tick=None, failed_in_a_row=0)
     yield
-    ph._worker.update(reason=None, last_tick=None)
+    ph._worker.update(reason=None, last_tick=None, failed_in_a_row=0)
 
 
 @pytest.mark.parametrize("change, reason", [
@@ -93,3 +93,20 @@ def test_judge_pending_rechecks_the_hourly_cap_when_claiming(conn, tmp_path, mon
     out = ph.judge_pending(5, "claude", index, runner=FakeRun(stdout=envelope(GOOD_ESTIMATE)),
                            now_fn=lambda: NOW)
     assert out == {"done": 1}
+
+
+def test_run_tick_backs_off_to_hourly_probes_after_repeated_failures(conn, tmp_path, monkeypatch):
+    index = {}
+    for sid in "abcdef":
+        index.update(queued_session(conn, tmp_path, sid, NOW))
+    monkeypatch.setattr(ph, "find_claude_cli", lambda: "claude")
+    monkeypatch.setattr(ph, "index_sessions", lambda roots=None: index)
+    monkeypatch.setattr(ph, "MAX_PER_TICK", 3)
+    failing = FakeRun(stdout="Error: not logged in", returncode=1)
+    assert ph.run_tick(NOW, GATES, runner=failing, now_fn=lambda: NOW) == {"error": 3}
+    assert ph.run_tick(NOW, GATES, runner=failing, now_fn=lambda: NOW) == {"skipped": "failing"}
+    assert ph.worker_status(ph.queue_counts(conn))["reason"] == "failing"
+    later = datetime(2026, 9, 20, 13, 1, 0)  # an hour on: one probe
+    ok = FakeRun(stdout=envelope(GOOD_ESTIMATE))
+    assert ph.run_tick(later, GATES, runner=ok, now_fn=lambda: later) == {"done": 1}
+    assert ph._worker["failed_in_a_row"] == 0
