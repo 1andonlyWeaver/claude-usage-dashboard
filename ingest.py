@@ -6,6 +6,7 @@ import sqlite3
 import os
 import re
 from datetime import datetime, timezone
+from itertools import chain
 from pathlib import Path
 
 try:
@@ -450,7 +451,14 @@ def run_ingest(progress_callback=None, force=False):
             if not project_dir.is_dir():
                 continue
             project_name = extract_project_name(project_dir.name)
-            for jsonl_file in project_dir.glob("*.jsonl"):
+            # Top-level session transcripts, plus subagent transcripts that newer CLI
+            # versions write beside them: <session-id>/subagents/agent-*.jsonl and
+            # <session-id>/subagents/workflows/wf_*/agent-*.jsonl. Subagent lines carry
+            # the parent's sessionId (isSidechain: true), so their tokens roll up into
+            # the parent session rather than counting as separate sessions.
+            session_files = chain(project_dir.glob("*.jsonl"),
+                                  project_dir.glob("*/subagents/**/*.jsonl"))
+            for jsonl_file in session_files:
                 all_files.append((str(jsonl_file), project_name, 'claude-code', 'timestamp', 'sessionId'))
 
     # Scan Claude Desktop Cowork/Agent session audit files
