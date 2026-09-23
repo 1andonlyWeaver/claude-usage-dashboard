@@ -652,3 +652,70 @@ def judge_pending(limit: int, cli: str, index: dict, runner=None, now_fn=datetim
 
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENCY) as pool:
         return dict(Counter(pool.map(one, rows)))
+
+
+# ─── Worker ──────────────────────────────────────────────────
+_worker = {"reason": None, "last_tick": None}
+_PAUSE_REASONS = ("auth", "ingest", "quota", "token")
+
+
+def skip_reason(*, cli_found, auth_dead, ingest_running, five_hour_pct, token_seconds_left,
+                calls_last_hour):
+    """Why this tick shouldn't call the judge, or None to go ahead. First match wins."""
+    if not cli_found:
+        return "unavailable"
+    if auth_dead:
+        return "auth"
+    if ingest_running:
+        return "ingest"
+    if five_hour_pct is not None and five_hour_pct >= QUOTA_PAUSE_PCT:
+        return "quota"
+    if token_seconds_left is None:
+        return "auth"
+    if token_seconds_left < TOKEN_MIN_SECONDS:
+        return "token"
+    if calls_last_hour >= MAX_CALLS_PER_HOUR:
+        return "rate"
+    return None
+
+
+def set_worker_reason(reason, now: datetime) -> None:
+    _worker["reason"] = reason
+    _worker["last_tick"] = _ts(now)
+
+
+def worker_status(counts: dict) -> dict:
+    """Worker state for /api/hours: unavailable, paused (with reason), running or idle."""
+    reason = _worker["reason"]
+    if reason == "unavailable":
+        state = "unavailable"
+    elif reason in _PAUSE_REASONS:
+        state = "paused"
+    else:
+        state = "running" if counts["pending"] else "idle"
+    return {"state": state, "reason": reason if state == "paused" else None, **counts}
+
+
+def run_tick(now: datetime, gates: dict, runner=None, now_fn=datetime.now) -> dict:
+    """One worker pass: queue quiet session-days, then judge within the hourly budget.
+
+    `gates` carries the server's state: auth_dead, ingest_running, five_hour_pct and
+    token_seconds_left. Queuing still happens while paused, so provisional numbers know
+    which session-days are scheduled runs.
+    """
+    if gates["ingest_running"]:  # tables may be mid-rebuild on a first run; try next tick
+        set_worker_reason("ingest", now)
+        return {"skipped": "ingest"}
+    cli = find_claude_cli()
+    index = index_sessions()
+    conn = db.get_conn()
+    try:
+        discover(conn, now, index)
+        calls = calls_last_hour(conn, now)
+    finally:
+        conn.close()
+    reason = skip_reason(cli_found=cli is not None, calls_last_hour=calls, **gates)
+    set_worker_reason(reason, now)
+    if reason:
+        return {"skipped": reason}
+    return judge_pending(min(MAX_PER_TICK, MAX_CALLS_PER_HOUR - calls), cli, index, runner, now_fn)
