@@ -61,7 +61,7 @@ _TAG_RE = re.compile(
     re.S,
 )
 # The desktop app prefixes some prompts with a marker such as <!-- attach --> or <!-- reply -->.
-_MARKER_RE = re.compile(r"^\s*<!--\s*[\w-]+\s*-->")
+_MARKER_RE = re.compile(r"^\s*<!--\s*[\w-]+\b[^>]*?-->")
 
 
 # ─── Reading session logs ────────────────────────────────────

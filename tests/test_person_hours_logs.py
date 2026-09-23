@@ -72,3 +72,4 @@ def test_clean_prompt_drops_built_in_session_commands():
 def test_clean_prompt_drops_leading_desktop_marker():
     assert ph.clean_prompt("<!-- attach -->\nPlease look at this") == "Please look at this"
     assert ph.clean_prompt("Keep <!-- this --> comment") == "Keep <!-- this --> comment"
+    assert ph.clean_prompt("<!-- attach: Terminal 1 | tab:0 -->\nRun it") == "Run it"
