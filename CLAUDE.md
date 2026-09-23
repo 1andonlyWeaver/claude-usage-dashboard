@@ -38,7 +38,11 @@ scripts/     launcher.py (Task Scheduler entry point — port check, spawns serv
 logs/        dashboard.log — server output when run via Task Scheduler; not committed
 ```
 
-**Data flow**: JSONL session files → `ingest.py` → `data/usage.db` → `db.py` queries → FastAPI endpoints → `dashboard.js` charts
+**Data flow**: JSONL session files (top-level + subagent transcripts) → `ingest.py` → `data/usage.db` → `db.py` queries → FastAPI endpoints → `dashboard.js` charts
+
+**Files ingested** per `~/.claude/projects/<project>/` dir (Windows root plus the WSL root from `get_project_dirs()`):
+- `*.jsonl` — top-level session transcripts
+- `*/subagents/**/*.jsonl` — subagent transcripts newer CLI versions write beside the session: `<session-id>/subagents/agent-*.jsonl` (Task/Agent tool) and `<session-id>/subagents/workflows/wf_*/agent-*.jsonl` (workflow agents). The same glob also picks up `workflows/wf_*/journal.jsonl`, which has no assistant/usage lines and inserts nothing.
 
 **Ingest behavior**: On startup, a background thread runs ingest automatically if the DB is missing or empty. The `/api/refresh` endpoint triggers a full re-ingest. File metadata (`ingest_meta` table) is used to skip unchanged files.
 
@@ -48,7 +52,7 @@ logs/        dashboard.log — server output when run via Task Scheduler; not co
 
 | Path | Purpose |
 |------|---------|
-| `~/.claude/projects/` | Claude session JSONL files (read-only) |
+| `~/.claude/projects/` | Claude session JSONL files, including `<session-id>/subagents/` transcripts (read-only) |
 | `data/usage.db` | SQLite database (auto-created) |
 | `~/.claude/.credentials.json` | OAuth token for quota API (read-only) |
 | `data/quota_cache.json` | Disk cache of last known quota data (auto-created) |
@@ -102,6 +106,8 @@ The server runs on port 8080; the process can be identified via `netstat -ano | 
 ## Gotchas
 
 - **Force re-ingest required** after schema migrations or `extract_project_name` changes — unchanged files are skipped otherwise. Use `POST /api/refresh?force=true` or delete `ingest_meta` rows manually.
+- **Subagent messages keep the parent's `session_id`.** Subagent transcript lines carry the parent session's `sessionId` (with `isSidechain: true`), and ingest stores them as-is. Session lists and drill-down therefore include subagent tokens, and every `COUNT(DISTINCT session_id)` metric counts a session once no matter how many agents it spawned. Nothing records which rows are sidechain; add a column if you ever need to split them out. Dedup is by `msg_id` (the API message id), and subagent ids don't overlap with the parent's (verified 2026-09-23: 0 shared ids across ~18.6k subagent messages, and no top-level file contains inlined `isSidechain` messages). Before this was added, subagent usage was missing entirely, which undercounted 30-day output tokens by about half and made `detect_other_pct` attribute subagent quota use to "other".
+- **Forked/resumed sessions share msg_ids.** A fork copies earlier messages into a new top-level file under a new `sessionId`, and `INSERT OR REPLACE` gives each shared `msg_id` to whichever file was ingested last. A force re-ingest can therefore move rows between the two sessions. Token totals are unaffected.
 - **Project name resolution** uses filesystem greedy-match: `C--Users-weaverjc-Projects-march-madness` → resolves by checking real directories on disk, so project names only resolve correctly on the machine where the paths exist.
 - **Schema migration** is handled automatically by `_migrate_db()` in `ingest.py` via `PRAGMA table_info` + `ALTER TABLE`. New columns default to 0/empty for pre-migration rows.
 - **Auto-start**: Registered in Windows Task Scheduler as `ClaudeUsageDashboard`. `launcher.py` is the entry point — it checks whether port 8080 is already in use, then spawns the server and waits (keeping the task in "Running" state so TS can enforce RestartCount and IgnoreNew). The server is assigned to a `KILL_ON_JOB_CLOSE` Windows Job Object so it dies with the launcher; otherwise `Stop-ScheduledTask` would kill only the launcher and orphan the server on the port. To re-register on a new machine, run `powershell -ExecutionPolicy Bypass -File scripts\register-task.ps1`.
