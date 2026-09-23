@@ -297,7 +297,7 @@ def render_summary(s: dict, project: str, day_number: int = 1, prev_summary=None
 # ─── The judge ───────────────────────────────────────────────
 SYSTEM_PROMPT = """You estimate how much human professional effort a piece of completed work represents.
 
-You will receive a structured record of Claude Code work: the user's requests, the files created or edited (with line counts), tool usage, the shell commands that were run, and the assistant's final messages. This may be one day of a longer session; estimate only the work in this record.
+You will receive a structured record of Claude Code work: the user's requests, the files created or edited (with line counts), tool usage, the shell commands that were run, and the assistant's final messages. This may be one day of a longer session; estimate only the work in this record. A line starting "Earlier in this session:" is context from a previous day, not work to count.
 
 Estimate how many hours a competent professional with the appropriate skills (for example a software engineer, systems administrator, or research analyst who knows this kind of work but has no AI tools) would need to accomplish the same outcomes without AI assistance.
 
@@ -308,27 +308,47 @@ Respond with only a JSON object, no prose and no code fences:
 {"summary": "<one sentence: what was accomplished>", "role": "<professional role>", "hours_low": <number>, "hours_likely": <number>, "hours_high": <number>, "rationale": "<two or three sentences>"}"""
 
 
+MAX_SUMMARY_CHARS = 400
+MAX_ROLE_CHARS = 80
+MAX_RATIONALE_CHARS = 1200
+_DECODER = json.JSONDecoder(strict=False)  # tolerate raw newlines inside strings
+
+
+def _first_json_object(text: str):
+    """The first JSON object in `text`, ignoring fences and prose around it; None if none parses."""
+    starts = [i for i, ch in enumerate(text) if ch == "{"][:20]  # replies are short; bound the work
+    for i in starts:
+        try:
+            obj, _ = _DECODER.raw_decode(text, i)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
+def _is_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def parse_estimate(text: str):
-    """(estimate, None) from the judge's reply, or (None, reason) when it isn't usable."""
-    match = re.search(r"\{.*\}", text or "", re.S)
-    if not match:
-        return None, "no JSON object in response"
-    try:
-        obj = json.loads(match.group(0))
-    except ValueError:
-        return None, "invalid JSON"
-    if not isinstance(obj, dict):
-        return None, "invalid JSON"
-    try:
-        low, likely, high = (float(obj[k]) for k in ("hours_low", "hours_likely", "hours_high"))
-    except (KeyError, TypeError, ValueError):
+    """(estimate, None) from the judge's reply, or (None, reason) when it isn't usable. Never raises."""
+    text = text or ""
+    obj = _first_json_object(text)
+    if obj is None:
+        return None, "invalid JSON" if "{" in text else "no JSON object in response"
+    hours = [obj.get(k) for k in ("hours_low", "hours_likely", "hours_high")]
+    if not all(_is_number(h) for h in hours):
         return None, "missing or non-numeric hours"
+    low, likely, high = hours  # compared before float() so huge integers can't overflow
     if not (0 < low <= likely <= high <= MAX_HOURS):
-        return None, f"hours out of order or out of range: {low}/{likely}/{high}"
+        return None, f"hours out of order or out of range: {low}/{likely}/{high}"[:200]
     summary = obj.get("summary")
     if not isinstance(summary, str) or not summary.strip():
         return None, "missing summary"
     role = obj.get("role") if isinstance(obj.get("role"), str) else ""
     rationale = obj.get("rationale") if isinstance(obj.get("rationale"), str) else ""
-    return {"summary": summary.strip(), "role": role.strip(), "hours_low": low,
-            "hours_likely": likely, "hours_high": high, "rationale": rationale.strip()}, None
+    return {"summary": _clip(summary.strip(), MAX_SUMMARY_CHARS),
+            "role": _clip(role.strip(), MAX_ROLE_CHARS),
+            "hours_low": float(low), "hours_likely": float(likely), "hours_high": float(high),
+            "rationale": _clip(rationale.strip(), MAX_RATIONALE_CHARS)}, None
