@@ -67,3 +67,8 @@ def test_clean_prompt_drops_built_in_session_commands():
     custom = ("<command-name>/deploy</command-name>\n<command-message>deploy</command-message>\n"
               "<command-args>prod</command-args>")
     assert ph.clean_prompt(custom) == "/deploy prod"
+
+
+def test_clean_prompt_drops_leading_desktop_marker():
+    assert ph.clean_prompt("<!-- attach -->\nPlease look at this") == "Please look at this"
+    assert ph.clean_prompt("Keep <!-- this --> comment") == "Keep <!-- this --> comment"

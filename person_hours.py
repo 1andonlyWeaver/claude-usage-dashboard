@@ -60,6 +60,8 @@ _TAG_RE = re.compile(
     r"|bash-stdout|bash-stderr)\b[^>]*>.*?</\1>",
     re.S,
 )
+# The desktop app prefixes some prompts with a marker such as <!-- attach --> or <!-- reply -->.
+_MARKER_RE = re.compile(r"^\s*<!--\s*[\w-]+\s*-->")
 
 
 # ─── Reading session logs ────────────────────────────────────
@@ -135,7 +137,21 @@ def _slash_command(match) -> str:
 
 def clean_prompt(text: str) -> str:
     """Keep slash commands as "/name args"; drop other harness-injected blocks."""
-    return _TAG_RE.sub("", _SLASH_RE.sub(_slash_command, text)).strip()
+    return _MARKER_RE.sub("", _TAG_RE.sub("", _SLASH_RE.sub(_slash_command, text))).strip()
+
+
+def queued_prompt(obj: dict):
+    """Text the user typed while Claude was busy (a queued_command attachment), or None."""
+    att = obj.get("attachment")
+    if obj.get("type") != "attachment" or not isinstance(att, dict):
+        return None
+    if att.get("type") != "queued_command" or att.get("commandMode") != "prompt":
+        return None
+    prompt = att.get("prompt")
+    if isinstance(prompt, list):
+        prompt = "\n".join(b.get("text") or "" for b in prompt
+                           if isinstance(b, dict) and b.get("type") == "text")
+    return (prompt.strip() or None) if isinstance(prompt, str) else None
 
 
 def is_scheduled_session(main: Path) -> bool:
@@ -153,16 +169,17 @@ _TEMP_PREFIX = tempfile.gettempdir().replace("\\", "/").lower().rstrip("/") + "/
 
 
 def _excluded(path: str) -> bool:
-    """Memory files and scratchpads aren't deliverables. Worktrees (.claude/worktrees) are."""
+    """Memory, plan-mode and scratchpad files aren't deliverables. Worktrees (.claude/worktrees) are."""
     p = path.replace("\\", "/").lower()
-    return "/.claude/projects/" in p or p.startswith(_TEMP_PREFIX) or p.startswith("/tmp/")
+    return ("/.claude/projects/" in p or "/.claude/plans/" in p or "/appdata/local/temp/" in p
+            or p.startswith(_TEMP_PREFIX) or p.startswith("/tmp/"))
 
 
 def _add_change(changes: dict, result) -> None:
     """Fold one Edit/Write toolUseResult into {path: [added, removed, kind]}."""
     if not isinstance(result, dict) or not result.get("filePath") or _excluded(result["filePath"]):
         return
-    path = result["filePath"]
+    path = result["filePath"].replace("\\", "/")  # one key per file however the path was spelled
     if result.get("structuredPatch"):
         entry = changes.setdefault(path, [0, 0, "edit"])
         for hunk in result["structuredPatch"]:
@@ -173,7 +190,7 @@ def _add_change(changes: dict, result) -> None:
                     entry[1] += 1
     elif result.get("type") == "create" and isinstance(result.get("content"), str):
         entry = changes.setdefault(path, [0, 0, "new"])
-        entry[0] += result["content"].count("\n") + 1
+        entry[0] += len(result["content"].splitlines())
         entry[2] = "new"
 
 
@@ -211,12 +228,13 @@ def summarize_day(main: Path, date: str, subagents=None):
             seen += 1
             if obj.get("type") == "assistant":
                 _add_assistant(s, obj, is_sub)
-            elif obj.get("type") == "user":
-                raw = None if is_sub else human_text(obj)
-                prompt = clean_prompt(raw) if raw else ""
-                if prompt:
-                    s["prompts"].append(prompt)
+                continue
+            if obj.get("type") == "user":
                 _add_change(s["changes"], obj.get("toolUseResult"))
+            raw = None if is_sub else (human_text(obj) or queued_prompt(obj))
+            prompt = clean_prompt(raw) if raw else ""
+            if prompt:
+                s["prompts"].append(prompt)
         events += seen
         if is_sub and seen:
             s["subagents"] += 1

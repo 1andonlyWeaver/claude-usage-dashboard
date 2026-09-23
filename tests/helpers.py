@@ -55,6 +55,13 @@ def create_result(path, n_lines):
             "content": "\n".join(f"line {i}" for i in range(n_lines))}
 
 
+def queued(local_ts, prompt, mode="prompt"):
+    """A prompt typed while Claude was busy: Claude Code stores it as a queued_command attachment."""
+    return {"type": "attachment", "timestamp": utc(local_ts), "sessionId": "s1",
+            "attachment": {"type": "queued_command", "commandMode": mode, "prompt": prompt,
+                           "origin": {"kind": "human"}}}
+
+
 def add_message(conn, session_id, local_ts, *, project="proj", source="claude-code"):
     """Insert an assistant-message row the way ingest.py does (local timestamp and date)."""
     dt = datetime.fromisoformat(local_ts)

@@ -1,8 +1,8 @@
 from collections import Counter
 
 import person_hours as ph
-from helpers import (assistant, create_result, edit_result, text, tool_result, tool_use, user,
-                     write_jsonl)
+from helpers import (assistant, create_result, edit_result, queued, text, tool_result, tool_use,
+                     user, write_jsonl)
 
 DAY = "2026-09-20"
 SITE_JS = "C:/Users/me/Projects/www/.claude/worktrees/fix/site.js"
@@ -91,3 +91,32 @@ def test_render_summary_caps_length():
     out = ph.render_summary(s, "p", max_chars=2000)
     assert out.endswith("[truncated]")
     assert len(out) <= 2000 + len("\n[truncated]")
+
+
+def test_summarize_day_includes_prompts_typed_while_claude_worked(tmp_path):
+    main = write_jsonl(tmp_path / "proj" / "s2.jsonl", [
+        user("2026-09-20T09:00:00", "Fix the calendar"),
+        queued("2026-09-20T09:02:00", "Also check February"),
+        queued("2026-09-20T09:03:00", "<task-notification>done</task-notification>",
+               mode="task-notification"),
+        queued("2026-09-20T09:04:00", [text("And March")]),
+    ])
+    assert ph.summarize_day(main, DAY)["prompts"] == [
+        "Fix the calendar", "Also check February", "And March"]
+
+
+def test_excluded_paths():
+    assert ph._excluded(r"C:\Users\me\.claude\plans\big-plan.md")
+    assert ph._excluded("/mnt/c/Users/me/AppData/Local/Temp/claude/x.md")
+    assert ph._excluded("/home/me/.claude/projects/p/memory/m.md")
+    assert not ph._excluded("C:/Users/me/Projects/www/.claude/worktrees/fix/site.js")
+    assert not ph._excluded(r"C:\Users\me\.claude\skills\geddes\SKILL.md")
+
+
+def test_changes_merge_path_spellings_and_count_lines_exactly(tmp_path):
+    main = write_jsonl(tmp_path / "proj" / "s3.jsonl", [
+        tool_result("2026-09-20T09:00:00",
+                    {"type": "create", "filePath": r"C:\w\a.py", "content": "x\ny\n"}),
+        tool_result("2026-09-20T09:01:00", edit_result("C:/w/a.py", 1, 0)),
+    ])
+    assert ph.summarize_day(main, DAY)["changes"] == {"C:/w/a.py": [3, 0, "new"]}
