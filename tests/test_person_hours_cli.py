@@ -85,17 +85,39 @@ def test_cli_refreshes_the_transcript_index_each_pass(conn, tmp_path, monkeypatc
     assert status == {"s1": "done", "s2": "done"}
 
 
-def test_cli_stops_after_a_pass_where_every_call_failed(conn, tmp_path, monkeypatch, capsys):
+def test_cli_stops_after_three_failed_calls_in_a_row(conn, tmp_path, monkeypatch, capsys):
+    index = {}
+    for sid in ("a", "b", "c", "d"):
+        index.update(queued_session(conn, tmp_path, sid, NOW))
+    run = FakeRun(stdout="Error: not logged in", returncode=1)
+    monkeypatch.setattr(ph, "index_sessions", lambda roots=None: index)
+    monkeypatch.setattr(ph, "MAX_PER_TICK", 1)
+    monkeypatch.setattr(ph, "find_claude_cli", lambda: "claude")
+    monkeypatch.setattr(ph.subprocess, "run", run)
+    assert ph.main([]) == 1
+    captured = capsys.readouterr()
+    assert "3 failed calls in a row" in captured.err
+    assert "exit 1: Error: not logged in" in captured.err
+    assert len(run.calls) == 3 and "Finished:" in captured.out
+
+
+def test_cli_keeps_going_after_an_isolated_failure(conn, tmp_path, monkeypatch):
     index = {}
     for sid in ("a", "b", "c"):
         index.update(queued_session(conn, tmp_path, sid, NOW))
+    replies = iter(["Error: flaky", envelope(GOOD_ESTIMATE), envelope(GOOD_ESTIMATE)])
+
+    class Flaky(FakeRun):
+        def __call__(self, cmd, **kwargs):
+            self.stdout = next(replies)
+            return super().__call__(cmd, **kwargs)
+
     monkeypatch.setattr(ph, "index_sessions", lambda roots=None: index)
-    monkeypatch.setattr(ph, "MAX_PER_TICK", 2)
+    monkeypatch.setattr(ph, "MAX_PER_TICK", 1)
     monkeypatch.setattr(ph, "find_claude_cli", lambda: "claude")
-    monkeypatch.setattr(ph.subprocess, "run", FakeRun(stdout="Error: not logged in", returncode=1))
-    assert ph.main([]) == 1
-    assert "exit 1: Error: not logged in" in capsys.readouterr().err
-    assert ph.queue_counts(conn)["pending"] == 3  # c untouched; a and b wait to retry
+    monkeypatch.setattr(ph.subprocess, "run", Flaky())
+    assert ph.main([]) == 0
+    assert ph.queue_counts(conn)["pending"] == 1  # the failed day waits out its retry
 
 
 def test_cli_rejects_a_non_positive_limit():

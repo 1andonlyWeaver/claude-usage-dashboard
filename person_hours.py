@@ -17,6 +17,7 @@ import tempfile
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -584,17 +585,31 @@ def _record_failure(conn, session_id, date, error, attempted_at=None, meta=None,
     conn.commit()
 
 
-def _connect():
-    """A DB connection that waits out ingest writes instead of failing (and losing a paid result)."""
+@contextmanager
+def _db():
+    """A connection for the judge's work, released safely even on error.
+
+    It waits up to 30 s for ingest writes instead of failing (which would throw away a paid
+    result), and on exit rolls back anything uncommitted before closing: close() alone keeps
+    the lock while a half-read cursor is alive (see ingest._open_db).
+    """
     conn = db.get_conn()
     conn.execute("PRAGMA busy_timeout = 30000")
-    return conn
+    try:
+        yield conn
+    finally:
+        try:
+            conn.rollback()  # no-op after a final commit
+        finally:
+            conn.close()
 
 
 def judge_session_day(session_id, date, index, cli, runner=None, now_fn=datetime.now) -> str:
-    """Judge one queued session-day and store the outcome: 'done', 'error' (the call failed) or 'skipped' (nothing to judge)."""
-    conn = _connect()
-    try:
+    """Judge one queued session-day and store the outcome.
+
+    Returns 'done', 'error' (the call failed) or 'skipped' (nothing to judge).
+    """
+    with _db() as conn:
         text, ctx, problem = build_request(conn, session_id, date, index)
         if problem:
             _record_failure(conn, session_id, date, problem, final=True)
@@ -606,18 +621,13 @@ def judge_session_day(session_id, date, index, cli, runner=None, now_fn=datetime
             return "done"
         _record_failure(conn, session_id, date, result["error"], attempted_at, meta=result)
         return "error"
-    finally:
-        conn.close()
 
 
 def _record_crash(session_id, date, ex, now_fn) -> None:
     """Count an unexpected exception as a failed attempt, so it backs off and hits the cap."""
     try:
-        conn = _connect()
-        try:
+        with _db() as conn:
             _record_failure(conn, session_id, date, f"crash: {ex}"[:200], _ts(now_fn()))
-        finally:
-            conn.close()
     except Exception as inner:  # the DB itself is unavailable; the next tick will retry
         print(f"[hours {datetime.now():%Y-%m-%d %H:%M:%S}] could not record crash: {inner}")
 
@@ -629,8 +639,7 @@ def judge_pending(limit: int, cli: str, index: dict, runner=None, now_fn=datetim
     """
     if limit <= 0:
         return {}
-    conn = _connect()
-    try:
+    with _db() as conn:
         # Claim the rows (stamp them as started) in one write transaction, so another process
         # running the backfill can't take them too and in-flight calls count toward the cap.
         conn.execute("BEGIN IMMEDIATE")
@@ -642,8 +651,6 @@ def judge_pending(limit: int, cli: str, index: dict, runner=None, now_fn=datetim
             "UPDATE person_hour_estimates SET last_attempt_at = ? WHERE session_id = ? AND date = ?",
             [(started, sid, date) for sid, date in rows])
         conn.commit()
-    finally:
-        conn.close()
 
     def one(row):
         try:
@@ -711,12 +718,9 @@ def run_tick(now: datetime, gates: dict, runner=None, now_fn=datetime.now) -> di
         return {"skipped": "ingest"}
     cli = find_claude_cli()
     index = index_sessions()
-    conn = _connect()
-    try:
+    with _db() as conn:
         discover(conn, now, index)
         calls = calls_last_hour(conn, now)
-    finally:
-        conn.close()
     reason = skip_reason(cli_found=cli is not None, calls_last_hour=calls, **gates)
     set_worker_reason(reason, now)
     if reason:
@@ -725,6 +729,9 @@ def run_tick(now: datetime, gates: dict, runner=None, now_fn=datetime.now) -> di
 
 
 # ─── Command line ────────────────────────────────────────────
+STOP_AFTER_FAILURES = 3  # failed calls in a row (across passes) that end a backfill run
+
+
 def main(argv=None) -> int:
     """Queue and judge session-days by hand. Skips the quota pause; keeps the hourly cap.
 
@@ -737,15 +744,15 @@ def main(argv=None) -> int:
                     help=f"queue session-days from the last DAYS days (default {BACKFILL_DAYS})")
     ap.add_argument("--limit", type=int, help="judge at most this many session-days")
     ap.add_argument("--dry-run", action="store_true",
-                    help="print what would be sent to Claude without calling it (session-days are still queued)")
+                    help="print what would be sent to Claude without calling it "
+                         "(session-days are still queued)")
     args = ap.parse_args(argv)
 
     if args.limit is not None and args.limit < 1:
         ap.error("--limit must be at least 1")
 
     index = index_sessions()
-    conn = _connect()
-    try:
+    with _db() as conn:
         init_db(conn)
         queued = discover(conn, datetime.now(), index, backfill_days=args.backfill)
         waiting = queue_counts(conn)["pending"]
@@ -757,8 +764,6 @@ def main(argv=None) -> int:
                 print(f"\n=== {row['session_id']} {row['date']} ===")
                 print(text if text else f"(skipped: {problem})")
             return 0
-    finally:
-        conn.close()
 
     cli = find_claude_cli()
     if cli is None:
@@ -766,7 +771,7 @@ def main(argv=None) -> int:
         return 1
     print(f"Judging up to {total} session-days, at most {MAX_CALLS_PER_HOUR} per hour "
           f"(about {total / MAX_CALLS_PER_HOUR:.1f} h). The 5-hour quota pause does not apply here.")
-    attempted = judged = 0
+    attempted = judged = failed_in_a_row = 0
     try:
         while attempted < total:
             # A fresh index each pass: the worker may queue sessions that started after launch.
@@ -775,17 +780,18 @@ def main(argv=None) -> int:
                 attempted += sum(outcome.values())
                 judged += outcome.get("done", 0)
                 print(f"  {attempted}/{total} {outcome}")
-                if outcome.get("error") and not outcome.get("done"):
-                    print(f"Stopping: every call in that pass failed. Last error: {_last_error()}",
-                          file=sys.stderr)
+                # Stop on a run of failed calls, not one unlucky call: the login or quota is
+                # probably gone, and pressing on would spend every row's retries.
+                failed_in_a_row = 0 if outcome.get("done") else failed_in_a_row + outcome.get("error", 0)
+                if failed_in_a_row >= STOP_AFTER_FAILURES:
+                    print(f"Stopping after {failed_in_a_row} failed calls in a row. "
+                          f"Last error: {_last_error()}", file=sys.stderr)
+                    _print_totals(judged)
                     return 1
                 continue
-            conn = _connect()
-            try:
+            with _db() as conn:
                 capped = calls_last_hour(conn, datetime.now()) >= MAX_CALLS_PER_HOUR
                 ready = bool(pending_rows(conn, 1, datetime.now()))
-            finally:
-                conn.close()
             if not (capped and ready):
                 break  # nothing left that can run now; the rest are waiting out a retry backoff
             time.sleep(60)
@@ -797,25 +803,27 @@ def main(argv=None) -> int:
 
 
 def _last_error() -> str:
-    conn = _connect()
-    try:
+    with _db() as conn:
         row = conn.execute("SELECT error FROM person_hour_estimates WHERE status = 'error'"
                            " ORDER BY last_attempt_at DESC LIMIT 1").fetchone()
-    finally:
-        conn.close()
     return row["error"] if row else "unknown"
 
 
 def _print_totals(judged: int) -> None:
-    conn = _connect()
-    try:
+    with _db() as conn:
         counts = queue_counts(conn)
         ready = len(pending_rows(conn, max(counts["pending"], 1), datetime.now()))
-    finally:
-        conn.close()
-    print(f"Finished: {judged} judged this run, {counts['pending']} still waiting "
-          f"({counts['pending'] - ready} in the one-hour retry wait), "
-          f"{counts['errors']} failed for good. The dashboard's worker picks up the rest.")
+        nothing_to_judge = conn.execute(
+            "SELECT COUNT(*) FROM person_hour_estimates WHERE status = 'error' AND attempts >= ?"
+            " AND error IN ('no_source', 'no_messages', 'no_events')", (MAX_ATTEMPTS,)).fetchone()[0]
+    waiting = counts["pending"]
+    line = (f"Finished: {judged} judged this run, {waiting} still waiting "
+            f"({waiting - ready} in the one-hour retry wait), "
+            f"{counts['errors'] - nothing_to_judge} failed for good, "
+            f"{nothing_to_judge} had nothing to judge.")
+    if waiting:
+        line += " The dashboard's worker picks up the rest."
+    print(line)
 
 
 if __name__ == "__main__":
