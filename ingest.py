@@ -5,6 +5,7 @@ Supports incremental updates - only re-parses changed files.
 import sqlite3
 import os
 import re
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from itertools import chain
 from pathlib import Path
@@ -88,7 +89,32 @@ def get_db():
     return conn
 
 
+@contextmanager
+def _open_db():
+    """Yield get_db(), then roll back whatever wasn't committed and close, even on error.
+
+    Both steps matter. A sqlite3 connection references itself through its statement
+    cache, so one that isn't closed lives, locks and all, until the cyclic GC runs; left
+    open after a failed commit, it locks every reader in the server out. And close()
+    alone doesn't release the lock while a half-read cursor on the connection is still
+    alive (sqlite3_close_v2 leaves it a "zombie"); the rollback does.
+    """
+    conn = get_db()
+    try:
+        yield conn
+    finally:
+        try:
+            conn.rollback()  # no-op after a final commit
+        finally:
+            conn.close()
+
+
 def init_db(conn):
+    # WAL lets the server's readers and this writer run side by side. Under the rollback
+    # journal, any open read transaction can make an ingest commit fail, and a writer
+    # stuck holding its lock shuts every reader out. The mode is stored in the database
+    # file, so this is a no-op after the first run.
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY,
@@ -406,7 +432,12 @@ def ingest_file(conn, file_path: str, project_name: str,
         print(f"  Error reading {file_path}: {e}")
         return 0
 
-    # Insert with upsert
+    # Insert with upsert. A record the schema or driver rejects (a null model, a value
+    # sqlite can't bind, a lone surrogate the stdlib json fallback lets through) is skipped
+    # so the rest of the file still lands. Anything else, "database is locked" above all,
+    # propagates: run_ingest would otherwise record the file in ingest_meta with messages
+    # missing, and an unchanged file is never re-read.
+    skipped = 0
     for record in messages.values():
         try:
             conn.execute("""
@@ -428,8 +459,11 @@ def ingest_file(conn, file_path: str, project_name: str,
                 record['source'],
             ))
             count += 1
-        except Exception:
-            pass
+        except (sqlite3.IntegrityError, sqlite3.ProgrammingError, OverflowError,
+                UnicodeEncodeError):
+            skipped += 1
+    if skipped:
+        print(f"  Skipped {skipped} unstorable record(s) in {file_path}")
 
     return count
 
@@ -441,89 +475,90 @@ def run_ingest(progress_callback=None, force=False):
         force: If True, clear ingest_meta to force re-processing all files.
     """
     DB_PATH.parent.mkdir(exist_ok=True)
-    conn = get_db()
-    init_db(conn)
+    # On failure, _open_db rolls back whatever this run hadn't committed. Those files have
+    # no ingest_meta row yet, so the next run picks them up.
+    with _open_db() as conn:
+        init_db(conn)
 
-    if force:
-        conn.execute("DELETE FROM ingest_meta")
-        conn.commit()
-
-    # Find all JSONL files: (file_path, project_name, source, timestamp_key, session_id_key)
-    all_files = []
-    for projects_root in get_project_dirs():
-        try:
-            project_dirs = list(projects_root.iterdir())
-        except (OSError, PermissionError):
-            continue
-        for project_dir in project_dirs:
-            if not project_dir.is_dir():
-                continue
-            project_name = extract_project_name(project_dir.name)
-            # Top-level session transcripts, plus subagent transcripts that newer CLI
-            # versions write beside them: <session-id>/subagents/agent-*.jsonl and
-            # <session-id>/subagents/workflows/wf_*/agent-*.jsonl. Subagent lines carry
-            # the parent's sessionId (isSidechain: true), so their tokens roll up into
-            # the parent session rather than counting as separate sessions.
-            session_files = chain(project_dir.glob("*.jsonl"),
-                                  project_dir.glob("*/subagents/**/*.jsonl"))
-            for jsonl_file in session_files:
-                all_files.append((str(jsonl_file), project_name, 'claude-code', 'timestamp', 'sessionId'))
-
-    # Scan Claude Desktop Cowork/Agent session audit files
-    if DESKTOP_SESSIONS_DIR.exists():
-        for account_dir in DESKTOP_SESSIONS_DIR.iterdir():
-            if not account_dir.is_dir() or not _is_uuid(account_dir.name):
-                continue
-            for org_dir in account_dir.iterdir():
-                if not org_dir.is_dir() or not _is_uuid(org_dir.name):
-                    continue
-                session_meta = _load_desktop_session_meta(org_dir)
-                for session_dir in org_dir.iterdir():
-                    if not session_dir.is_dir() or not session_dir.name.startswith('local_'):
-                        continue
-                    audit_file = session_dir / 'audit.jsonl'
-                    if audit_file.exists():
-                        meta = session_meta.get(session_dir.name, {})
-                        project_name = _desktop_project_name(meta)
-                        all_files.append((str(audit_file), project_name, 'claude-desktop', '_audit_timestamp', 'session_id'))
-
-    # Check which files need re-ingesting
-    cursor = conn.execute("SELECT file_path, file_size, last_modified FROM ingest_meta")
-    meta_cache = {row[0]: (row[1], row[2]) for row in cursor}
-
-    to_process = []
-    for file_path, project_name, source, ts_key, sid_key in all_files:
-        try:
-            stat = os.stat(file_path)
-            cached = meta_cache.get(file_path)
-            if cached is None or cached[0] != stat.st_size or cached[1] != stat.st_mtime:
-                to_process.append((file_path, project_name, source, ts_key, sid_key, stat.st_size, stat.st_mtime))
-        except OSError:
-            pass
-
-    stats = {'total_files': len(all_files), 'processed': 0, 'messages': 0, 'skipped': len(all_files) - len(to_process)}
-
-    for i, (file_path, project_name, source, ts_key, sid_key, fsize, fmtime) in enumerate(to_process):
-        if progress_callback:
-            progress_callback(i, len(to_process), file_path)
-
-        count = ingest_file(conn, file_path, project_name, source=source,
-                            timestamp_key=ts_key, session_id_key=sid_key)
-        stats['messages'] += count
-        stats['processed'] += 1
-
-        # Update meta
-        conn.execute("""
-            INSERT OR REPLACE INTO ingest_meta (file_path, file_size, last_modified)
-            VALUES (?, ?, ?)
-        """, (file_path, fsize, fmtime))
-
-        # Commit in batches
-        if i % 20 == 0:
+        if force:
+            conn.execute("DELETE FROM ingest_meta")
             conn.commit()
 
-    conn.commit()
-    conn.close()
+        # Find all JSONL files: (file_path, project_name, source, timestamp_key, session_id_key)
+        all_files = []
+        for projects_root in get_project_dirs():
+            try:
+                project_dirs = list(projects_root.iterdir())
+            except (OSError, PermissionError):
+                continue
+            for project_dir in project_dirs:
+                if not project_dir.is_dir():
+                    continue
+                project_name = extract_project_name(project_dir.name)
+                # Top-level session transcripts, plus subagent transcripts that newer CLI
+                # versions write beside them: <session-id>/subagents/agent-*.jsonl and
+                # <session-id>/subagents/workflows/wf_*/agent-*.jsonl. Subagent lines carry
+                # the parent's sessionId (isSidechain: true), so their tokens roll up into
+                # the parent session rather than counting as separate sessions.
+                session_files = chain(project_dir.glob("*.jsonl"),
+                                      project_dir.glob("*/subagents/**/*.jsonl"))
+                for jsonl_file in session_files:
+                    all_files.append((str(jsonl_file), project_name, 'claude-code', 'timestamp', 'sessionId'))
+
+        # Scan Claude Desktop Cowork/Agent session audit files
+        if DESKTOP_SESSIONS_DIR.exists():
+            for account_dir in DESKTOP_SESSIONS_DIR.iterdir():
+                if not account_dir.is_dir() or not _is_uuid(account_dir.name):
+                    continue
+                for org_dir in account_dir.iterdir():
+                    if not org_dir.is_dir() or not _is_uuid(org_dir.name):
+                        continue
+                    session_meta = _load_desktop_session_meta(org_dir)
+                    for session_dir in org_dir.iterdir():
+                        if not session_dir.is_dir() or not session_dir.name.startswith('local_'):
+                            continue
+                        audit_file = session_dir / 'audit.jsonl'
+                        if audit_file.exists():
+                            meta = session_meta.get(session_dir.name, {})
+                            project_name = _desktop_project_name(meta)
+                            all_files.append((str(audit_file), project_name, 'claude-desktop', '_audit_timestamp', 'session_id'))
+
+        # Check which files need re-ingesting
+        cursor = conn.execute("SELECT file_path, file_size, last_modified FROM ingest_meta")
+        meta_cache = {row[0]: (row[1], row[2]) for row in cursor}
+
+        to_process = []
+        for file_path, project_name, source, ts_key, sid_key in all_files:
+            try:
+                stat = os.stat(file_path)
+                cached = meta_cache.get(file_path)
+                if cached is None or cached[0] != stat.st_size or cached[1] != stat.st_mtime:
+                    to_process.append((file_path, project_name, source, ts_key, sid_key, stat.st_size, stat.st_mtime))
+            except OSError:
+                pass
+
+        stats = {'total_files': len(all_files), 'processed': 0, 'messages': 0, 'skipped': len(all_files) - len(to_process)}
+
+        for i, (file_path, project_name, source, ts_key, sid_key, fsize, fmtime) in enumerate(to_process):
+            if progress_callback:
+                progress_callback(i, len(to_process), file_path)
+
+            count = ingest_file(conn, file_path, project_name, source=source,
+                                timestamp_key=ts_key, session_id_key=sid_key)
+            stats['messages'] += count
+            stats['processed'] += 1
+
+            # Update meta
+            conn.execute("""
+                INSERT OR REPLACE INTO ingest_meta (file_path, file_size, last_modified)
+                VALUES (?, ?, ?)
+            """, (file_path, fsize, fmtime))
+
+            # Commit in batches
+            if i % 20 == 0:
+                conn.commit()
+
+        conn.commit()
     return stats
 
 
