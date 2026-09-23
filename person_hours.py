@@ -38,7 +38,8 @@ MAX_ATTEMPTS = 3
 RETRY_AFTER_MINUTES = 60   # a failed session-day is retried at most once per hour
 MAX_HOURS = 500            # sanity cap on one session-day's estimate
 CALL_TIMEOUT_S = 300
-TOKEN_MIN_SECONDS = 600    # never start a call on an OAuth token with less life left than this
+# Never start a tick on an OAuth token that could expire before the tick's last call ends.
+TOKEN_MIN_SECONDS = 600 + (MAX_PER_TICK // MAX_CONCURRENCY) * CALL_TIMEOUT_S
 # DEFAULT_LEVERAGE and MIN_SAMPLES_FOR_LEVERAGE live in db.py, which does the aggregation.
 
 SCHEDULED_PREFIX = "<scheduled-task"
@@ -633,7 +634,9 @@ def judge_pending(limit: int, cli: str, index: dict, runner=None, now_fn=datetim
         # Claim the rows (stamp them as started) in one write transaction, so another process
         # running the backfill can't take them too and in-flight calls count toward the cap.
         conn.execute("BEGIN IMMEDIATE")
-        rows = [(r["session_id"], r["date"]) for r in pending_rows(conn, limit, now_fn())]
+        # Re-check the hourly cap inside the lock: another process may have just claimed rows.
+        limit = min(limit, MAX_CALLS_PER_HOUR - calls_last_hour(conn, now_fn()))
+        rows = [(r["session_id"], r["date"]) for r in pending_rows(conn, max(limit, 0), now_fn())]
         started = _ts(now_fn())
         conn.executemany(
             "UPDATE person_hour_estimates SET last_attempt_at = ? WHERE session_id = ? AND date = ?",
@@ -656,7 +659,6 @@ def judge_pending(limit: int, cli: str, index: dict, runner=None, now_fn=datetim
 
 # ─── Worker ──────────────────────────────────────────────────
 _worker = {"reason": None, "last_tick": None}
-_PAUSE_REASONS = ("auth", "ingest", "quota", "token")
 
 
 def skip_reason(*, cli_found, auth_dead, ingest_running, five_hour_pct, token_seconds_left,
@@ -664,14 +666,12 @@ def skip_reason(*, cli_found, auth_dead, ingest_running, five_hour_pct, token_se
     """Why this tick shouldn't call the judge, or None to go ahead. First match wins."""
     if not cli_found:
         return "unavailable"
-    if auth_dead:
+    if auth_dead or token_seconds_left is None:  # before quota: a stale quota % hides "sign in"
         return "auth"
     if ingest_running:
         return "ingest"
     if five_hour_pct is not None and five_hour_pct >= QUOTA_PAUSE_PCT:
         return "quota"
-    if token_seconds_left is None:
-        return "auth"
     if token_seconds_left < TOKEN_MIN_SECONDS:
         return "token"
     if calls_last_hour >= MAX_CALLS_PER_HOUR:
@@ -685,11 +685,14 @@ def set_worker_reason(reason, now: datetime) -> None:
 
 
 def worker_status(counts: dict) -> dict:
-    """Worker state for /api/hours: unavailable, paused (with reason), running or idle."""
+    """Worker state for /api/hours: unavailable, paused (with reason), running or idle.
+
+    Hitting the hourly cap isn't a pause: the backlog keeps draining at the capped rate.
+    """
     reason = _worker["reason"]
     if reason == "unavailable":
         state = "unavailable"
-    elif reason in _PAUSE_REASONS:
+    elif reason not in (None, "rate"):
         state = "paused"
     else:
         state = "running" if counts["pending"] else "idle"
@@ -708,7 +711,7 @@ def run_tick(now: datetime, gates: dict, runner=None, now_fn=datetime.now) -> di
         return {"skipped": "ingest"}
     cli = find_claude_cli()
     index = index_sessions()
-    conn = db.get_conn()
+    conn = _connect()
     try:
         discover(conn, now, index)
         calls = calls_last_hour(conn, now)

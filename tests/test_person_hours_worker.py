@@ -22,6 +22,7 @@ def reset_worker():
     ({}, None),
     ({"cli_found": False, "auth_dead": True}, "unavailable"),
     ({"auth_dead": True, "ingest_running": True}, "auth"),
+    ({"five_hour_pct": 95, "token_seconds_left": None}, "auth"),
     ({"ingest_running": True, "five_hour_pct": 95}, "ingest"),
     ({"five_hour_pct": 80}, "quota"),
     ({"five_hour_pct": None}, None),
@@ -70,3 +71,25 @@ def test_run_tick_still_queues_when_paused(conn, tmp_path, monkeypatch):
     monkeypatch.setattr(ph, "index_sessions", lambda roots=None: {"s1": tmp_path / "s1.jsonl"})
     assert ph.run_tick(NOW, GATES) == {"skipped": "unavailable"}
     assert ph.queue_counts(conn)["pending"] == 1
+
+
+def test_worker_status_treats_unknown_reasons_as_paused():
+    ph.set_worker_reason("something-new", NOW)
+    assert ph.worker_status({"pending": 1, "errors": 0})["state"] == "paused"
+
+
+def test_token_threshold_covers_a_whole_tick_of_calls():
+    assert ph.TOKEN_MIN_SECONDS >= (ph.MAX_PER_TICK // ph.MAX_CONCURRENCY) * ph.CALL_TIMEOUT_S
+
+
+def test_judge_pending_rechecks_the_hourly_cap_when_claiming(conn, tmp_path, monkeypatch):
+    index = {}
+    for sid in ("a", "b", "c"):
+        index.update(queued_session(conn, tmp_path, sid, NOW))
+    monkeypatch.setattr(ph, "MAX_CALLS_PER_HOUR", 2)
+    conn.execute("INSERT INTO person_hour_estimates (session_id, date, status, last_attempt_at)"
+                 " VALUES ('other', '2026-09-19', 'done', '2026-09-20T11:50:00')")  # another process
+    conn.commit()
+    out = ph.judge_pending(5, "claude", index, runner=FakeRun(stdout=envelope(GOOD_ESTIMATE)),
+                           now_fn=lambda: NOW)
+    assert out == {"done": 1}
