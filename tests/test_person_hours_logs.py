@@ -43,7 +43,7 @@ def test_clean_prompt_keeps_slash_commands_and_their_arguments():
     raw = ("<command-message>review-pr</command-message>\n<command-name>/review-pr</command-name>\n"
            "<command-args>PR 539</command-args>")
     assert ph.clean_prompt(raw) == "/review-pr PR 539"
-    assert ph.clean_prompt("<command-name>/clear</command-name>") == "/clear"
+    assert ph.clean_prompt("<command-name>/custom-cmd</command-name>") == "/custom-cmd"
 
 
 def test_is_scheduled_session(tmp_path):
@@ -56,3 +56,14 @@ def test_is_scheduled_session(tmp_path):
     assert ph.is_scheduled_session(scheduled) is True
     assert ph.is_scheduled_session(normal) is False
     assert ph.is_scheduled_session(tmp_path / "missing.jsonl") is False
+
+
+def test_clean_prompt_drops_built_in_session_commands():
+    # Built-ins write <command-name> first, then <command-message>, then <command-args>.
+    raw = ("<command-name>/model</command-name>\n<command-message>model</command-message>\n"
+           "<command-args>sonnet</command-args>")
+    assert ph.clean_prompt(raw) == ""
+    assert ph.clean_prompt("<command-name>/exit</command-name>") == ""
+    custom = ("<command-name>/deploy</command-name>\n<command-message>deploy</command-message>\n"
+              "<command-args>prod</command-args>")
+    assert ph.clean_prompt(custom) == "/deploy prod"

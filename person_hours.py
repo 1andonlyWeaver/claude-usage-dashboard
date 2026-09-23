@@ -42,10 +42,19 @@ TOKEN_MIN_SECONDS = 600    # never start a call on an OAuth token with less life
 
 SCHEDULED_PREFIX = "<scheduled-task"
 INTERRUPTED_PREFIX = "[Request interrupted by user"
-# A slash command arrives as <command-message>…</command-message><command-name>/x</command-name>
-# <command-args>…</command-args>; clean_prompt keeps it as "/x args" so the judge sees the ask.
 _SLASH_RE = re.compile(
-    r"<command-name>(.*?)</command-name>\s*(?:<command-args>(.*?)</command-args>)?", re.S)
+    r"<command-name>(.*?)</command-name>\s*"
+    r"(?:<command-message>.*?</command-message>\s*)?"
+    r"(?:<command-args>(.*?)</command-args>)?",
+    re.S,
+)
+# Session housekeeping, not work: dropped from the prompts the judge sees.
+_BUILT_IN_COMMANDS = {
+    "/add-dir", "/agents", "/clear", "/compact", "/config", "/context", "/cost", "/doctor",
+    "/effort", "/exit", "/fast", "/help", "/hooks", "/ide", "/login", "/logout", "/mcp",
+    "/memory", "/model", "/permissions", "/plugin", "/reload-plugins", "/resume", "/rewind",
+    "/sandbox", "/status", "/statusline", "/theme", "/usage", "/vim",
+}
 _TAG_RE = re.compile(
     r"<(system-reminder|command-[a-z-]+|local-command-[a-z-]+|task-notification"
     r"|bash-stdout|bash-stderr)\b[^>]*>.*?</\1>",
@@ -118,7 +127,10 @@ def human_text(obj: dict):
 
 
 def _slash_command(match) -> str:
-    return " ".join(p for p in (match.group(1).strip(), (match.group(2) or "").strip()) if p)
+    name = match.group(1).strip()
+    if name in _BUILT_IN_COMMANDS:
+        return ""
+    return " ".join(p for p in (name, (match.group(2) or "").strip()) if p)
 
 
 def clean_prompt(text: str) -> str:
