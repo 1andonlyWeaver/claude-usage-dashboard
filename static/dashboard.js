@@ -33,12 +33,12 @@ Chart.defaults.font.family = "'DM Sans', sans-serif";
 let chart5h = null, chart7d = null, projectChart = null, modelChart = null, sessionDetailChart = null;
 let currentSessionDays = 7;
 let _windowRefreshInterval = null;
-let rateData = null;
 let windowView = 'rate';    // 'rate' | 'cumulative'
 let windowStack = 'none';   // 'none' | 'token_type' | 'project' | 'model'
 let chartFullscreen = null;
 let fsTab = '5h';            // '5h' | '7d'
 let exceedanceState = { '5h': null, '7d': null };
+let paceState = { '5h': null, '7d': null };
 let fsView = 'rate';
 let fsStack = 'none';
 
@@ -67,7 +67,6 @@ async function initAll() {
     loadHeatmap(),
     loadSessions(currentSessionDays),
     loadCost(),
-    loadRate(),
   ]);
   // Auto-refresh window charts every 60s (clear any prior interval to avoid stacking)
   if (_windowRefreshInterval) clearInterval(_windowRefreshInterval);
@@ -253,16 +252,15 @@ function updateWindowRanges() {
   }
 }
 
+// Time to cap at the window's recent pace (see computePace). Drives both the text under
+// each gauge and the "Projected to cap" warning, so the two can't disagree. Runs on every
+// quota poll (fresh pct) and every window-chart refresh (fresh pace).
 function updateForecasts() {
-  if (!rateData || !quotaState.five) return;
-  const tph = rateData.tokens_per_hour;
-  if (tph <= 0) return;
-
-  // Simple linear forecast: how long until 100%?
   [
-    { id: '5h', q: quotaState.five, windowHours: 5 },
-    { id: '7d', q: quotaState.seven, windowHours: 168 },
+    { id: '5h', q: quotaState.five },
+    { id: '7d', q: quotaState.seven },
   ].forEach(({ id, q }) => {
+    exceedanceState[id] = null;
     const el = document.getElementById('forecast' + id);
     if (!el || !q) return;
     if (q.pct == null) { el.textContent = ''; return; }  // usage unknown — nothing to forecast
@@ -272,42 +270,29 @@ function updateForecasts() {
       el.style.color = CLAUDE_RED;
       return;
     }
-    // Estimate: if current rate applies, how long till cap?
-    // pct/hr = (tokens/hr) / (totalCapTokens/100) — but we don't know cap in tokens
-    // Use: remaining_pct / (current_rate_pct_per_hr)
-    // current_rate_pct_per_hr ≈ (current_pct / elapsed_time_since_start)
-    // Simpler: use proportional estimate from pct consumption and time to reset
-    const now = new Date();
-    const resetMs = q.resetsAt - now;
-    if (resetMs <= 0) {
-      el.textContent = '';
+    const pace = paceState[id];
+    const hoursToReset = (q.resetsAt - Date.now()) / 3600000;
+    if (!pace || hoursToReset <= 0) { el.textContent = ''; return; }
+
+    const hoursToFull = pace.pctPerHour > 0 ? pctRemaining / pace.pctPerHour : Infinity;
+    if (hoursToFull > hoursToReset) {
+      el.textContent = 'On track — won\'t cap';
+      el.style.color = 'rgba(245,237,228,0.4)';
       return;
     }
-    const windowHours = resetMs / 3600000;
-    const pctPerHour = q.pct / Math.max(1, (q.resetsAt - now - resetMs + resetMs) / 3600000);
-
-    // Better: use actual token rate
-    // If tokens_per_hour = X, and current pct = P, then rate = X tokens/hr
-    // Remaining = (100-P)% of cap. At X tokens/hr, time = remaining_tokens / X
-    // remaining_tokens ≈ (remaining_pct / pct) * current_tokens_in_window
-    if (q.pct > 0 && tph > 0) {
-      const currentTokensEstimate = (rateData.total_tokens / Math.min(rateData.hours, 3));
-      const hoursToFull = (pctRemaining / q.pct) * (rateData.hours);
-      if (hoursToFull > windowHours) {
-        el.textContent = 'On track — won\'t cap';
-        el.style.color = 'rgba(245,237,228,0.4)';
-      } else if (hoursToFull < 0.5) {
-        el.textContent = '⚠ ~' + Math.round(hoursToFull * 60) + 'm to limit';
-        el.style.color = CLAUDE_RED;
-      } else if (hoursToFull < 2) {
-        el.textContent = '⚠ ~' + hoursToFull.toFixed(1) + 'h to limit';
-        el.style.color = CLAUDE_AMBER;
-      } else {
-        el.textContent = '~' + hoursToFull.toFixed(1) + 'h at current pace';
-        el.style.color = 'rgba(245,237,228,0.4)';
-      }
+    exceedanceState[id] = { exceedTime: new Date(Date.now() + hoursToFull * 3600000) };
+    if (hoursToFull < 0.5) {
+      el.textContent = '⚠ ~' + Math.round(hoursToFull * 60) + 'm to limit';
+      el.style.color = CLAUDE_RED;
+    } else if (hoursToFull < 2) {
+      el.textContent = '⚠ ~' + hoursToFull.toFixed(1) + 'h to limit';
+      el.style.color = CLAUDE_AMBER;
+    } else {
+      el.textContent = '~' + hoursToFull.toFixed(1) + 'h at current pace';
+      el.style.color = 'rgba(245,237,228,0.4)';
     }
   });
+  updateExceedanceWarnings();
 }
 
 function updateExtraUsage(data) {
@@ -469,10 +454,9 @@ async function loadWindowCharts() {
       apiFetch('/api/window?type=5h&group_by=' + gb),
       apiFetch('/api/window?type=7d&group_by=' + gb),
     ]);
-    // Compute exceedance predictions before building charts
-    exceedanceState['5h'] = computeExceedance(d5h);
-    exceedanceState['7d'] = computeExceedance(d7d);
-    updateExceedanceWarnings();
+    paceState['5h'] = computePace(d5h);
+    paceState['7d'] = computePace(d7d);
+    updateForecasts();
     // Destroy old charts, then build new ones from fetched data
     if (chart5h) { chart5h.destroy(); chart5h = null; }
     if (chart7d) { chart7d.destroy(); chart7d = null; }
@@ -492,7 +476,7 @@ function _movingAverage(arr, halfWin) {
   });
 }
 
-// ─── EMA helper (module-scoped so computeExceedance can reuse it) ─────────────
+// ─── EMA helper (module-scoped so computePace can reuse it) ─────────────
 function _computeEma(series, nowIdx) {
   if (nowIdx < 2) return null;
   const alpha = 0.3;
@@ -503,12 +487,20 @@ function _computeEma(series, nowIdx) {
     sumSqRes += (series[i] - ema[i]) ** 2;
   }
   const sigma = Math.sqrt(sumSqRes / nowIdx);
-  return { ema, sigma, projBuckets: 0 };  // projBuckets set by caller
+  // Per-bucket slope, read at the last complete bucket: the one holding "now" is still
+  // filling, and its short increment dragged the slope down by up to alpha (30%) at the
+  // top of every bucket. Seeding ema with series[0] also starts the slope at zero; after
+  // k increments it has only reached 1 - (1-alpha)^k of the true rate, so divide that out.
+  const last = nowIdx - 1;
+  const slope = (ema[last] - ema[last - 1]) / (1 - (1 - alpha) ** last);
+  return { ema, sigma, slope, projBuckets: 0 };  // projBuckets set by caller
 }
 
-// Compute when cumulative usage is projected to reach 100% based on EMA slope.
-// Returns { exceedTime: Date } if cap is predicted before window_end, or null otherwise.
-function computeExceedance(data) {
+// Recent burn rate of a quota window, as { pctPerHour }, or null when there is nothing to
+// extrapolate from. Local tokens are scaled to the share of quota they account for
+// (quota_pct minus other_pct), then run through the same EMA the cumulative chart projects
+// with, so the gauge forecast, the cap warning and the chart's projection line agree.
+function computePace(data) {
   if (!data) return null;
   const { window_start, window_end, quota_pct, bucket_minutes, buckets, other_pct } = data;
   // null means the quota API gave us nothing; 0 means the window just reset. Neither
@@ -535,28 +527,17 @@ function computeExceedance(data) {
   const totalTokens = aggRaw.reduce((a, b) => a + b, 0);
   if (totalTokens === 0) return null;
 
-  // Normalize local tokens to their portion of quota, then offset by other_pct
-  const otherOffset = other_pct || 0;
-  const localPct = quota_pct - otherOffset;
+  // Normalize local tokens to their portion of quota. other_pct is a constant offset on
+  // the cumulative line, so it has no bearing on the slope and is left out.
+  const localPct = quota_pct - (other_pct || 0);
+  if (localPct <= 0) return null;  // all usage came from elsewhere; local tokens can't pace it
   const norm = localPct / totalTokens;
   let running = 0;
-  const cumSeries = aggRaw.map(v => { running += v; return running * norm + otherOffset; });
+  const cumSeries = aggRaw.map(v => { running += v; return running * norm; });
 
   const emaResult = _computeEma(cumSeries, nowIndex);
   if (!emaResult) return null;
-
-  const { ema } = emaResult;
-  const slope = nowIndex > 0 ? ema[nowIndex] - ema[nowIndex - 1] : 0;
-  if (slope <= 0) return null;  // usage declining, won't cap
-
-  const actualAtNow = cumSeries[nowIndex];
-  if (actualAtNow >= 100) return null;  // already at limit
-
-  const stepsToHundred = (100 - actualAtNow) / slope;
-  const exceedMs = allTimes[nowIndex] + stepsToHundred * bucketMs;
-
-  if (exceedMs >= endMs) return null;  // won't cap before window resets
-  return { exceedTime: new Date(exceedMs) };
+  return { pctPerHour: emaResult.slope * 60 / bucket_minutes };
 }
 
 function updateExceedanceWarnings() {
@@ -793,10 +774,9 @@ function buildWindowChart(data, canvasId, maHalf) {
   const emaResult = nowIndex >= 0 ? computeEmaLocal(emaInput, nowIndex) : null;
 
   if (emaResult) {
-    const { ema, sigma, projBuckets } = emaResult;
+    const { sigma, slope, projBuckets } = emaResult;
     const projEndIndex = nowIndex + projBuckets;
     const n = allTimes.length;
-    const slope = nowIndex > 0 ? ema[nowIndex] - ema[nowIndex - 1] : 0;
 
     // Build projection data arrays — anchor at actual value, not EMA (EMA lags)
     const actualAtNow = emaInput[nowIndex];
@@ -882,7 +862,7 @@ function buildWindowChart(data, canvasId, maHalf) {
       stack: 'proj-l',
     });
 
-    // Projection line (drawn on top, starts at ema[nowIndex] to connect with now-dot)
+    // Projection line (drawn on top, starts at the actual value to connect with now-dot)
     datasets.push({
       label: 'projection',
       data: projLineData,
@@ -1328,11 +1308,6 @@ async function loadCost() {
     `;
     breakdown.appendChild(div);
   }
-}
-
-// ─── Rate ────────────────────────────────────────────────────
-async function loadRate() {
-  rateData = await apiFetch('/api/rate?hours=3');
 }
 
 // ─── Utilities ───────────────────────────────────────────────
