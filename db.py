@@ -1,53 +1,92 @@
 """
 Query helpers for the usage SQLite database.
 """
+import re
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "data" / "usage.db"
 
-# API pricing per 1M tokens (input_price, output_price, cache_create_mult, cache_read_mult)
-# Cache creation tiers (5m and 1h ephemeral) are both charged at 1.25x input price.
-# Cache read is charged at 0.10x input price.
-# Family rates are the source of truth; the exact-ID dict below holds overrides only.
-FABLE_PRICING =  (10.00, 50.00, 1.25, 0.10)
-OPUS_PRICING =   (15.00, 75.00, 1.25, 0.10)
-SONNET_PRICING = (3.00,  15.00, 1.25, 0.10)
-HAIKU_PRICING =  (0.25,  1.25,  1.25, 0.10)
+# First-party API pricing, per https://platform.claude.com/docs/en/about-claude/pricing
+# (checked 2026-09-23). Tuples are (input_price, output_price, cache_read_mult), prices
+# per 1M tokens. Cache reads are 0.1x input unless noted.
+FABLE_5_1_PRICING = (10.00, 50.00, 0.025)  # cache reads $0.25
+FABLE_5_PRICING   = (10.00, 50.00, 0.10)
+OPUS_5_5_PRICING  = (4.00,  20.00, 0.05)   # cache reads $0.20
+OPUS_4_5_PRICING  = (5.00,  25.00, 0.10)   # Opus 4.5 through Opus 5
+OPUS_4_PRICING    = (15.00, 75.00, 0.10)   # Opus 4 / 4.1
+SONNET_5_PRICING  = (2.00,  10.00, 0.10)
+SONNET_4_PRICING  = (3.00,  15.00, 0.10)   # Sonnet 4 / 4.5 / 4.6
+HAIKU_4_5_PRICING = (1.00,  5.00,  0.10)
 
-MODEL_PRICING = {
-    "claude-fable-5":            FABLE_PRICING,
-    "claude-opus-4-6":           OPUS_PRICING,
-    "claude-opus-4-5":           OPUS_PRICING,
-    "claude-opus-4-5-20251101":  OPUS_PRICING,
-    "claude-sonnet-4-6":         SONNET_PRICING,
-    "claude-sonnet-4-5":         SONNET_PRICING,
-    "claude-haiku-4-5":          HAIKU_PRICING,
-    "claude-haiku-4-5-20251001": HAIKU_PRICING,
+# Cache writes cost the same multiple of input on every model.
+CACHE_5M_WRITE_MULT = 1.25
+CACHE_1H_WRITE_MULT = 2.0
+
+# Per family, (min_version, pricing) tiers, newest first. A model gets the first tier
+# its version reaches, so a newer unreleased version inherits the newest known rate.
+FAMILY_PRICING = {
+    "fable":  [((5, 1), FABLE_5_1_PRICING), ((5, 0), FABLE_5_PRICING)],
+    "opus":   [((5, 5), OPUS_5_5_PRICING), ((4, 5), OPUS_4_5_PRICING), ((4, 0), OPUS_4_PRICING)],
+    "sonnet": [((5, 0), SONNET_5_PRICING), ((4, 0), SONNET_4_PRICING)],
+    "haiku":  [((4, 5), HAIKU_4_5_PRICING)],
 }
-DEFAULT_PRICING = SONNET_PRICING
+
+# Exact model IDs whose price doesn't follow their family's version tiers. Checked first.
+MODEL_PRICING = {}
+DEFAULT_PRICING = SONNET_5_PRICING
+
+# "claude-opus-4-5-20251101" -> opus, 4, 5. The 1-2 digit limit keeps a snapshot date
+# from being read as a version ("claude-opus-4-20250514" is Opus 4.0).
+_MODEL_ID_RE = re.compile(
+    r"(?P<family>fable|opus|sonnet|haiku)"
+    r"(?:-(?P<major>\d{1,2})(?!\d)(?:-(?P<minor>\d{1,2})(?!\d))?)?"
+)
 
 
 def price_for_model(model: str):
-    """Return (input, output, cache_create_mult, cache_read_mult) for a model.
+    """Return (input, output, cache_read_mult) for a model.
 
-    Exact-ID overrides in MODEL_PRICING win; otherwise fall back to the model
-    family (opus/sonnet/haiku) so new versions are never silently mis-tiered;
-    otherwise DEFAULT_PRICING.
+    Exact-ID overrides in MODEL_PRICING win; otherwise the family and version parsed
+    from the ID pick a tier from FAMILY_PRICING (an ID with no parseable version gets
+    the family's newest tier); otherwise DEFAULT_PRICING.
     """
     if model in MODEL_PRICING:
         return MODEL_PRICING[model]
-    m = (model or "").lower()
-    if "fable" in m:
-        return FABLE_PRICING
-    if "opus" in m:
-        return OPUS_PRICING
-    if "sonnet" in m:
-        return SONNET_PRICING
-    if "haiku" in m:
-        return HAIKU_PRICING
-    return DEFAULT_PRICING
+    m = _MODEL_ID_RE.search((model or "").lower())
+    if not m:
+        return DEFAULT_PRICING
+    tiers = FAMILY_PRICING[m['family']]
+    version = (int(m['major']), int(m['minor'] or 0)) if m['major'] else None
+    for min_version, pricing in tiers:
+        if version is None or version >= min_version:
+            return pricing
+    return tiers[-1][1]
+
+
+# Token sums needed to price a group of messages. Rows ingested before Claude Code
+# logged the 5m/1h split carry only cache_creation_tokens; that remainder is charged
+# at the 5-minute rate, the default cache TTL.
+_COST_COLUMNS = """
+    SUM(input_tokens) as input_tokens,
+    SUM(cache_5m_tokens + MAX(cache_creation_tokens - cache_5m_tokens - cache_1h_tokens, 0)) as cache_5m_tokens,
+    SUM(cache_1h_tokens) as cache_1h_tokens,
+    SUM(cache_read_tokens) as cache_read_tokens,
+    SUM(output_tokens) as output_tokens
+"""
+
+
+def _group_cost(model: str, row) -> float:
+    """Dollar cost at API rates of a row selected with _COST_COLUMNS."""
+    input_price, output_price, cache_read_mult = price_for_model(model)
+    return (
+        (row['input_tokens'] or 0) * input_price +
+        (row['cache_5m_tokens'] or 0) * input_price * CACHE_5M_WRITE_MULT +
+        (row['cache_1h_tokens'] or 0) * input_price * CACHE_1H_WRITE_MULT +
+        (row['cache_read_tokens'] or 0) * input_price * cache_read_mult +
+        (row['output_tokens'] or 0) * output_price
+    ) / 1_000_000
 
 
 def get_conn():
@@ -200,14 +239,8 @@ def recent_rate(hours: int = 3) -> dict:
 def estimate_cost(days: int = 30) -> dict:
     """Estimate API cost based on token counts and model pricing."""
     conn = get_conn()
-    rows = conn.execute("""
-        SELECT model,
-               SUM(input_tokens) as input_tokens,
-               SUM(cache_creation_tokens) as cache_creation_tokens,
-               SUM(cache_read_tokens) as cache_read_tokens,
-               SUM(output_tokens) as output_tokens,
-               SUM(cache_5m_tokens) as cache_5m_tokens,
-               SUM(cache_1h_tokens) as cache_1h_tokens
+    rows = conn.execute(f"""
+        SELECT model, {_COST_COLUMNS}
         FROM messages
         WHERE date >= ?
         GROUP BY model
@@ -219,25 +252,7 @@ def estimate_cost(days: int = 30) -> dict:
 
     for row in rows:
         model = row['model']
-        pricing = price_for_model(model)
-        input_price, output_price, cache_create_mult, cache_read_mult = pricing
-
-        # Use tier-specific cache counts when available, fall back to aggregated column
-        cache_5m = row['cache_5m_tokens'] or 0
-        cache_1h = row['cache_1h_tokens'] or 0
-        if cache_5m + cache_1h > 0:
-            # Use tier-specific counts — both tiers charged at the same 1.25x rate
-            cache_create_cost = (cache_5m + cache_1h) / 1_000_000 * input_price * cache_create_mult
-        else:
-            # Pre-migration data: use aggregated column
-            cache_create_cost = row['cache_creation_tokens'] / 1_000_000 * input_price * cache_create_mult
-
-        cost = (
-            (row['input_tokens'] / 1_000_000) * input_price +
-            cache_create_cost +
-            (row['cache_read_tokens'] / 1_000_000) * input_price * cache_read_mult +
-            (row['output_tokens'] / 1_000_000) * output_price
-        )
+        cost = _group_cost(model, row)
         total_cost += cost
         breakdown.append({'model': model, 'cost': round(cost, 2)})
 
@@ -302,28 +317,15 @@ def window_tokens(window_start: str, window_end: str, bucket_minutes: int,
         rows = conn.execute(f"""
             SELECT {bucket_expr} as time,
                    model as grp,
-                   SUM(input_tokens) as input_tokens,
-                   SUM(cache_creation_tokens) as cache_creation_tokens,
-                   SUM(cache_read_tokens) as cache_read_tokens,
-                   SUM(output_tokens) as output_tokens
+                   {_COST_COLUMNS}
             FROM messages
             WHERE timestamp >= ? AND timestamp < ?
             GROUP BY time, model
             ORDER BY time
         """, (window_start, window_end)).fetchall()
         conn.close()
-        results = []
-        for r in rows:
-            model = r['grp']
-            inp_price, out_price, cache_create_mult, cache_read_mult = price_for_model(model)
-            cost = (
-                (r['input_tokens'] or 0) / 1_000_000 * inp_price +
-                (r['cache_creation_tokens'] or 0) / 1_000_000 * inp_price * cache_create_mult +
-                (r['cache_read_tokens'] or 0) / 1_000_000 * inp_price * cache_read_mult +
-                (r['output_tokens'] or 0) / 1_000_000 * out_price
-            )
-            results.append({'time': r['time'], 'group': model, 'tokens': cost})
-        return results
+        return [{'time': r['time'], 'group': r['grp'], 'tokens': _group_cost(r['grp'], r)}
+                for r in rows]
     elif group_by == 'project':
         rows = conn.execute(f"""
             SELECT {bucket_expr} as time,
