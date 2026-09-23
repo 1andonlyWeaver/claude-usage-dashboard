@@ -517,3 +517,118 @@ def queue_counts(conn) -> dict:
         FROM person_hour_estimates
     """, (MAX_ATTEMPTS, MAX_ATTEMPTS)).fetchone()
     return {"pending": row[0] or 0, "errors": row[1] or 0}
+
+
+# ─── Judging ─────────────────────────────────────────────────
+def _day_context(conn, session_id: str, date: str) -> dict:
+    """Project name, day number, previous day's summary and last message time for a session-day."""
+    row = conn.execute(
+        "SELECT MAX(project) AS project, MAX(timestamp) AS last_ts FROM messages"
+        " WHERE session_id = ? AND date = ?", (session_id, date)).fetchone()
+    day_number = conn.execute(
+        "SELECT COUNT(DISTINCT date) FROM messages WHERE session_id = ? AND date <= ?",
+        (session_id, date)).fetchone()[0]
+    prev = conn.execute(
+        "SELECT summary FROM person_hour_estimates WHERE session_id = ? AND date < ?"
+        " AND summary IS NOT NULL ORDER BY date DESC LIMIT 1", (session_id, date)).fetchone()
+    return {"project": row["project"] or "Unknown", "judged_through": row["last_ts"],
+            "day_number": max(day_number, 1), "prev_summary": prev["summary"] if prev else None}
+
+
+def build_request(conn, session_id: str, date: str, index: dict):
+    """(summary_text, context, problem) for a session-day; problem is 'no_source' or 'no_events'."""
+    main = index.get(session_id)
+    if main is None:
+        return None, None, "no_source"
+    ctx = _day_context(conn, session_id, date)
+    day = summarize_day(main, date)
+    if day is None:
+        return None, ctx, "no_events"
+    return render_summary(day, ctx["project"], ctx["day_number"], ctx["prev_summary"]), ctx, None
+
+
+def _record_success(conn, session_id, date, result, judged_through, attempted_at):
+    est = result["estimate"]
+    conn.execute("""
+        UPDATE person_hour_estimates SET status = 'done',
+            hours_low = ?, hours_likely = ?, hours_high = ?, summary = ?, role = ?, rationale = ?,
+            judged_through = ?, model = ?, prompt_version = ?, attempts = 0, error = NULL,
+            last_attempt_at = ?, judge_in_tokens = ?, judge_out_tokens = ?, judge_cost_usd = ?
+        WHERE session_id = ? AND date = ?
+    """, (est["hours_low"], est["hours_likely"], est["hours_high"], est["summary"], est["role"],
+          est["rationale"], judged_through, result.get("model"), PROMPT_VERSION, attempted_at,
+          result.get("in_tokens"), result.get("out_tokens"), result.get("cost_usd"),
+          session_id, date))
+    conn.commit()
+
+
+def _record_failure(conn, session_id, date, error, attempted_at=None, meta=None, final=False):
+    """Mark a failed attempt. `final` failures (no transcript) are never retried."""
+    meta = meta or {}
+    conn.execute("""
+        UPDATE person_hour_estimates SET status = 'error',
+            attempts = CASE WHEN ? THEN ? ELSE attempts + 1 END,
+            error = ?, last_attempt_at = COALESCE(?, last_attempt_at),
+            judge_in_tokens = COALESCE(?, judge_in_tokens),
+            judge_out_tokens = COALESCE(?, judge_out_tokens),
+            judge_cost_usd = COALESCE(?, judge_cost_usd)
+        WHERE session_id = ? AND date = ?
+    """, (int(final), MAX_ATTEMPTS, error, attempted_at, meta.get("in_tokens"),
+          meta.get("out_tokens"), meta.get("cost_usd"), session_id, date))
+    conn.commit()
+
+
+def judge_session_day(session_id, date, index, cli, runner=None, now_fn=datetime.now) -> str:
+    """Judge one queued session-day and store the outcome. Returns 'done' or 'error'."""
+    conn = db.get_conn()
+    try:
+        text, ctx, problem = build_request(conn, session_id, date, index)
+        if problem:
+            _record_failure(conn, session_id, date, problem, final=True)
+            return "error"
+        result = call_judge(text, cli, runner=runner)
+        attempted_at = _ts(now_fn())
+        if result["ok"]:
+            _record_success(conn, session_id, date, result, ctx["judged_through"], attempted_at)
+            return "done"
+        _record_failure(conn, session_id, date, result["error"], attempted_at, meta=result)
+        return "error"
+    finally:
+        conn.close()
+
+
+def _record_crash(session_id, date, ex, now_fn) -> None:
+    """Count an unexpected exception as a failed attempt, so it backs off and hits the cap."""
+    try:
+        conn = db.get_conn()
+        try:
+            _record_failure(conn, session_id, date, f"crash: {ex}"[:200], _ts(now_fn()))
+        finally:
+            conn.close()
+    except Exception as inner:  # the DB itself is unavailable; the next tick will retry
+        print(f"[hours {datetime.now():%Y-%m-%d %H:%M:%S}] could not record crash: {inner}")
+
+
+def judge_pending(limit: int, cli: str, index: dict, runner=None, now_fn=datetime.now) -> dict:
+    """Judge up to `limit` queued session-days, newest first, MAX_CONCURRENCY at a time.
+
+    Returns outcome counts, e.g. {"done": 2, "error": 1}.
+    """
+    if limit <= 0:
+        return {}
+    conn = db.get_conn()
+    try:
+        rows = [(r["session_id"], r["date"]) for r in pending_rows(conn, limit, now_fn())]
+    finally:
+        conn.close()
+
+    def one(row):
+        try:
+            return judge_session_day(row[0], row[1], index, cli, runner, now_fn)
+        except Exception as ex:  # one bad session-day must not stop the batch
+            print(f"[hours {datetime.now():%Y-%m-%d %H:%M:%S}] {row[0]} {row[1]}: {ex}")
+            _record_crash(row[0], row[1], ex, now_fn)
+            return "error"
+
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENCY) as pool:
+        return dict(Counter(pool.map(one, rows)))
