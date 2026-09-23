@@ -722,3 +722,65 @@ def run_tick(now: datetime, gates: dict, runner=None, now_fn=datetime.now) -> di
     if reason:
         return {"skipped": reason}
     return judge_pending(min(MAX_PER_TICK, MAX_CALLS_PER_HOUR - calls), cli, index, runner, now_fn)
+
+
+# ─── Command line ────────────────────────────────────────────
+def main(argv=None) -> int:
+    """Queue and judge session-days by hand. Skips the quota pause; keeps the hourly cap.
+
+    Safe to run while the dashboard's worker is on: rows are claimed before they're judged.
+    """
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # summaries contain × and …
+    ap = argparse.ArgumentParser(description="Estimate person-hours for Claude Code session-days.")
+    ap.add_argument("--backfill", type=int, default=BACKFILL_DAYS, metavar="DAYS",
+                    help=f"queue session-days from the last DAYS days (default {BACKFILL_DAYS})")
+    ap.add_argument("--limit", type=int, help="judge at most this many session-days")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print what would be sent to Claude without calling it")
+    args = ap.parse_args(argv)
+
+    index = index_sessions()
+    conn = _connect()
+    try:
+        init_db(conn)
+        queued = discover(conn, datetime.now(), index, backfill_days=args.backfill)
+        waiting = queue_counts(conn)["pending"]
+        total = waiting if args.limit is None else min(waiting, args.limit)
+        print(f"Queued {queued} new session-days; {waiting} waiting to be judged.")
+        if args.dry_run:
+            for row in pending_rows(conn, total, datetime.now()):
+                text, _, problem = build_request(conn, row["session_id"], row["date"], index)
+                print(f"\n=== {row['session_id']} {row['date']} ===")
+                print(text if text else f"(skipped: {problem})")
+            return 0
+    finally:
+        conn.close()
+
+    cli = find_claude_cli()
+    if cli is None:
+        print("claude CLI not found on PATH or in ~/.local/bin", file=sys.stderr)
+        return 1
+    print(f"Judging up to {total} session-days, at most {MAX_CALLS_PER_HOUR} calls per hour. "
+          "The 5-hour quota pause does not apply here.")
+    attempted = 0
+    while attempted < total:
+        outcome = judge_pending(min(MAX_PER_TICK, total - attempted), cli, index)
+        if outcome:
+            attempted += sum(outcome.values())
+            print(f"  {attempted}/{total} {outcome}")
+            continue
+        conn = _connect()
+        try:
+            capped = calls_last_hour(conn, datetime.now()) >= MAX_CALLS_PER_HOUR
+            ready = bool(pending_rows(conn, 1, datetime.now()))
+        finally:
+            conn.close()
+        if not (capped and ready):
+            break  # nothing left that can run now; the rest are waiting out a retry backoff
+        time.sleep(60)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
