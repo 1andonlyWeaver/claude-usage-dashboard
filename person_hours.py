@@ -292,3 +292,43 @@ def render_summary(s: dict, project: str, day_number: int = 1, prev_summary=None
     out += [f"  > {_clip(f, 1200)}" for f in s["finals"][-3:]]
     rendered = "\n".join(out)
     return rendered if len(rendered) <= max_chars else rendered[:max_chars] + "\n[truncated]"
+
+
+# ─── The judge ───────────────────────────────────────────────
+SYSTEM_PROMPT = """You estimate how much human professional effort a piece of completed work represents.
+
+You will receive a structured record of Claude Code work: the user's requests, the files created or edited (with line counts), tool usage, the shell commands that were run, and the assistant's final messages. This may be one day of a longer session; estimate only the work in this record.
+
+Estimate how many hours a competent professional with the appropriate skills (for example a software engineer, systems administrator, or research analyst who knows this kind of work but has no AI tools) would need to accomplish the same outcomes without AI assistance.
+
+Include: understanding the request, investigation and research, writing and editing code or documents, testing and debugging, and verifying results.
+Exclude: time spent waiting, dead ends caused only by the AI's own mistakes, and work that was clearly thrown away. Judge generated files by what they accomplish, not by their line count: boilerplate, generated reports and scratch files take a person far less time per line than core logic.
+
+Respond with only a JSON object, no prose and no code fences:
+{"summary": "<one sentence: what was accomplished>", "role": "<professional role>", "hours_low": <number>, "hours_likely": <number>, "hours_high": <number>, "rationale": "<two or three sentences>"}"""
+
+
+def parse_estimate(text: str):
+    """(estimate, None) from the judge's reply, or (None, reason) when it isn't usable."""
+    match = re.search(r"\{.*\}", text or "", re.S)
+    if not match:
+        return None, "no JSON object in response"
+    try:
+        obj = json.loads(match.group(0))
+    except ValueError:
+        return None, "invalid JSON"
+    if not isinstance(obj, dict):
+        return None, "invalid JSON"
+    try:
+        low, likely, high = (float(obj[k]) for k in ("hours_low", "hours_likely", "hours_high"))
+    except (KeyError, TypeError, ValueError):
+        return None, "missing or non-numeric hours"
+    if not (0 < low <= likely <= high <= MAX_HOURS):
+        return None, f"hours out of order or out of range: {low}/{likely}/{high}"
+    summary = obj.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        return None, "missing summary"
+    role = obj.get("role") if isinstance(obj.get("role"), str) else ""
+    rationale = obj.get("rationale") if isinstance(obj.get("rationale"), str) else ""
+    return {"summary": summary.strip(), "role": role.strip(), "hours_low": low,
+            "hours_likely": likely, "hours_high": high, "rationale": rationale.strip()}, None
