@@ -2,7 +2,7 @@
 Query helpers for the usage SQLite database.
 """
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "data" / "usage.db"
@@ -179,7 +179,8 @@ def session_detail(session_id: str) -> list[dict]:
 def recent_rate(hours: int = 3) -> dict:
     """Return tokens per hour over the last N hours for forecasting."""
     conn = get_conn()
-    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    # messages.timestamp is naive local time, so the cutoff must be too.
+    since = (datetime.now() - timedelta(hours=hours)).strftime('%Y-%m-%dT%H:%M:%S')
     row = conn.execute("""
         SELECT SUM(input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens) as total_tokens,
                COUNT(DISTINCT session_id) as sessions
