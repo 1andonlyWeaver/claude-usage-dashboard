@@ -146,3 +146,131 @@ def is_scheduled_session(main: Path) -> bool:
         if prompt:
             return prompt.startswith(SCHEDULED_PREFIX)
     return False
+
+
+# ─── Summarizing one session-day ─────────────────────────────
+_TEMP_PREFIX = tempfile.gettempdir().replace("\\", "/").lower().rstrip("/") + "/"
+
+
+def _excluded(path: str) -> bool:
+    """Memory files and scratchpads aren't deliverables. Worktrees (.claude/worktrees) are."""
+    p = path.replace("\\", "/").lower()
+    return "/.claude/projects/" in p or p.startswith(_TEMP_PREFIX) or p.startswith("/tmp/")
+
+
+def _add_change(changes: dict, result) -> None:
+    """Fold one Edit/Write toolUseResult into {path: [added, removed, kind]}."""
+    if not isinstance(result, dict) or not result.get("filePath") or _excluded(result["filePath"]):
+        return
+    path = result["filePath"]
+    if result.get("structuredPatch"):
+        entry = changes.setdefault(path, [0, 0, "edit"])
+        for hunk in result["structuredPatch"]:
+            for line in hunk.get("lines", []):
+                if line.startswith("+"):
+                    entry[0] += 1
+                elif line.startswith("-"):
+                    entry[1] += 1
+    elif result.get("type") == "create" and isinstance(result.get("content"), str):
+        entry = changes.setdefault(path, [0, 0, "new"])
+        entry[0] += result["content"].count("\n") + 1
+        entry[2] = "new"
+
+
+def _add_assistant(s: dict, obj: dict, is_sub: bool) -> None:
+    """Count tool calls, collect Bash descriptions and main-thread text from one assistant entry."""
+    for block in (obj.get("message") or {}).get("content") or []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "tool_use":
+            name = block.get("name", "?")
+            (s["tools_sub"] if is_sub else s["tools_main"])[name] += 1
+            desc = (block.get("input") or {}).get("description")
+            if name == "Bash" and not is_sub and desc and desc not in s["bash_desc"]:
+                s["bash_desc"].append(desc)
+        elif block.get("type") == "text" and not is_sub and (block.get("text") or "").strip():
+            s["finals"].append(block["text"].strip())
+
+
+def summarize_day(main: Path, date: str, subagents=None):
+    """Collect one local date's work from a session's main and subagent transcripts.
+
+    Returns None when nothing in the transcripts happened on `date`.
+    """
+    subagents = subagent_files(main) if subagents is None else subagents
+    s = {"prompts": [], "finals": [], "bash_desc": [], "tools_main": Counter(),
+         "tools_sub": Counter(), "changes": {}, "subagents": 0}
+    events = 0
+    for path in [main, *subagents]:
+        is_sub = path != main
+        seen = 0
+        for obj in _iter_json(path):
+            ts = obj.get("timestamp")
+            if not ts or parse_timestamp(ts)[1] != date:
+                continue
+            seen += 1
+            if obj.get("type") == "assistant":
+                _add_assistant(s, obj, is_sub)
+            elif obj.get("type") == "user":
+                raw = None if is_sub else human_text(obj)
+                prompt = clean_prompt(raw) if raw else ""
+                if prompt:
+                    s["prompts"].append(prompt)
+                _add_change(s["changes"], obj.get("toolUseResult"))
+        events += seen
+        if is_sub and seen:
+            s["subagents"] += 1
+    return s if events else None
+
+
+def _clip(s: str, n: int) -> str:
+    s = re.sub(r"\s+", " ", s)
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def render_summary(s: dict, project: str, day_number: int = 1, prev_summary=None,
+                   max_chars: int = SUMMARY_MAX_CHARS) -> str:
+    """Plain-text record of a session-day for the judge. Deliberately omits any timing."""
+    out = [f"Project: {project}"]
+    if day_number > 1:
+        out.append(f"This is day {day_number} of a longer session.")
+        if prev_summary:
+            out.append(f"Earlier in this session: {prev_summary}")
+    if s["subagents"]:
+        out.append(f"Subagent transcripts this day: {s['subagents']}")
+    out.append("")
+
+    p = s["prompts"]
+    out.append(f"USER REQUESTS ({len(p)} total, in order):")
+    if len(p) <= 20:
+        out += [f"  {i}. {_clip(t, 600)}" for i, t in enumerate(p, 1)]
+    else:
+        out += [f"  {i}. {_clip(t, 600)}" for i, t in enumerate(p[:14], 1)]
+        out.append(f"  [... {len(p) - 19} more requests omitted ...]")
+        out += [f"  {i}. {_clip(t, 600)}" for i, t in enumerate(p[-5:], len(p) - 4)]
+    out.append("")
+
+    changes = sorted(s["changes"].items(), key=lambda kv: -(kv[1][0] + kv[1][1]))
+    out.append(f"FILES CREATED OR EDITED ({len(changes)}):")
+    out += [f"  {kind:4s} +{added} -{removed}  {path}"
+            for path, (added, removed, kind) in changes[:40]]
+    if len(changes) > 40:
+        out.append(f"  [... {len(changes) - 40} more files ...]")
+    out.append("")
+
+    out.append("TOOL CALLS (main thread): "
+               + (", ".join(f"{k}×{v}" for k, v in s["tools_main"].most_common(15)) or "none"))
+    if s["tools_sub"]:
+        out.append("TOOL CALLS (subagents): "
+                   + ", ".join(f"{k}×{v}" for k, v in s["tools_sub"].most_common(10)))
+    out.append("")
+
+    bd = s["bash_desc"]
+    out.append(f"SHELL COMMANDS RUN ({len(bd)} distinct, first 40):")
+    out += [f"  - {_clip(d, 120)}" for d in bd[:40]]
+    out.append("")
+
+    out.append("ASSISTANT'S FINAL MESSAGES (last 3):")
+    out += [f"  > {_clip(f, 1200)}" for f in s["finals"][-3:]]
+    rendered = "\n".join(out)
+    return rendered if len(rendered) <= max_chars else rendered[:max_chars] + "\n[truncated]"
