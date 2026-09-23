@@ -35,6 +35,7 @@ BACKFILL_DAYS = 90
 PROMPT_VERSION = 1
 SUMMARY_MAX_CHARS = 24000
 MAX_ATTEMPTS = 3
+RETRY_AFTER_MINUTES = 60   # a failed session-day is retried at most once per hour
 MAX_HOURS = 500            # sanity cap on one session-day's estimate
 CALL_TIMEOUT_S = 300
 TOKEN_MIN_SECONDS = 600    # never start a call on an OAuth token with less life left than this
@@ -440,7 +441,9 @@ def _ts(dt: datetime) -> str:
 def discover(conn, now: datetime, index: dict, backfill_days: int = BACKFILL_DAYS) -> int:
     """Queue quiet session-days: new ones, and judged ones with messages newer than the judgment.
 
-    Returns how many new session-days were queued.
+    Session-days whose transcript isn't in `index` are skipped (it may be deleted, or its root
+    briefly unreachable) and get picked up if it appears. Transcripts are read before anything
+    is written, so no write lock is held during file I/O. Returns how many were queued.
     """
     since = (now - timedelta(days=backfill_days)).strftime("%Y-%m-%d")
     quiet_before = _ts(now - timedelta(minutes=IDLE_MINUTES))
@@ -453,15 +456,13 @@ def discover(conn, now: datetime, index: dict, backfill_days: int = BACKFILL_DAY
         GROUP BY m.session_id, m.date
         HAVING MAX(m.timestamp) <= ?
     """, (since, quiet_before)).fetchall()
-    scheduled = {}
-    for row in new:
-        sid = row["session_id"]
-        if sid not in scheduled:
-            main = index.get(sid)
-            scheduled[sid] = bool(main) and is_scheduled_session(main)
-        conn.execute(
-            "INSERT OR IGNORE INTO person_hour_estimates (session_id, date, status, is_scheduled)"
-            " VALUES (?, ?, 'pending', ?)", (sid, row["date"], int(scheduled[sid])))
+    scheduled = {sid: is_scheduled_session(index[sid])
+                 for sid in {row["session_id"] for row in new} if sid in index}
+    queued = [(row["session_id"], row["date"], int(scheduled[row["session_id"]]))
+              for row in new if row["session_id"] in scheduled]
+    conn.executemany(
+        "INSERT OR IGNORE INTO person_hour_estimates (session_id, date, status, is_scheduled)"
+        " VALUES (?, ?, 'pending', ?)", queued)
     conn.execute("""
         UPDATE person_hour_estimates SET status = 'pending'
         WHERE status = 'done' AND date >= ?
@@ -472,18 +473,34 @@ def discover(conn, now: datetime, index: dict, backfill_days: int = BACKFILL_DAY
                WHERE m.session_id = person_hour_estimates.session_id
                  AND m.date = person_hour_estimates.date) <= ?
     """, (since, quiet_before))
+    # Re-ingesting a resumed session can move a day's messages to another session id.
+    conn.execute("""
+        DELETE FROM person_hour_estimates
+        WHERE status IN ('pending', 'error')
+          AND NOT EXISTS (SELECT 1 FROM messages m
+                          WHERE m.session_id = person_hour_estimates.session_id
+                            AND m.date = person_hour_estimates.date)
+    """)
     conn.commit()
-    return len(new)
+    return len(queued)
 
 
-def pending_rows(conn, limit: int) -> list:
-    """Session-days waiting for a judgment (or a retry), newest date first."""
+def pending_rows(conn, limit: int, now: datetime | None = None) -> list:
+    """Session-days waiting for a judgment, newest date first.
+
+    A failed day is retried (up to MAX_ATTEMPTS) only once RETRY_AFTER_MINUTES have passed,
+    so each row is attempted at most once per rolling hour and calls_last_hour counts
+    attempts exactly.
+    """
+    retry_before = _ts((now or datetime.now()) - timedelta(minutes=RETRY_AFTER_MINUTES))
     return conn.execute("""
         SELECT session_id, date FROM person_hour_estimates
-        WHERE status = 'pending' OR (status = 'error' AND attempts < ?)
+        WHERE status = 'pending'
+           OR (status = 'error' AND attempts < ?
+               AND (last_attempt_at IS NULL OR last_attempt_at <= ?))
         ORDER BY date DESC, session_id
         LIMIT ?
-    """, (MAX_ATTEMPTS, limit)).fetchall()
+    """, (MAX_ATTEMPTS, retry_before, limit)).fetchall()
 
 
 def calls_last_hour(conn, now: datetime) -> int:
