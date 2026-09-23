@@ -481,6 +481,11 @@ body {
   margin-top: 8px;
   line-height: 1.5;
 }
+/* New hours figures meet 4.5:1; the older --text-muted rows in the $ view are unchanged. */
+#hoursBreakdown .cost-model-val,
+#hoursBreakdown .cost-model {
+  color: var(--text-secondary);
+}
 
 /* ─── Chart cards ─── */
 .chart-card {
@@ -940,4 +945,10 @@ body {
   .bottom-row { grid-template-columns: 1fr; }
   .chart-wrap-tall { height: 220px; }
   .window-charts-row { grid-template-columns: 1fr; }
+}
+
+/* Phones: the hours column squeezes the session name to a few characters, so drop it there. */
+@media (max-width: 500px) {
+  .session-row { grid-template-columns: auto 1fr auto auto auto; }
+  .session-hours { display: none; }
 }
