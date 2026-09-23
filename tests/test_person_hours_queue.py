@@ -55,10 +55,13 @@ def test_discover_requeues_judged_days_once_quiet_again(conn, tmp_path):
 def test_discover_drops_unjudged_rows_whose_messages_moved(conn, tmp_path):
     add_message(conn, "s1", "2026-09-20T09:00:00")
     ph.discover(conn, NOW, {"s1": tmp_path / "s1.jsonl"})
+    conn.execute("INSERT INTO person_hour_estimates (session_id, date, status)"
+                 " VALUES ('kept', '2026-09-19', 'done')")
     conn.execute("UPDATE messages SET session_id = 's2'")  # a resumed session re-ingested them
     conn.commit()
     ph.discover(conn, NOW, {})
     assert ("s1", "2026-09-20") not in _rows(conn)
+    assert ("kept", "2026-09-19") in _rows(conn)   # judged rows are never dropped
 
 
 def test_pending_rows_newest_first_with_hourly_retry_backoff(conn):
@@ -69,11 +72,12 @@ def test_pending_rows_newest_first_with_hourly_retry_backoff(conn):
          ("c", "2026-09-19", "error", 2, "2026-09-20T10:30:00"),
          ("d", "2026-09-19", "error", 3, "2026-09-20T09:00:00"),
          ("e", "2026-09-19", "done", 0, "2026-09-20T09:00:00"),
-         ("f", "2026-09-19", "error", 1, "2026-09-20T11:30:00")])   # failed 30 min ago
+         ("f", "2026-09-19", "error", 1, "2026-09-20T11:30:00"),   # failed 30 min ago
+         ("g", "2026-09-19", "pending", 0, "2026-09-20T11:40:00")])   # re-queued 20 min ago
     conn.commit()
     assert [r["session_id"] for r in ph.pending_rows(conn, 10, NOW)] == ["b", "c", "a"]
     assert len(ph.pending_rows(conn, 2, NOW)) == 2
-    assert ph.queue_counts(conn) == {"pending": 4, "errors": 1}
+    assert ph.queue_counts(conn) == {"pending": 5, "errors": 1}
 
 
 def test_calls_last_hour_counts_recent_attempts(conn):

@@ -488,16 +488,15 @@ def discover(conn, now: datetime, index: dict, backfill_days: int = BACKFILL_DAY
 def pending_rows(conn, limit: int, now: datetime | None = None) -> list:
     """Session-days waiting for a judgment, newest date first.
 
-    A failed day is retried (up to MAX_ATTEMPTS) only once RETRY_AFTER_MINUTES have passed,
-    so each row is attempted at most once per rolling hour and calls_last_hour counts
-    attempts exactly.
+    A day attempted within the last RETRY_AFTER_MINUTES waits (a failed one is retried up to
+    MAX_ATTEMPTS times), so each row is attempted at most once per rolling hour and
+    calls_last_hour counts attempts exactly.
     """
     retry_before = _ts((now or datetime.now()) - timedelta(minutes=RETRY_AFTER_MINUTES))
     return conn.execute("""
         SELECT session_id, date FROM person_hour_estimates
-        WHERE status = 'pending'
-           OR (status = 'error' AND attempts < ?
-               AND (last_attempt_at IS NULL OR last_attempt_at <= ?))
+        WHERE (status = 'pending' OR (status = 'error' AND attempts < ?))
+          AND (last_attempt_at IS NULL OR last_attempt_at <= ?)
         ORDER BY date DESC, session_id
         LIMIT ?
     """, (MAX_ATTEMPTS, retry_before, limit)).fetchall()
