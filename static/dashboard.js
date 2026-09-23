@@ -1227,6 +1227,10 @@ async function loadSessions(days) {
       ? '<span class="session-badge badge-fast">fast</span>'
       : '';
 
+    const hoursCell = s.person_hours == null ? ''
+      : s.hours_status === 'done'
+        ? `<span title="Estimated person-hours">${fmtHours(s.person_hours)}</span>`
+        : `<span class="provisional" title="Provisional: not yet estimated by Claude">~${fmtHours(s.person_hours)}</span>`;
     row.innerHTML = `
       ${dot}
       <div class="session-info">
@@ -1234,6 +1238,7 @@ async function loadSessions(days) {
         <div class="session-time">${startDt.toLocaleDateString()} ${startDt.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})} · ${durationMin}m · ${s.message_count} msgs${s.git_branch ? ' · ' + escHtml(s.git_branch) : ''}</div>
       </div>
       <div class="session-badges">${sourceBadge}${entrypointBadge}${speedBadge}</div>
+      <div class="session-hours">${hoursCell}</div>
       <div class="session-tokens">${fmtShort(s.total_tokens)}</div>
       <div class="session-model ${modelClass ? modelClass+'-model' : ''}">${shortModelName(s.model)}</div>
     `;
@@ -1256,6 +1261,7 @@ async function openPanel(session) {
   const startDt = new Date(session.start_time);
   document.getElementById('panelMeta').textContent =
     `${startDt.toLocaleString()} · ${session.message_count} messages · ${fmt(session.total_tokens)} tokens · ${shortModelName(session.model)}`;
+  loadPanelHours(session.session_id);
 
   if (sessionDetailChart) sessionDetailChart.destroy();
   const ctx = document.getElementById('sessionDetailChart').getContext('2d');
@@ -1288,6 +1294,43 @@ async function openPanel(session) {
 
   document.getElementById('sessionPanel').classList.add('open');
   document.getElementById('panelOverlay').classList.add('open');
+}
+
+let _panelHoursSeq = 0;
+
+async function loadPanelHours(sessionId) {
+  const seq = ++_panelHoursSeq;
+  const el = document.getElementById('panelHours');
+  el.textContent = '';
+  let days;
+  try {
+    days = await apiFetch('/api/session/' + encodeURIComponent(sessionId) + '/hours');
+  } catch (e) {
+    return;
+  }
+  if (seq !== _panelHoursSeq) return;  // another session was opened meanwhile
+  for (const d of days) {
+    const label = new Date(d.date + 'T00:00:00').toLocaleDateString([], { month: 'short', day: 'numeric' });
+    const item = document.createElement('div');
+    item.className = 'panel-hours-day';
+    const head = document.createElement('div');
+    head.className = 'panel-hours-head';
+    item.append(head);
+    if (d.status === 'done') {
+      head.textContent = `${label} · ~${fmtHours(d.hours_likely)} (${fmtHoursNum(d.hours_low)}–${fmtHoursNum(d.hours_high)})`
+        + (d.role ? ` · ${d.role}` : '');
+      for (const [cls, txt] of [['panel-hours-summary', d.summary], ['panel-hours-rationale', d.rationale]]) {
+        if (!txt) continue;
+        const p = document.createElement('p');
+        p.className = cls;
+        p.textContent = txt;
+        item.append(p);
+      }
+    } else {
+      head.textContent = `${label} · ~${fmtHours(d.provisional_hours)} · not yet estimated`;
+    }
+    el.append(item);
+  }
 }
 
 function closePanel() {

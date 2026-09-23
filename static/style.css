@@ -661,7 +661,7 @@ body {
 
 .session-row {
   display: grid;
-  grid-template-columns: auto 1fr auto auto auto;
+  grid-template-columns: auto 1fr auto auto auto auto;
   align-items: center;
   gap: 14px;
   padding: 10px 14px;
@@ -704,6 +704,17 @@ body {
   color: var(--text-secondary);
   text-align: right;
   white-space: nowrap;
+}
+.session-hours {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text-primary);
+  text-align: right;
+  white-space: nowrap;
+}
+.session-hours .provisional {
+  color: var(--text-secondary);
+  font-style: italic;
 }
 .session-model {
   font-size: 0.65rem;
@@ -798,6 +809,34 @@ body {
   font-size: 0.75rem;
   color: var(--text-muted);
   font-family: var(--font-mono);
+}
+.panel-hours {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.panel-hours:empty { display: none; }
+.panel-hours-day {
+  border-left: 2px solid rgba(224,122,95,0.35);
+  padding-left: 10px;
+}
+.panel-hours-head {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+.panel-hours-summary {
+  font-size: 0.8rem;
+  color: var(--text-primary);
+  line-height: 1.5;
+}
+.panel-hours-rationale {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-top: 4px;
 }
 .panel-close {
   background: rgba(255,245,235,0.07);
