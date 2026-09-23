@@ -536,7 +536,10 @@ def _day_context(conn, session_id: str, date: str) -> dict:
 
 
 def build_request(conn, session_id: str, date: str, index: dict):
-    """(summary_text, context, problem) for a session-day; problem is 'no_source' or 'no_events'."""
+    """(summary_text, context, problem) for a session-day.
+
+    problem is None, or 'no_source' / 'no_messages' / 'no_events' when there's nothing to judge.
+    """
     main = index.get(session_id)
     if main is None:
         return None, None, "no_source"
