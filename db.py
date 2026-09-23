@@ -352,6 +352,16 @@ def window_tokens(window_start: str, window_end: str, bucket_minutes: int,
     return [{'time': r['time'], 'group': r['grp'], 'tokens': r['tokens'] or 0} for r in rows]
 
 
+def _judge_calls_between(conn, start: str, end: str) -> int:
+    """Person-hours judge calls use quota but leave no session log to ingest."""
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) FROM person_hour_estimates WHERE last_attempt_at >= ? AND last_attempt_at < ?",
+            (start, end)).fetchone()[0]
+    except sqlite3.OperationalError:  # table not created yet
+        return 0
+
+
 def detect_other_pct(window_start: str, window_end: str, window_type: str) -> dict:
     """Detect external/other usage by finding quota increases during periods with no local activity.
 
@@ -384,6 +394,8 @@ def detect_other_pct(window_start: str, window_end: str, window_type: str) -> di
                 "SELECT COUNT(*) FROM messages WHERE timestamp >= ? AND timestamp < ?",
                 (t1, t2)
             ).fetchone()[0]
+            if count == 0:
+                count = _judge_calls_between(conn, t1, t2)
             if count == 0:
                 other_pct += quota_delta
     return {"other_pct": other_pct, "has_snapshots": True}
