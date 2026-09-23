@@ -1,3 +1,4 @@
+import json
 import subprocess
 
 import person_hours as ph
@@ -51,3 +52,33 @@ def test_find_claude_cli_falls_back_to_local_bin(tmp_path, monkeypatch):
     exe.parent.mkdir(parents=True)
     exe.write_text("")
     assert ph.find_claude_cli() == str(exe)
+
+
+def test_call_judge_runs_in_the_data_dir_without_a_console(tmp_path, monkeypatch):
+    monkeypatch.setattr(ph.db, "DB_PATH", tmp_path / "missing" / "usage.db")
+    run = FakeRun(stdout=envelope(GOOD_ESTIMATE))
+    ph.call_judge("S", "claude", runner=run)
+    kw = run.calls[0][1]
+    assert kw["cwd"] == str(tmp_path / "missing") and (tmp_path / "missing").is_dir()
+    assert kw["encoding"] == "utf-8" and kw["errors"] == "replace"
+    assert kw["creationflags"] == getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def test_call_judge_labels_cli_errors_and_refusals():
+    failed = {**json.loads(envelope("")), "is_error": True, "result": None,
+              "subtype": "error_during_execution", "api_error_status": 429}
+    res = ph.call_judge("S", "claude", runner=FakeRun(stdout=json.dumps(failed)))
+    assert res["error"] == "cli: error_during_execution (HTTP 429)"
+    refused = {**json.loads(envelope("I can't help with that.")), "stop_reason": "refusal"}
+    assert ph.call_judge("S", "claude", runner=FakeRun(stdout=json.dumps(refused)))["error"] == "refusal"
+
+
+def test_call_judge_ignores_stray_lines_before_the_envelope():
+    run = FakeRun(stdout="Update available: 2.2.0\n" + envelope(GOOD_ESTIMATE) + "\n")
+    assert ph.call_judge("S", "claude", runner=run)["ok"]
+
+
+def test_find_claude_cli_skips_cmd_shims(tmp_path, monkeypatch):
+    monkeypatch.setattr(ph.shutil, "which", lambda name: r"C:\npm\claude.CMD")
+    monkeypatch.setattr(ph.Path, "home", lambda: tmp_path)
+    assert ph.find_claude_cli() is None

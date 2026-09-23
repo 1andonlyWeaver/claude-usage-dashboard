@@ -356,14 +356,31 @@ def parse_estimate(text: str):
 
 # ─── Calling the judge via CLI ───────────────────────────────
 def find_claude_cli():
-    """Path to the claude CLI. Task Scheduler's PATH may lack ~/.local/bin, so check it too."""
+    """Path to the claude CLI. Task Scheduler's PATH may lack ~/.local/bin, so check it too.
+
+    npm's claude.cmd/.bat shims are skipped: cmd.exe would cut the multi-line system prompt
+    at its first newline.
+    """
     found = shutil.which("claude")
-    if found:
+    if found and not found.lower().endswith((".cmd", ".bat")):
         return found
     for name in ("claude.exe", "claude"):
         candidate = Path.home() / ".local" / "bin" / name
         if candidate.exists():
             return str(candidate)
+    return None
+
+
+def _parse_envelope(stdout):
+    """The CLI's JSON result object, tolerating stray lines printed before it; None if absent."""
+    text = (stdout or "").strip()
+    for candidate in [text, *reversed(text.splitlines())]:
+        try:
+            obj = json.loads(candidate)
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            return obj
     return None
 
 
@@ -377,21 +394,20 @@ def call_judge(summary_text: str, cli: str, runner=None) -> dict:
     so the dashboard never ingests its own judge sessions.
     """
     runner = runner or subprocess.run
+    workdir = db.DB_PATH.parent  # the CLI needs an existing cwd; a missing one fails as WinError 267
+    workdir.mkdir(parents=True, exist_ok=True)
     cmd = [cli, "-p", "--safe-mode", "--model", JUDGE_MODEL, "--no-session-persistence",
            "--tools", "", "--system-prompt", SYSTEM_PROMPT, "--output-format", "json"]
     try:
         proc = runner(cmd, input=summary_text, capture_output=True, encoding="utf-8",
-                      errors="replace", timeout=CALL_TIMEOUT_S, cwd=str(db.DB_PATH.parent),
+                      errors="replace", timeout=CALL_TIMEOUT_S, cwd=str(workdir),
                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "timeout"}
     except OSError as ex:
         return {"ok": False, "error": f"launch: {ex}"}
-    try:
-        envelope = json.loads(proc.stdout)
-    except ValueError:
-        envelope = None
-    if not isinstance(envelope, dict):
+    envelope = _parse_envelope(proc.stdout)
+    if envelope is None:
         detail = (proc.stderr or proc.stdout or "").strip()[:200]
         return {"ok": False, "error": f"exit {proc.returncode}: {detail}"}
     usage = envelope.get("usage") or {}
@@ -403,7 +419,12 @@ def call_judge(summary_text: str, cli: str, runner=None) -> dict:
         "model": next(iter(envelope.get("modelUsage") or {}), None),
     }
     if envelope.get("is_error"):
-        return {"ok": False, "error": f"cli: {str(envelope.get('result'))[:200]}", **meta}
+        detail = str(envelope.get("result") or envelope.get("subtype") or "error")[:200]
+        status = envelope.get("api_error_status")
+        return {"ok": False, "error": f"cli: {detail}" + (f" (HTTP {status})" if status else ""),
+                **meta}
+    if envelope.get("stop_reason") == "refusal":
+        return {"ok": False, "error": "refusal", **meta}
     estimate, error = parse_estimate(envelope.get("result") or "")
     if error:
         return {"ok": False, "error": error, **meta}
