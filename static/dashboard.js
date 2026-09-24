@@ -1406,7 +1406,7 @@ function hoursStatusText(data) {
   const w = data.worker;
   if (w.state === 'unavailable') return 'Claude CLI not found, showing provisional estimates';
   if (w.state === 'paused') return HOURS_PAUSE_TEXT[w.reason] || 'Paused';
-  if (w.pending > 0) return `Backfilling · ${w.pending} left`;
+  if (w.pending > 0) return `Estimating · ${w.pending} left`;
   const p = data.interactive.provisional_days;
   return p > 0 ? `${p} session-day${p === 1 ? '' : 's'} provisional` : '';
 }

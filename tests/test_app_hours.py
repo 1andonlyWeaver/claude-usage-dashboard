@@ -1,4 +1,3 @@
-import asyncio
 import json
 import time
 
@@ -30,7 +29,7 @@ def timers(monkeypatch):
 def test_hours_endpoint_reports_a_disabled_worker(conn, monkeypatch):
     monkeypatch.setattr(app, "HOURS_WORKER_ENABLED", False)
     add_message(conn, "s1", "2026-09-20T09:00:00")
-    out = asyncio.run(app.hours(30))
+    out = app.hours(30)
     assert out["worker"]["state"] == "paused" and out["worker"]["reason"] == "disabled"
     assert {"interactive", "scheduled", "by_project", "days"} <= out.keys()
 
@@ -38,7 +37,7 @@ def test_hours_endpoint_reports_a_disabled_worker(conn, monkeypatch):
 def test_session_hours_endpoint(conn):
     add_message(conn, "s1", "2026-09-20T09:00:00")
     add_message(conn, "s1", "2026-09-20T09:03:00")
-    out = asyncio.run(app.session_hours("s1"))
+    out = app.session_hours("s1")
     assert [d["date"] for d in out] == ["2026-09-20"] and out[0]["status"] == "provisional"
 
 

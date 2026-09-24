@@ -709,7 +709,7 @@ async def heatmap(days: int = 90):
 
 
 @app.get("/api/sessions")
-async def sessions(days: int = 30):
+def sessions(days: int = 30):
     return db.session_list(days)
 
 
@@ -722,13 +722,13 @@ async def session_detail(session_id: str):
 
 
 @app.get("/api/session/{session_id}/hours")
-async def session_hours(session_id: str):
+def session_hours(session_id: str):
     """Per-day person-hours for one session (empty for Desktop sessions)."""
     return db.session_hours(session_id)
 
 
 @app.get("/api/hours")
-async def hours(days: int = 30):
+def hours(days: int = 30):
     """Person-hours for the cost card's hours view, plus the judge worker's state."""
     data = db.person_hours(days)
     with closing(db.get_conn()) as conn:
