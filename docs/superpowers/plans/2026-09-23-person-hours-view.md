@@ -10,21 +10,11 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-23-person-hours-view-design.md`
 
-## Progress (paused 2026-09-23)
+## Status (complete 2026-09-23)
 
-- **Done:** Tasks 1–10, each reviewed for spec compliance and code quality; 86 tests pass. The code in `person_hours.py` and `tests/` is authoritative. Reviews changed Tasks 3–10 beyond the code blocks below; the spec was updated to match.
-- **Still open:** re-review of the Task 10 fix commit `75e220d` (fresh index each pass, stop after an all-failed pass, closing summary). It was stopped before reporting. Re-run it before Task 11.
-- **Next:** Task 11. Carry these changes into later tasks:
-  - `pending_rows(conn, limit, now)` takes `now`.
-  - `judge_session_day` returns `skipped` for no-call problems.
-  - `discover` skips sessions that aren't in the transcript index.
-  - Rows are claimed before judging, so the backfill CLI is safe alongside the worker. Update Task 16's CLAUDE.md text, which says otherwise.
-- **Known limitations to report at the end:**
-  - Resumed or forked sessions are double-counted (a follow-up task).
-  - Claude Code deletes old transcripts, so older session-days stay provisional.
-  - A timeout kills the CLI but not its child processes on Windows.
-  - Newest-first backfill often lacks the previous day's context.
-
+- All 17 tasks are done and reviewed, and a final whole-branch review has run. 113 tests pass. The branch was rebased onto `develop` partway through.
+- Reviews changed most tasks beyond the code blocks below. The repo code and the spec (`docs/superpowers/specs/2026-09-23-person-hours-view-design.md`, which describes the code as built) are authoritative. This plan is kept as a record of how the work was sequenced.
+- The end-to-end check made 7 real judge calls: $0.012–0.037 each, 1.6–3.2K input tokens, no transcripts written, and plausible estimates.
 ---
 
 ## Conventions

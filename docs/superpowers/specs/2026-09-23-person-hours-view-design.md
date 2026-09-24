@@ -1,7 +1,7 @@
 # Person-Hours View — Design Spec
 
 Date: 2026-09-23
-Status: approved design, not yet implemented
+Status: implemented on branch `claude/person-hours-api-cost-view-278fe4` (2026-09-23). This document describes the code as built, including changes made during review.
 
 ## Goal
 
@@ -84,7 +84,7 @@ messages ──▶ which session-days are ready?
 
 ### Unit of judgment
 
-One estimate per `(session_id, date)`, where `date` is the local date, the same convention as `messages.date`. Events are assigned to a date by converting their UTC timestamps to local time, as `ingest.parse_timestamp()` does. For day 2+ of a session, the judge input includes the one-line summary from that session's most recent earlier `done` row.
+One estimate per `(session_id, date)`, where `date` is the local date, the same convention as `messages.date`. Events are assigned to a date by converting their UTC timestamps to local time, as `ingest.parse_timestamp()` does. For day 2+ of a session, the judge input includes the one-line summary from that session's most recent earlier row that has one.
 
 ## Data model
 
@@ -121,9 +121,11 @@ A row that is re-queued because new messages arrived keeps its previous `hours_*
 
 Each worker tick:
 
-1. For Claude Code session-days in the last `BACKFILL_DAYS` with no row, whose latest `messages.timestamp` is at least `IDLE_MINUTES` old, insert a `pending` row. Set `is_scheduled` by reading the session's first human prompt from its main JSONL.
+1. For Claude Code session-days in the last `BACKFILL_DAYS` with no row, whose latest `messages.timestamp` is at least `IDLE_MINUTES` old and whose session has a transcript in the index, insert a `pending` row. Set `is_scheduled` by reading the session's first human prompt from its main JSONL. Sessions without a transcript aren't queued and are picked up if one appears. All transcript reads happen before any write, so no write lock is held during file I/O.
 2. For `done` rows whose session-day now has a `messages.timestamp` later than `judged_through` and is idle again, set `status = 'pending'`.
-3. Judge `pending` rows (and `error` rows with `attempts < 3`), newest date first.
+3. Rows that failed with `no_source` get a fresh start (`pending`, 0 attempts) when their transcript is back in the index.
+4. `pending` or `error` rows whose session-day no longer has any messages are deleted. Re-ingesting a resumed session can move a day's messages to another session id.
+5. Judge `pending` rows and `error` rows with `attempts < 3`, newest date first, skipping any row attempted in the last `RETRY_AFTER_MINUTES` (60). Rows are claimed first: one `BEGIN IMMEDIATE` transaction re-checks the hourly cap and stamps `last_attempt_at` on the rows it takes. A backfill CLI and the server's worker therefore never judge the same row, and calls in flight count toward the cap.
 
 ### Locating the logs
 
@@ -173,7 +175,9 @@ claude -p --safe-mode --model sonnet --no-session-persistence --tools ""
 - The summary goes on stdin. Timeout 300 s. Working directory `data/`.
 - `--safe-mode` keeps the user's CLAUDE.md, plugins, hooks and MCP servers out of the judge's context (the pilot's smoke test showed 163 input tokens for a one-line prompt). `--no-session-persistence` keeps judge calls out of `~/.claude/projects/`, so the dashboard never ingests its own judge sessions. `--bare` is not usable because it requires an API key.
 - CLI path: `shutil.which("claude")`, falling back to `~/.local/bin/claude.exe`. Task Scheduler's `PATH` may not include the user's.
-- From the JSON envelope, store `result` (parsed), `usage` tokens, `total_cost_usd`, and the model id from `modelUsage`.
+- From the JSON envelope (the last line that parses, if the CLI printed anything before it), store `result` (parsed), `usage` tokens, `total_cost_usd`, and the model with the most output tokens in `modelUsage`. An `is_error` envelope is recorded as `cli: <result or subtype> (HTTP <api_error_status>)`, and `stop_reason: "refusal"` as `refusal`.
+- npm `claude.cmd`/`.bat` shims are skipped, because `cmd.exe` would cut the multi-line system prompt at its first newline. The working directory is created if missing.
+- The judge inherits the server's environment. If `ANTHROPIC_API_KEY` is set there, judge calls bill to the API instead of the subscription.
 
 ### Validation
 
@@ -186,24 +190,36 @@ Summary, role and rationale are clipped to 400, 80 and 1,200 characters. Validat
 
 ### Worker
 
-A 5-minute daemon `threading.Timer` in `app.py`, guarded by a lock so ticks never overlap. Each tick calls `skip_reason(state)`, a pure function in `person_hours.py`, and returns early if it gives a reason:
+A 5-minute daemon `threading.Timer` in `app.py` (first tick 60 s after startup), guarded by a lock so ticks never overlap. It reschedules in an outer `finally`, like `_periodic_ingest`: under the launcher, stdout is a strict cp1252 file, so even logging a failure can raise. `PERSON_HOURS_WORKER=off` disables it.
+
+A tick skips everything while a full ingest runs, because a first-run ingest may not have created the tables yet. The 90-second periodic ingest runs alongside safely under WAL and the worker's 30 s busy timeout. Otherwise the tick always runs discovery, so provisional figures know which days are scheduled runs even while paused. It then evaluates `skip_reason(...)`, a pure function in `person_hours.py`. The first match wins:
 
 | Reason | Condition |
 |---|---|
 | `unavailable` | CLI not found |
-| `auth` | `_auth_dead` is set |
-| `ingest` | an ingest is running |
-| `quota` | last known 5-hour quota ≥ `QUOTA_PAUSE_PCT` (80). Unknown quota does not pause. |
-| `token` | the OAuth access token in `~/.claude/.credentials.json` expires within 10 minutes. Both the dashboard (`_refresh_oauth_token`) and the CLI refresh this token; this avoids both refreshing at once and one of them receiving a revoked refresh token. |
-| `rate` | `MAX_CALLS_PER_HOUR` (20) attempts in the last hour, counted from `last_attempt_at` |
+| `auth` | `_auth_dead` is set and the credentials file hasn't changed since (a re-login clears it), or there are no credentials |
+| `ingest` | a full ingest is running |
+| `quota` | last known 5-hour quota ≥ `QUOTA_PAUSE_PCT` (80). Unknown quota doesn't pause. The reading is refreshed only by browser polls, so it can be stale when no tab is open. |
+| `token` | the OAuth access token expires within `TOKEN_MIN_SECONDS` (2,100 s): 10 minutes plus a whole tick's worth of calls. Before gating, the server asks its own `_refresh_oauth_token()` to refresh, so the CLI never has to. That avoids two processes refreshing the shared token at once. |
+| `rate` | `MAX_CALLS_PER_HOUR` (20) attempts in the last hour, counted from `last_attempt_at`. It shows as running, not paused. |
+| `failing` | see the breaker below |
 
-Otherwise it runs discovery, then judges up to `min(10, remaining hourly budget)` session-days with `MAX_CONCURRENCY` (2) worker threads. Each call writes its row immediately.
+Otherwise the tick judges up to `min(MAX_PER_TICK (10), remaining hourly budget)` session-days with `MAX_CONCURRENCY` (2) worker threads. Each call writes its row immediately.
+
+**Breaker.** Within a batch, after `STOP_AFTER_FAILURES` (3) failed calls in a row, the rest of the batch is left "unclaimed". Those rows wait out the hourly backoff without losing an attempt. Across ticks, once 3 calls in a row have failed, the worker judges at most one session-day an hour, with reason `failing` in between, until a call succeeds. A broken CLI or login therefore can't burn through the backlog's retries.
 
 ### Failures
 
-- A failed attempt sets `status = 'error'`, increments `attempts`, and records `error` and `last_attempt_at`. Discovery step 3 retries it while `attempts < 3`; after that it stays `error` and the session-day shows its provisional estimate. A success resets `attempts` to 0.
-- If the main JSONL no longer exists, the row is set to `error` with `error = 'no_source'` and `attempts = 3`, so it is not retried.
-- Failures never raise out of the worker. Each tick is wrapped the way `_periodic_ingest` is.
+- A failed call sets `status = 'error'`, increments `attempts`, and records `error` and `last_attempt_at`. It's retried an hour later while `attempts < 3`; after that it stays `error` and the session-day shows its provisional estimate. A success resets `attempts` to 0.
+- Nothing to judge is recorded as a final `error` with `attempts = 3`, and no call is made:
+  - `no_source`: the transcript is gone. Revived if it reappears.
+  - `no_messages`: the day's messages moved to another session.
+  - `no_events`: the transcript has nothing on that date.
+
+  Their claim stamp is cleared, so they don't count toward the hourly cap or "Other" usage.
+- An unexpected exception while judging a row is recorded as a failed attempt (`crash: …`) before it's logged.
+- Failures never raise out of the worker.
+- Connections go through `_db()`, which sets a 30 s busy timeout and rolls back before closing (the repo's `ingest._open_db` convention).
 
 ### "Other" usage attribution
 
@@ -212,10 +228,16 @@ Judge calls consume quota but leave no session log, so `detect_other_pct()` woul
 ### Manual CLI
 
 ```
-python person_hours.py --backfill 90 [--limit N] [--dry-run]
+python person_hours.py --backfill 90 [--limit N] [--dry-run] [--retry-failed]
 ```
 
-`--dry-run` prints the summaries that would be sent, without calling Claude. The CLI skips the quota gate but applies the same hourly cap, and prints how many calls it will make before starting.
+- The CLI applies the hourly cap and the claim, so it's safe to run while the server's worker is on. It skips the other gates (quota, auth, token, ingest).
+- It prints an estimated duration first and a closing summary at the end: judged this run, still waiting, in the retry wait, failed for good, and nothing to judge.
+- It stops (exit 1) after 3 failed calls in a row and prints the last error.
+- It rebuilds the transcript index on every pass.
+- `--dry-run` prints the summaries that would be sent without calling Claude. It still queues session-days.
+- `--retry-failed` re-queues rows that failed for good, except those that had nothing to judge.
+- Ctrl+C returns 130, but only after the in-flight judge calls finish.
 
 ## Aggregation
 
@@ -223,7 +245,7 @@ python person_hours.py --backfill 90 [--limit N] [--dry-run]
 
 - **Hours for a session-day:** `hours_likely` if not null; otherwise provisional = active hours × leverage multiplier.
 - **Active hours** from `messages` timestamps: the sum of gaps between consecutive messages in the session-day, each gap capped at 5 minutes (SQLite `LAG` window function).
-- **Leverage multiplier:** the median of `hours_likely / active_hours` over `done` session-days in the last 90 days with active hours ≥ 0.1, computed separately for interactive and scheduled rows. With fewer than 10 samples in a group, use `DEFAULT_LEVERAGE` (5.0).
+- **Leverage multiplier:** the median of `hours_likely / active_hours` over judged session-days in the last 90 days with active hours ≥ 0.1, computed separately for interactive and scheduled rows. With fewer than 10 samples in a group, it uses `DEFAULT_LEVERAGE` (5.0). `db._leverage` caches the result until the set of `done` estimates changes. Recomputing costs a 90-day window query (~130 ms), which would otherwise slow every session-list load.
 - **Scheduled vs interactive:** from `is_scheduled`. Session-days with no row yet (still active) count as interactive and provisional.
 - **Card figures:** interactive hours (headline), scheduled hours and run count (separate line), interactive active hours, leverage = interactive hours ÷ interactive active hours, work-weeks = interactive hours ÷ 40, and interactive hours by project.
 
@@ -242,11 +264,13 @@ python person_hours.py --backfill 90 [--limit N] [--dry-run]
   "work_weeks": 15.3,
   "by_project": [{"project": "geddes", "hours": 240.0}],
   "model": "claude-sonnet-5",
-  "worker": {"state": "running", "reason": null, "pending": 12, "errors": 1, "backfill_remaining": 230}
+  "worker": {"state": "running", "reason": null, "pending": 12, "errors": 1}
 }
 ```
 
-`worker.state` is one of `running`, `idle`, `paused` (with `reason` from `skip_reason`), or `unavailable`.
+`worker.state` is one of `running`, `idle`, `paused` or `unavailable`. `reason` is set only when paused: `auth`, `ingest`, `quota`, `token`, `failing`, or `disabled` (worker switched off). `pending` counts rows waiting to be judged, including those in the retry wait. `errors` counts rows that failed for good.
+
+`/api/hours`, `/api/sessions` and `/api/session/{id}/hours` are plain `def` endpoints, so FastAPI runs their SQLite work in its threadpool rather than on the event loop.
 
 ### `GET /api/sessions`
 
@@ -282,16 +306,16 @@ Estimated by Claude Sonnet: time a competent professional
 would need without AI. Claude Code sessions only. Rough, ±2×.
 ```
 
-The project list shows the top 3 plus "other" (reuse `aggregateByLabel`). The status line shows the first that applies:
+The project list shows the top 3 plus "other" (grouped server-side in `db.hours_summary`). The status line shows the first that applies, and is rewritten only when its text changes, since it's a live region:
 
 1. "Claude CLI not found, showing provisional estimates"
-2. "Paused: 5-hour quota ≥ 80%" (or the matching reason)
-3. "Backfilling · N left"
+2. "Paused: …" with the reason: 5-hour quota ≥ 80%, sign in to Claude Code, login token refreshing, session files being parsed, recent estimate calls failed (retrying hourly), or estimates turned off on this server
+3. "Estimating · N left"
 4. "N session-days provisional"
 
 ### Recent Sessions
 
-An hours figure beside the token count, e.g. `6 h`. It is muted with a `~` prefix when provisional or partial, and empty for Desktop sessions.
+An hours figure beside the token count, e.g. `6 h`. It's italic and in the secondary color with a `~` prefix when provisional or partial, and empty for Desktop sessions. The column is hidden below 500 px, where it squeezed the session name to a few characters.
 
 ### Drill-down panel
 
@@ -307,7 +331,11 @@ Provisional days read "Sep 23 · ~3 h · not yet estimated".
 
 ### Accessibility
 
-New UI meets WCAG 2.1 AA: the toggle is keyboard-operable with visible focus and `aria-pressed`, and the status line is in an `aria-live="polite"` region. The existing `--text-muted` color (35% opacity cream on the dark card) is below 4.5:1, so new informational text (status line, footnote, rationale, provisional hours) uses `--text-secondary` or another color that reaches 4.5:1. Restyling existing muted text is out of scope.
+New UI meets WCAG 2.1 AA:
+- The toggle is keyboard-operable with visible focus and `aria-pressed`.
+- Its accessible names include the visible "$" and "h" (label in name).
+- The unpressed button uses `--text-secondary`.
+- The status line is in an `aria-live="polite"` region. The existing `--text-muted` color (35% opacity cream on the dark card) is below 4.5:1, so new informational text (status line, footnote, rationale, provisional hours) uses `--text-secondary` or another color that reaches 4.5:1. Restyling existing muted text is out of scope.
 
 ## Settings
 
@@ -320,11 +348,19 @@ Constants at the top of `person_hours.py`:
 | `QUOTA_PAUSE_PCT` | 80 |
 | `MAX_CALLS_PER_HOUR` | 20 |
 | `MAX_CONCURRENCY` | 2 |
+| `MAX_PER_TICK` | 10 |
+| `TICK_SECONDS` | 300 |
 | `BACKFILL_DAYS` | 90 |
 | `PROMPT_VERSION` | 1 |
-| `DEFAULT_LEVERAGE` | 5.0 |
-| `MIN_SAMPLES_FOR_LEVERAGE` | 10 |
 | `SUMMARY_MAX_CHARS` | 24000 |
+| `MAX_ATTEMPTS` | 3 |
+| `RETRY_AFTER_MINUTES` | 60 |
+| `STOP_AFTER_FAILURES` | 3 |
+| `MAX_HOURS` | 500 |
+| `CALL_TIMEOUT_S` | 300 |
+| `TOKEN_MIN_SECONDS` | 600 + (10 // 2) × 300 = 2100 |
+
+The aggregation constants live in `db.py`: `DEFAULT_LEVERAGE` (5.0), `MIN_SAMPLES_FOR_LEVERAGE` (10), `LEVERAGE_LOOKBACK_DAYS` (90), `ACTIVE_GAP_CAP_S` (300) and `HOURS_PER_WORK_WEEK` (40).
 
 Changing `PROMPT_VERSION` does not re-judge existing rows. To re-judge, delete rows (all, or by date range).
 
@@ -341,7 +377,7 @@ These lean high: the snapshots include usage the logs can't see (claude.ai, phon
 
 ## Testing
 
-`pytest` added to `environment.yml`. Tests in `tests/`, with the CLI mocked (no real calls):
+`pytest` added to `environment.yml`. Tests in `tests/` (113 at completion). Two autouse fixtures in `tests/conftest.py` keep tests isolated. One gives every test its own temp DB. The other fails any test that reaches the real `subprocess.run`, so no test can spend quota. The CLI is always faked. Covered areas include:
 
 - **Summarizer** against small fixture JSONL files: local-date filtering across midnight, request extraction and tag stripping, memory/temp file filtering, worktree paths kept, subagent files included, scheduled detection, truncation.
 - **Validation:** valid JSON, fenced JSON, prose around JSON, missing fields, `low > likely`, values over 500, refusal text.
@@ -352,11 +388,14 @@ These lean high: the snapshots include usage the logs can't see (claude.ai, phon
 
 Following the worktree workflow (:8080 serves the main checkout):
 
-1. Start a second instance from the worktree on :8888.
-2. `python person_hours.py --backfill 90 --limit 5 --dry-run` and read the summaries.
-3. `python person_hours.py --backfill 90 --limit 5` and check the card, the session list, and the drill-down on :8888.
-4. Let the worker run for a few ticks on :8888 and confirm the status line, the hourly cap, and that no new directories appear under `~/.claude/projects/`.
-5. After merge, restart the `ClaudeUsageDashboard` scheduled task and confirm the listener on :8080.
+1. Copy the live DB into the worktree's `data/` with the sqlite3 backup API, from a `?mode=ro` connection.
+2. `python person_hours.py --backfill 90 --limit 3 --dry-run` and read the summaries.
+3. `python person_hours.py --backfill 90 --limit 5` for real calls. Check the stored rows, and that no new directories appear under `~/.claude/projects/`.
+4. Exercise the worker path in-process: call `person_hours.run_tick(...)` from a script with `MAX_PER_TICK` lowered. Don't run a second server that shares the real credentials: two servers refreshing the same OAuth refresh token can race and kill the login.
+5. Check the UI on a second instance on :8888 started with `USERPROFILE=<empty scratch home>` and `PERSON_HOURS_WORKER=off`.
+6. After merge, restart the `ClaudeUsageDashboard` scheduled task and confirm the listener on :8080.
+
+Done on 2026-09-23 with 7 real calls: $0.012–0.037 each at API rates, 1.6–3.2K input tokens, no transcripts written, and plausible estimates.
 
 ## Out of scope
 
@@ -366,9 +405,21 @@ Following the worktree workflow (:8080 serves the main checkout):
 - Letting the user enter their own estimate for a session to calibrate the judge.
 - Resumed or forked sessions. Their transcript files repeat earlier entries (same `uuid`, original timestamps), so the same work can be judged under two sessions. In recent data this affects about 21 of 293 session-days. Fixing it needs a cross-file map of which session owns each entry; left for a follow-up.
 
+## Known limitations
+
+- **Deleted transcripts.** Session-days whose transcripts Claude Code has already deleted can't be judged and stay provisional. In the first backfill that was about 100 of ~400 session-days in the 90-day window.
+- **Resumed or forked sessions** (see Out of scope) can have shared work judged under both sessions.
+- **Backfill order.** It runs newest-first, so a multi-day session's later days are often judged before its earlier ones and miss the "Earlier in this session" context. Live operation judges days in order.
+- **Timeouts.** A timed-out judge call kills the CLI process but not any child processes it started (Windows).
+- **Stale quota reading.** The quota gate uses the last reading a browser poll fetched.
+- **Unclaimed rows.** In a failing batch, they keep their claim stamp for an hour, so during an outage `calls_last_hour` and "Other" attribution count a few calls that never happened. This is conservative.
+- **Scheduled runs** count as interactive until the worker queues them. That covers today's runs and anything outside the backfill window.
+- **Early token refresh.** The server refreshes the shared OAuth token about 35 minutes before expiry on every tick, whether or not anything is waiting to be judged.
+
 ## Related issues found during design
 
-Both are being handled in separate sessions and do not block this work:
+Both were fixed on `develop` in separate PRs before this branch was rebased onto it:
 
-- **Subagent logs are not ingested.** `run_ingest()` only globs top-level `*.jsonl`, so `<session>/subagents/*.jsonl` is skipped; the DB held 10.1M Claude Code output tokens for the last 30 days against 20.8M in the raw logs. This feature's summarizer reads subagent files directly. Once the ingest fix lands, active hours from `messages` will include subagent activity.
-- **Stale model pricing in `db.py`.** Opus 4.5+ is priced at $15/$75 instead of $5/$25, Haiku 4.5 at $0.25/$1.25 instead of $1/$5, and Sonnet 5 falls back to $3/$15 instead of $2/$10. Person-hours does not use these prices.
+- **Subagent logs weren't ingested** (PR #1). Active hours from `messages` now include subagent activity. The summarizer reads subagent files directly either way.
+- **Stale model pricing in `db.py`** (PR #2). Person-hours doesn't use these prices.
+- **Worktree project names.** Sessions in git worktrees get names like `Projects / www /  / claude-worktrees-…`, which splits the by-project list. This is a pre-existing ingest behavior, tracked as a separate task.
