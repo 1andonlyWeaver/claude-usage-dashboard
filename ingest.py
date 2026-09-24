@@ -157,6 +157,29 @@ def init_db(conn):
             seven_day_pct REAL
         );
 
+        CREATE TABLE IF NOT EXISTS person_hour_estimates (
+            session_id       TEXT NOT NULL,
+            date             TEXT NOT NULL,
+            status           TEXT NOT NULL,
+            is_scheduled     INTEGER DEFAULT 0,
+            hours_low        REAL,
+            hours_likely     REAL,
+            hours_high       REAL,
+            summary          TEXT,
+            role             TEXT,
+            rationale        TEXT,
+            judged_through   TEXT,
+            model            TEXT,
+            prompt_version   INTEGER,
+            attempts         INTEGER DEFAULT 0,
+            error            TEXT,
+            last_attempt_at  TEXT,
+            judge_in_tokens  INTEGER,
+            judge_out_tokens INTEGER,
+            judge_cost_usd   REAL,
+            PRIMARY KEY (session_id, date)
+        );
+
     """)
     _migrate_db(conn)
     conn.commit()

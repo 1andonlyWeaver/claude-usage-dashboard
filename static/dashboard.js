@@ -54,6 +54,7 @@ window.addEventListener('DOMContentLoaded', () => {
     if (e.key === 'r' || e.key === 'R') { if (!e.target.matches('input,textarea')) triggerRefresh(); }
     if (e.key === 'Escape') closePanel();
   });
+  setCostUnit(savedCostUnit());
   initAll();
   startQuotaPolling();
   checkIngestStatus();
@@ -68,9 +69,13 @@ async function initAll() {
     loadSessions(currentSessionDays),
     loadCost(),
   ]);
+  if (costUnit === 'hours') loadHours();  // e.g. after a manual refresh or when ingest finishes
   // Auto-refresh window charts every 60s (clear any prior interval to avoid stacking)
   if (_windowRefreshInterval) clearInterval(_windowRefreshInterval);
-  _windowRefreshInterval = setInterval(loadWindowCharts, 60000);
+  _windowRefreshInterval = setInterval(() => {
+    loadWindowCharts();
+    if (costUnit === 'hours') loadHours();
+  }, 60000);
 }
 
 // ─── Quota polling ───────────────────────────────────────────
@@ -1223,6 +1228,11 @@ async function loadSessions(days) {
       ? '<span class="session-badge badge-fast">fast</span>'
       : '';
 
+    const hoursCell = s.person_hours == null ? ''
+      : s.hours_status === 'done'
+        ? `<span title="Estimated person-hours">${fmtHours(s.person_hours)}</span>`
+        : `<span class="provisional" title="${s.hours_status === 'partial'
+            ? 'Some days not yet estimated by Claude' : 'Provisional: not yet estimated by Claude'}">~${fmtHours(s.person_hours)}</span>`;
     row.innerHTML = `
       ${dot}
       <div class="session-info">
@@ -1230,6 +1240,7 @@ async function loadSessions(days) {
         <div class="session-time">${startDt.toLocaleDateString()} ${startDt.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})} · ${durationMin}m · ${s.message_count} msgs${s.git_branch ? ' · ' + escHtml(s.git_branch) : ''}</div>
       </div>
       <div class="session-badges">${sourceBadge}${entrypointBadge}${speedBadge}</div>
+      <div class="session-hours">${hoursCell}</div>
       <div class="session-tokens">${fmtShort(s.total_tokens)}</div>
       <div class="session-model ${modelClass ? modelClass+'-model' : ''}">${shortModelName(s.model)}</div>
     `;
@@ -1252,6 +1263,7 @@ async function openPanel(session) {
   const startDt = new Date(session.start_time);
   document.getElementById('panelMeta').textContent =
     `${startDt.toLocaleString()} · ${session.message_count} messages · ${fmt(session.total_tokens)} tokens · ${shortModelName(session.model)}`;
+  loadPanelHours(session.session_id);
 
   if (sessionDetailChart) sessionDetailChart.destroy();
   const ctx = document.getElementById('sessionDetailChart').getContext('2d');
@@ -1286,6 +1298,43 @@ async function openPanel(session) {
   document.getElementById('panelOverlay').classList.add('open');
 }
 
+let _panelHoursSeq = 0;
+
+async function loadPanelHours(sessionId) {
+  const seq = ++_panelHoursSeq;
+  const el = document.getElementById('panelHours');
+  el.textContent = '';
+  let days;
+  try {
+    days = await apiFetch('/api/session/' + encodeURIComponent(sessionId) + '/hours');
+  } catch (e) {
+    return;
+  }
+  if (seq !== _panelHoursSeq) return;  // another session was opened meanwhile
+  for (const d of days) {
+    const label = new Date(d.date + 'T00:00:00').toLocaleDateString([], { month: 'short', day: 'numeric' });
+    const item = document.createElement('div');
+    item.className = 'panel-hours-day';
+    const head = document.createElement('div');
+    head.className = 'panel-hours-head';
+    item.append(head);
+    if (d.status === 'done') {
+      head.textContent = `${label} · ~${fmtHours(d.hours_likely)} (${fmtHoursNum(d.hours_low)}–${fmtHoursNum(d.hours_high)})`
+        + (d.role ? ` · ${d.role}` : '');
+      for (const [cls, txt] of [['panel-hours-summary', d.summary], ['panel-hours-rationale', d.rationale]]) {
+        if (!txt) continue;
+        const p = document.createElement('p');
+        p.className = cls;
+        p.textContent = txt;
+        item.append(p);
+      }
+    } else {
+      head.textContent = `${label} · ~${fmtHours(d.provisional_hours)} · not yet estimated`;
+    }
+    el.append(item);
+  }
+}
+
 function closePanel() {
   document.getElementById('sessionPanel').classList.remove('open');
   document.getElementById('panelOverlay').classList.remove('open');
@@ -1308,6 +1357,103 @@ async function loadCost() {
     `;
     breakdown.appendChild(div);
   }
+}
+
+// ─── Person-hours view ───────────────────────────────────────
+const COST_UNIT_KEY = 'costCardUnit';
+let costUnit = 'cost';   // 'cost' | 'hours'
+
+function savedCostUnit() {
+  try { return localStorage.getItem(COST_UNIT_KEY) === 'hours' ? 'hours' : 'cost'; }
+  catch { return 'cost'; }
+}
+
+function setCostUnit(unit) {
+  costUnit = unit;
+  try { localStorage.setItem(COST_UNIT_KEY, unit); } catch { /* storage blocked: in-page choice still applies */ }
+  const hours = unit === 'hours';
+  for (const [id, on] of [['unitCost', !hours], ['unitHours', hours]]) {
+    const btn = document.getElementById(id);
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-pressed', String(on));
+  }
+  document.getElementById('costView').hidden = hours;
+  document.getElementById('hoursView').hidden = !hours;
+  document.getElementById('costTitle').textContent = hours ? 'Person-hours' : 'Est. API Cost';
+  document.getElementById('costIcon').textContent = hours ? '◷' : '✦';
+  if (hours) loadHours();
+}
+
+const HOURS_PAUSE_TEXT = {
+  quota: 'Paused: 5-hour quota ≥ 80%',
+  auth: 'Paused: sign in to Claude Code to resume',
+  token: 'Paused until the login token refreshes',
+  ingest: 'Paused while session files are parsed',
+  failing: 'Paused: recent estimate calls failed; retrying hourly',
+  disabled: 'Paused: estimates are turned off on this server',
+};
+
+function fmtHoursNum(h) {
+  if (h == null || isNaN(h)) return '—';
+  return h >= 10 ? Math.round(h).toLocaleString() : h.toFixed(1);
+}
+
+function fmtHours(h) {
+  return h == null ? '—' : fmtHoursNum(h) + ' h';
+}
+
+function hoursStatusText(data) {
+  const w = data.worker;
+  if (w.state === 'unavailable') return 'Claude CLI not found, showing provisional estimates';
+  if (w.state === 'paused') return HOURS_PAUSE_TEXT[w.reason] || 'Paused';
+  if (w.pending > 0) return `Estimating · ${w.pending} left`;
+  const p = data.interactive.provisional_days;
+  return p > 0 ? `${p} session-day${p === 1 ? '' : 's'} provisional` : '';
+}
+
+async function loadHours() {
+  let data;
+  try {
+    data = await apiFetch('/api/hours?days=30');
+  } catch (e) {
+    document.getElementById('hoursStatus').textContent = "Couldn't load person-hours.";
+    return;
+  }
+  document.getElementById('hoursAmount').textContent = '~' + fmtHours(data.interactive.hours);
+  const sub = [`≈ ${data.work_weeks.toFixed(1)} work-weeks`];
+  if (data.leverage != null) sub.push(`${data.leverage.toFixed(1)}× your ${fmtHours(data.active_hours)} active`);
+  document.getElementById('hoursSub').textContent = sub.join(' · ');
+
+  const list = document.getElementById('hoursBreakdown');
+  list.innerHTML = '';
+  for (const p of data.by_project) {
+    const row = document.createElement('div');
+    row.className = 'cost-row';
+    const name = document.createElement('span');
+    name.className = 'cost-model';
+    name.textContent = p.project;
+    name.title = p.project;
+    const val = document.createElement('span');
+    val.className = 'cost-model-val';
+    val.textContent = fmtHours(p.hours);
+    row.append(name, val);
+    list.appendChild(row);
+  }
+
+  const s = data.scheduled;
+  const sched = document.getElementById('hoursScheduled');
+  sched.textContent = '';
+  if (s.runs) {
+    const label = document.createElement('span');
+    label.textContent = `+ ${s.runs} scheduled run${s.runs === 1 ? '' : 's'}`;
+    const val = document.createElement('span');
+    val.textContent = fmtHours(s.hours);
+    sched.append(label, val);
+  }
+  const status = document.getElementById('hoursStatus');
+  const statusText = hoursStatusText(data);
+  if (status.textContent !== statusText) status.textContent = statusText;  // a live region: only speak changes
+  document.getElementById('hoursModel').textContent = data.model ? shortModelName(data.model) : 'Sonnet';
 }
 
 // ─── Utilities ───────────────────────────────────────────────

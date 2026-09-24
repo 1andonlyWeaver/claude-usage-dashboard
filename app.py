@@ -3,6 +3,7 @@ FastAPI server for Claude Code usage dashboard.
 """
 import asyncio
 import json
+import os
 import threading
 import time
 import traceback
@@ -20,6 +21,7 @@ from fastapi.requests import Request
 from fastapi.responses import JSONResponse
 
 import db
+import person_hours
 
 BASE_DIR = Path(__file__).parent
 CREDENTIALS_FILE = Path.home() / ".claude" / ".credentials.json"
@@ -72,6 +74,10 @@ _token_refresh_lock = threading.Lock()
 _last_token_refresh_attempt = 0.0  # monotonic time of last attempt; throttles refresh
 _auth_dead = False  # True once a refresh returns invalid_grant — refresh token revoked, re-login required
 _auth_dead_creds_sig = None  # credentials-file signature when _auth_dead was set; a change means a re-login may have landed
+
+# Person-hours judge worker. PERSON_HOURS_WORKER=off disables it (e.g. for a test server).
+HOURS_WORKER_ENABLED = os.environ.get("PERSON_HOURS_WORKER", "on").lower() not in ("0", "off", "false")
+_hours_lock = threading.Lock()
 
 # Seed in-memory cache from disk on startup so restarts don't lose last known quota
 try:
@@ -545,10 +551,72 @@ async def _get_usage_data() -> dict:
             return {"error": result["error"], "five_hour_pct": 0, "seven_day_pct": 0}
 
 
+def _cached_five_hour_pct() -> float | None:
+    """Last known 5-hour quota %, or None when unknown or from a window that has reset."""
+    data = _usage_cache.get("data")
+    if data:
+        return _bound_stale_quota(data, time.monotonic() - _usage_cache["fetched_at"]).get("five_hour_pct")
+    disk = _read_disk_cache_data()
+    return disk.get("five_hour_pct") if disk else None
+
+
+def _token_seconds_left() -> float | None:
+    """Seconds until the stored OAuth access token expires, or None without credentials."""
+    oauth = (_read_credentials() or {}).get("claudeAiOauth") or {}
+    if not oauth.get("accessToken"):
+        return None
+    return (oauth.get("expiresAt") or 0) / 1000 - time.time()
+
+
+def _hours_tick():
+    """Judge queued session-days for the person-hours view, then reschedule.
+
+    Like _periodic_ingest, it reschedules in an outer finally: under the launcher, stdout is
+    a strict cp1252 file, so even logging a failure can raise.
+    """
+    try:
+        if _hours_lock.acquire(blocking=False):
+            try:
+                left = _token_seconds_left()
+                if left is not None and left < person_hours.TOKEN_MIN_SECONDS:
+                    # Refresh here, in the process that already owns token refresh, so the CLI
+                    # never starts a call on a token it would have to refresh itself.
+                    _refresh_oauth_token()
+                    left = _token_seconds_left()
+                person_hours.run_tick(datetime.now(), {
+                    # A re-login rewrites the credentials file; don't stay paused until a
+                    # quota poll happens to notice.
+                    "auth_dead": _auth_dead and _credentials_signature() == _auth_dead_creds_sig,
+                    "ingest_running": bool(_ingest_status.get("running")),
+                    "five_hour_pct": _cached_five_hour_pct(),
+                    "token_seconds_left": left,
+                })
+            except Exception as ex:
+                print(f"[hours {datetime.now():%Y-%m-%d %H:%M:%S}] tick failed - "
+                      f"{type(ex).__name__}: {ex}")
+            finally:
+                _hours_lock.release()
+    finally:
+        t = threading.Timer(person_hours.TICK_SECONDS, _hours_tick)
+        t.daemon = True
+        t.start()
+
+
 @app.on_event("startup")
 async def startup():
-    """Kick off ingest if DB is missing or stale, then schedule periodic ingest."""
+    """Kick off ingest if DB is missing or stale, then schedule periodic ingest and judging."""
     stats = db.db_stats()
+    if stats.get("exists"):
+        # Existing DBs get newer tables (person_hour_estimates) before any request or the
+        # startup ingest needs them. run_ingest repeats this every 90 s, so a failure here
+        # (e.g. another process holding the write lock) is logged, not fatal.
+        try:
+            from ingest import _open_db, init_db
+            with _open_db() as conn:
+                init_db(conn)
+        except Exception as ex:
+            print(f"[startup {datetime.now():%Y-%m-%d %H:%M:%S}] schema check failed - "
+                  f"{type(ex).__name__}: {ex}")
     if not stats.get("exists") or stats.get("message_count", 0) == 0:
         thread = threading.Thread(target=_run_ingest_background, daemon=True)
         thread.start()
@@ -560,6 +628,10 @@ async def startup():
     t = threading.Timer(90, _periodic_ingest)
     t.daemon = True
     t.start()
+    if HOURS_WORKER_ENABLED:
+        h = threading.Timer(60, _hours_tick)
+        h.daemon = True
+        h.start()
 
 
 def _asset_url(rel_path: str) -> str:
@@ -637,7 +709,7 @@ async def heatmap(days: int = 90):
 
 
 @app.get("/api/sessions")
-async def sessions(days: int = 30):
+def sessions(days: int = 30):
     return db.session_list(days)
 
 
@@ -646,6 +718,25 @@ async def session_detail(session_id: str):
     data = db.session_detail(session_id)
     if not data:
         raise HTTPException(404, "Session not found")
+    return data
+
+
+@app.get("/api/session/{session_id}/hours")
+def session_hours(session_id: str):
+    """Per-day person-hours for one session (empty for Desktop sessions)."""
+    return db.session_hours(session_id)
+
+
+@app.get("/api/hours")
+def hours(days: int = 30):
+    """Person-hours for the cost card's hours view, plus the judge worker's state."""
+    data = db.person_hours(days)
+    with closing(db.get_conn()) as conn:
+        counts = person_hours.queue_counts(conn)
+    worker = person_hours.worker_status(counts)
+    if not HOURS_WORKER_ENABLED:
+        worker = {**worker, "state": "paused", "reason": "disabled"}
+    data["worker"] = worker
     return data
 
 

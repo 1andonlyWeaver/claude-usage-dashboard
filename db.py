@@ -3,6 +3,7 @@ Query helpers for the usage SQLite database.
 """
 import re
 import sqlite3
+import statistics
 from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -175,28 +176,36 @@ def session_heatmap(days: int = 90) -> list[dict]:
 
 
 def session_list(days: int = 30) -> list[dict]:
-    """Return per-session summary, most recent first."""
-    rows = _query("""
-        SELECT session_id,
-               project,
-               model,
-               MIN(timestamp) as start_time,
-               MAX(timestamp) as end_time,
-               COUNT(*) as message_count,
-               SUM(input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens) as total_tokens,
-               SUM(output_tokens) as output_tokens,
-               date,
-               MAX(entrypoint) as entrypoint,
-               MAX(speed) as speed,
-               MAX(git_branch) as git_branch,
-               MAX(source) as source
-        FROM messages
-        WHERE date >= ?
-        GROUP BY session_id
-        ORDER BY start_time DESC
-        LIMIT 200
-    """, (_since_date(days),))
-    return [dict(r) for r in rows]
+    """Return per-session summary, most recent first, with person-hours for Claude Code sessions."""
+    since = _since_date(days)
+    with closing(get_conn()) as conn:
+        rows = conn.execute("""
+            SELECT session_id,
+                   project,
+                   model,
+                   MIN(timestamp) as start_time,
+                   MAX(timestamp) as end_time,
+                   COUNT(*) as message_count,
+                   SUM(input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens) as total_tokens,
+                   SUM(output_tokens) as output_tokens,
+                   date,
+                   MAX(entrypoint) as entrypoint,
+                   MAX(speed) as speed,
+                   MAX(git_branch) as git_branch,
+                   MAX(source) as source
+            FROM messages
+            WHERE date >= ?
+            GROUP BY session_id
+            ORDER BY start_time DESC
+            LIMIT 200
+        """, (since,)).fetchall()
+        hours = _session_hours_map(conn, since)
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["person_hours"], d["hours_status"] = hours.get(d["session_id"], (None, None))
+        out.append(d)
+    return out
 
 
 def session_detail(session_id: str) -> list[dict]:
@@ -343,6 +352,16 @@ def window_tokens(window_start: str, window_end: str, bucket_minutes: int,
     return [{'time': r['time'], 'group': r['grp'], 'tokens': r['tokens'] or 0} for r in rows]
 
 
+def _judge_calls_between(conn, start: str, end: str) -> int:
+    """Person-hours judge calls use quota but leave no session log to ingest."""
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) FROM person_hour_estimates WHERE last_attempt_at >= ? AND last_attempt_at < ?",
+            (start, end)).fetchone()[0]
+    except sqlite3.OperationalError:  # table not created yet
+        return 0
+
+
 def detect_other_pct(window_start: str, window_end: str, window_type: str) -> dict:
     """Detect external/other usage by finding quota increases during periods with no local activity.
 
@@ -375,6 +394,8 @@ def detect_other_pct(window_start: str, window_end: str, window_type: str) -> di
                 "SELECT COUNT(*) FROM messages WHERE timestamp >= ? AND timestamp < ?",
                 (t1, t2)
             ).fetchone()[0]
+            if count == 0:
+                count = _judge_calls_between(conn, t1, t2)
             if count == 0:
                 other_pct += quota_delta
     return {"other_pct": other_pct, "has_snapshots": True}
@@ -421,3 +442,159 @@ def db_stats() -> dict:
         'newest_date': row['newest'],
         'files_tracked': meta['count'],
     }
+
+
+# ─── Person-hours ────────────────────────────────────────────
+# Estimates are written by person_hours.py; these queries turn them into card figures.
+ACTIVE_GAP_CAP_S = 300          # gaps between messages longer than this count as idle
+DEFAULT_LEVERAGE = 5.0          # hours per active hour until enough session-days are judged
+MIN_SAMPLES_FOR_LEVERAGE = 10
+LEVERAGE_LOOKBACK_DAYS = 90
+HOURS_PER_WORK_WEEK = 40
+
+
+def _session_day_rows(conn, since: str, session_id: str | None = None) -> list[dict]:
+    """One row per Claude Code session-day since `since`: active hours, project, any estimate."""
+    session_filter = "AND session_id = ?" if session_id else ""
+    params = [since] + ([session_id] if session_id else [])
+    rows = conn.execute(f"""
+        WITH ordered AS (
+            SELECT session_id, date, project, timestamp,
+                   LAG(timestamp) OVER (PARTITION BY session_id, date ORDER BY timestamp) AS prev_ts
+            FROM messages
+            WHERE COALESCE(source, 'claude-code') = 'claude-code' AND date >= ? {session_filter}
+        ),
+        days AS (
+            SELECT session_id, date, MAX(project) AS project,
+                   SUM(MIN(COALESCE((julianday(timestamp) - julianday(prev_ts)) * 86400.0, 0),
+                           {ACTIVE_GAP_CAP_S})) / 3600.0 AS active_hours
+            FROM ordered
+            GROUP BY session_id, date
+        )
+        SELECT d.session_id, d.date, d.project, d.active_hours,
+               e.status, COALESCE(e.is_scheduled, 0) AS is_scheduled,
+               e.hours_low, e.hours_likely, e.hours_high, e.summary, e.role, e.rationale
+        FROM days d
+        LEFT JOIN person_hour_estimates e ON e.session_id = d.session_id AND e.date = d.date
+        ORDER BY d.date, d.session_id
+    """, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def leverage_from_rows(rows) -> dict:
+    """Median judged hours per active hour, separately for interactive and scheduled days."""
+    samples = {"interactive": [], "scheduled": []}
+    for r in rows:
+        if r["hours_likely"] is not None and (r["active_hours"] or 0) >= 0.1:
+            group = "scheduled" if r["is_scheduled"] else "interactive"
+            samples[group].append(r["hours_likely"] / r["active_hours"])
+    return {group: statistics.median(v) if len(v) >= MIN_SAMPLES_FOR_LEVERAGE else DEFAULT_LEVERAGE
+            for group, v in samples.items()}
+
+
+_leverage_cache: dict = {"key": None, "value": None}
+
+
+def _leverage(conn) -> dict:
+    """Leverage over the last 90 days, recomputed only when judged estimates change.
+
+    It needs a 90-day window query (~130 ms on real data); caching it keeps the session list,
+    which loads on every page view, as fast as it was before person-hours.
+    """
+    count, latest = conn.execute(
+        "SELECT COUNT(*), MAX(last_attempt_at) FROM person_hour_estimates WHERE status = 'done'"
+    ).fetchone()
+    key = (str(DB_PATH), _since_date(LEVERAGE_LOOKBACK_DAYS), count, latest)
+    if _leverage_cache["key"] != key:
+        rows = _session_day_rows(conn, _since_date(LEVERAGE_LOOKBACK_DAYS))
+        _leverage_cache.update(key=key, value=leverage_from_rows(rows))
+    return _leverage_cache["value"]
+
+
+def _day_hours(r, leverage) -> tuple[float, bool]:
+    """(hours, judged) for a session-day: the judge's figure, else active hours x leverage.
+
+    A re-queued day keeps its last judged figure until the new judgment replaces it.
+    """
+    if r["hours_likely"] is not None:
+        return r["hours_likely"], True
+    group = "scheduled" if r["is_scheduled"] else "interactive"
+    return (r["active_hours"] or 0) * leverage[group], False
+
+
+def hours_summary(rows, leverage) -> dict:
+    """Card figures from session-day rows: interactive headline, scheduled line, projects."""
+    inter = {"hours": 0.0, "judged_hours": 0.0, "provisional_hours": 0.0,
+             "session_days": 0, "provisional_days": 0}
+    sched = {"hours": 0.0, "runs": 0}
+    active = 0.0
+    projects: dict[str, float] = {}
+    for r in rows:
+        hours, judged = _day_hours(r, leverage)
+        if r["is_scheduled"]:
+            sched["hours"] += hours
+            sched["runs"] += 1
+            continue
+        inter["hours"] += hours
+        inter["judged_hours" if judged else "provisional_hours"] += hours
+        inter["session_days"] += 1
+        inter["provisional_days"] += 0 if judged else 1
+        active += r["active_hours"] or 0
+        projects[r["project"]] = projects.get(r["project"], 0.0) + hours
+    ranked = sorted(projects.items(), key=lambda kv: -kv[1])
+    if len(ranked) > 4:
+        ranked = ranked[:3] + [("other", sum(h for _, h in ranked[3:]))]
+    return {
+        "interactive": {k: round(v, 1) if isinstance(v, float) else v for k, v in inter.items()},
+        "scheduled": {"hours": round(sched["hours"], 1), "runs": sched["runs"]},
+        "active_hours": round(active, 1),
+        "leverage": round(inter["hours"] / active, 1) if active else None,
+        "work_weeks": round(inter["hours"] / HOURS_PER_WORK_WEEK, 1),
+        "by_project": [{"project": p, "hours": round(h, 1)} for p, h in ranked],
+    }
+
+
+def person_hours(days: int = 30) -> dict:
+    """Figures for the cost card's person-hours view."""
+    with closing(get_conn()) as conn:
+        rows = _session_day_rows(conn, _since_date(days))
+        leverage = _leverage(conn)
+        latest = conn.execute(
+            "SELECT model FROM person_hour_estimates WHERE status = 'done' AND model IS NOT NULL"
+            " ORDER BY last_attempt_at DESC LIMIT 1").fetchone()
+    out = hours_summary(rows, leverage)
+    out["days"] = days
+    out["model"] = latest["model"] if latest else None
+    return out
+
+
+def _session_hours_map(conn, since: str) -> dict:
+    """session_id -> (person_hours, 'done' | 'provisional' | 'partial') for days since `since`."""
+    leverage = _leverage(conn)
+    acc: dict[str, list] = {}
+    for r in _session_day_rows(conn, since):
+        hours, judged = _day_hours(r, leverage)
+        entry = acc.setdefault(r["session_id"], [0.0, 0, 0])
+        entry[0] += hours
+        entry[1] += judged
+        entry[2] += 1
+    return {sid: (round(h, 1), "done" if nj == n else "provisional" if nj == 0 else "partial")
+            for sid, (h, nj, n) in acc.items()}
+
+
+def session_hours(session_id: str) -> list[dict]:
+    """Per-day person-hours for one session (the drill-down panel)."""
+    with closing(get_conn()) as conn:
+        leverage = _leverage(conn)
+        rows = _session_day_rows(conn, "0000-00-00", session_id=session_id)
+    out = []
+    for r in rows:
+        hours, judged = _day_hours(r, leverage)
+        out.append({
+            "date": r["date"], "status": "done" if judged else "provisional",
+            "hours_low": r["hours_low"], "hours_likely": r["hours_likely"],
+            "hours_high": r["hours_high"],
+            "provisional_hours": None if judged else round(hours, 1),
+            "summary": r["summary"], "role": r["role"], "rationale": r["rationale"],
+        })
+    return out

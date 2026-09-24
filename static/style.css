@@ -438,6 +438,58 @@ body {
   line-height: 1.5;
 }
 
+/* ─── Cost card: $ / person-hours views ─── */
+.cost-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+.cost-view[hidden] { display: none; }
+/* .day-btn.unit-btn beats the later .day-btn rule, which otherwise wins on specificity ties. */
+.day-btn.unit-btn {
+  font-family: var(--font-mono);
+  padding: 3px 9px;
+}
+.day-btn.unit-btn:not(.active) {
+  color: var(--text-secondary);  /* an unpressed toggle still needs 4.5:1 */
+}
+.day-btn.unit-btn:focus-visible {
+  outline: 2px solid var(--claude-orange);
+  outline-offset: 2px;
+}
+.hours-sub {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  margin: -8px 0 12px;
+}
+.hours-scheduled {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 10px;
+  padding-top: 8px;
+}
+.hours-scheduled:empty { display: none; }
+.hours-status {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  margin-top: 8px;
+}
+.hours-status:empty { display: none; }
+.hours-note {
+  font-size: 0.68rem;
+  color: var(--text-secondary);
+  margin-top: 8px;
+  line-height: 1.5;
+}
+/* New hours figures meet 4.5:1; the older --text-muted rows in the $ view are unchanged. */
+#hoursBreakdown .cost-model-val {
+  color: var(--text-secondary);
+}
+
 /* ─── Chart cards ─── */
 .chart-card {
   padding: 0 0 20px;
@@ -617,7 +669,7 @@ body {
 
 .session-row {
   display: grid;
-  grid-template-columns: auto 1fr auto auto auto;
+  grid-template-columns: auto 1fr auto auto auto auto;
   align-items: center;
   gap: 14px;
   padding: 10px 14px;
@@ -660,6 +712,18 @@ body {
   color: var(--text-secondary);
   text-align: right;
   white-space: nowrap;
+}
+.session-hours {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text-primary);
+  text-align: right;
+  white-space: nowrap;
+  min-width: 6ch;
+}
+.session-hours .provisional {
+  color: var(--text-secondary);
+  font-style: italic;
 }
 .session-model {
   font-size: 0.65rem;
@@ -754,6 +818,34 @@ body {
   font-size: 0.75rem;
   color: var(--text-muted);
   font-family: var(--font-mono);
+}
+.panel-hours {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.panel-hours:empty { display: none; }
+.panel-hours-day {
+  border-left: 2px solid rgba(224,122,95,0.35);
+  padding-left: 10px;
+}
+.panel-hours-head {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+.panel-hours-summary {
+  font-size: 0.8rem;
+  color: var(--text-primary);
+  line-height: 1.5;
+}
+.panel-hours-rationale {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-top: 4px;
 }
 .panel-close {
   background: rgba(255,245,235,0.07);
@@ -857,4 +949,10 @@ body {
   .bottom-row { grid-template-columns: 1fr; }
   .chart-wrap-tall { height: 220px; }
   .window-charts-row { grid-template-columns: 1fr; }
+}
+
+/* Phones: the hours column squeezes the session name to a few characters, so drop it there. */
+@media (max-width: 500px) {
+  .session-row { grid-template-columns: auto 1fr auto auto auto; }
+  .session-hours { display: none; }
 }

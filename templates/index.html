@@ -206,16 +206,34 @@
           </div>
         </div>
 
-        <!-- Cost panel -->
+        <!-- Cost / person-hours panel -->
         <div class="card cost-card" id="costCard">
           <div class="cost-header">
-            <span class="cost-icon">✦</span>
-            <span class="cost-title">Est. API Cost</span>
+            <span class="cost-icon" id="costIcon" aria-hidden="true">✦</span>
+            <span class="cost-title" id="costTitle">Est. API Cost</span>
             <span class="cost-period" id="costPeriod">30 days</span>
+            <div class="day-selector" role="group" aria-label="Show API cost or person-hours">
+              <button type="button" class="day-btn unit-btn active" id="unitCost" aria-pressed="true"
+                      aria-label="$ (estimated API cost)"
+                      onclick="setCostUnit('cost')" title="Estimated API cost">$</button>
+              <button type="button" class="day-btn unit-btn" id="unitHours" aria-pressed="false"
+                      aria-label="h (person-hours)"
+                      onclick="setCostUnit('hours')" title="Person-hours">h</button>
+            </div>
           </div>
-          <div class="cost-amount" id="costAmount">—</div>
-          <div class="cost-breakdown" id="costBreakdown"></div>
-          <p class="cost-note">At published API prices. You're on a subscription — this is for context.</p>
+          <div class="cost-view" id="costView">
+            <div class="cost-amount" id="costAmount">—</div>
+            <div class="cost-breakdown" id="costBreakdown"></div>
+            <p class="cost-note">At published API prices. You're on a subscription — this is for context.</p>
+          </div>
+          <div class="cost-view" id="hoursView" hidden>
+            <div class="cost-amount" id="hoursAmount">—</div>
+            <div class="hours-sub" id="hoursSub"></div>
+            <div class="cost-breakdown" id="hoursBreakdown"></div>
+            <div class="hours-scheduled" id="hoursScheduled"></div>
+            <p class="hours-status" id="hoursStatus" aria-live="polite"></p>
+            <p class="hours-note">Estimated by Claude <span id="hoursModel">Sonnet</span>: time a competent professional would need without AI. Claude Code sessions only. Rough, ±2×.</p>
+          </div>
         </div>
 
         <!-- Session heatmap -->
@@ -261,6 +279,7 @@
           </div>
           <button class="panel-close" onclick="closePanel()">✕</button>
         </div>
+        <div class="panel-hours" id="panelHours"></div>
         <div class="chart-wrap">
           <canvas id="sessionDetailChart"></canvas>
         </div>
