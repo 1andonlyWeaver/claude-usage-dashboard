@@ -3,6 +3,7 @@ import pytest
 
 import db
 import ingest
+import person_hours
 
 
 @pytest.fixture(autouse=True)
@@ -21,3 +22,11 @@ def conn(isolated_db):
     ingest.init_db(c)
     yield c
     c.close()
+
+
+@pytest.fixture(autouse=True)
+def no_real_cli(monkeypatch):
+    """No test may spawn the real claude CLI: it would spend quota."""
+    def forbidden(*args, **kwargs):
+        pytest.fail("a test tried to run a real subprocess")
+    monkeypatch.setattr(person_hours.subprocess, "run", forbidden)

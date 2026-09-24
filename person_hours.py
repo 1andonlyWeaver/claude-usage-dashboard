@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -38,6 +39,7 @@ SUMMARY_MAX_CHARS = 24000
 MAX_ATTEMPTS = 3
 RETRY_AFTER_MINUTES = 60   # a failed session-day is retried at most once per hour
 STOP_AFTER_FAILURES = 3  # failed calls in a row before the worker probes hourly / the CLI stops
+NO_CALL_PROBLEMS = ("no_source", "no_messages", "no_events")  # final failures; no call was made
 MAX_HOURS = 500            # sanity cap on one session-day's estimate
 CALL_TIMEOUT_S = 300
 # Never start a tick on an OAuth token that could expire before the tick's last call ends.
@@ -420,7 +422,10 @@ def call_judge(summary_text: str, cli: str, runner=None) -> dict:
                          ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")),
         "out_tokens": usage.get("output_tokens") or 0,
         "cost_usd": envelope.get("total_cost_usd"),
-        "model": next(iter(envelope.get("modelUsage") or {}), None),
+        # The model that wrote the answer: the CLI may list a helper model it also used.
+        "model": max(((m, u) for m, u in (envelope.get("modelUsage") or {}).items()
+                      if isinstance(u, dict)),
+                     key=lambda mu: mu[1].get("outputTokens") or 0, default=(None, None))[0],
     }
     if envelope.get("is_error"):
         detail = str(envelope.get("result") or envelope.get("subtype") or "error")[:200]
@@ -463,9 +468,18 @@ def discover(conn, now: datetime, index: dict, backfill_days: int = BACKFILL_DAY
                  for sid in {row["session_id"] for row in new} if sid in index}
     queued = [(row["session_id"], row["date"], int(scheduled[row["session_id"]]))
               for row in new if row["session_id"] in scheduled]
+    # A transcript that went missing (e.g. the WSL root was briefly unreachable) and is back:
+    # give its session-days a fresh start instead of leaving them failed for good.
+    returned = [(row["session_id"],) for row in conn.execute(
+        "SELECT DISTINCT session_id FROM person_hour_estimates"
+        " WHERE status = 'error' AND error = 'no_source'").fetchall()
+        if row["session_id"] in index]
     conn.executemany(
         "INSERT OR IGNORE INTO person_hour_estimates (session_id, date, status, is_scheduled)"
         " VALUES (?, ?, 'pending', ?)", queued)
+    conn.executemany(
+        "UPDATE person_hour_estimates SET status = 'pending', attempts = 0, error = NULL"
+        " WHERE session_id = ? AND status = 'error' AND error = 'no_source'", returned)
     conn.execute("""
         UPDATE person_hour_estimates SET status = 'pending'
         WHERE status = 'done' AND date >= ?
@@ -571,17 +585,22 @@ def _record_success(conn, session_id, date, result, judged_through, attempted_at
 
 
 def _record_failure(conn, session_id, date, error, attempted_at=None, meta=None, final=False):
-    """Mark a failed attempt. `final` failures (no transcript) are never retried."""
+    """Mark a failed attempt.
+
+    `final` failures had nothing to judge: they're never retried and, since no call was made,
+    their claim stamp is cleared so they don't count toward the hourly cap or "Other" usage.
+    """
     meta = meta or {}
     conn.execute("""
         UPDATE person_hour_estimates SET status = 'error',
             attempts = CASE WHEN ? THEN ? ELSE attempts + 1 END,
-            error = ?, last_attempt_at = COALESCE(?, last_attempt_at),
+            error = ?,
+            last_attempt_at = CASE WHEN ? THEN NULL ELSE COALESCE(?, last_attempt_at) END,
             judge_in_tokens = COALESCE(?, judge_in_tokens),
             judge_out_tokens = COALESCE(?, judge_out_tokens),
             judge_cost_usd = COALESCE(?, judge_cost_usd)
         WHERE session_id = ? AND date = ?
-    """, (int(final), MAX_ATTEMPTS, error, attempted_at, meta.get("in_tokens"),
+    """, (int(final), MAX_ATTEMPTS, error, int(final), attempted_at, meta.get("in_tokens"),
           meta.get("out_tokens"), meta.get("cost_usd"), session_id, date))
     conn.commit()
 
@@ -630,13 +649,18 @@ def _record_crash(session_id, date, ex, now_fn) -> None:
         with _db() as conn:
             _record_failure(conn, session_id, date, f"crash: {ex}"[:200], _ts(now_fn()))
     except Exception as inner:  # the DB itself is unavailable; the next tick will retry
-        print(f"[hours {datetime.now():%Y-%m-%d %H:%M:%S}] could not record crash: {inner}")
+        try:
+            print(f"[hours {datetime.now():%Y-%m-%d %H:%M:%S}] could not record crash: {inner}")
+        except Exception:
+            pass
 
 
 def judge_pending(limit: int, cli: str, index: dict, runner=None, now_fn=datetime.now) -> dict:
     """Judge up to `limit` queued session-days, newest first, MAX_CONCURRENCY at a time.
 
-    Returns outcome counts, e.g. {"done": 2, "error": 1}.
+    Returns outcome counts, e.g. {"done": 2, "error": 1}. After STOP_AFTER_FAILURES failed
+    calls in a row, the rest of the batch is left "unclaimed": those rows wait out the hourly
+    backoff without losing an attempt.
     """
     if limit <= 0:
         return {}
@@ -653,13 +677,28 @@ def judge_pending(limit: int, cli: str, index: dict, runner=None, now_fn=datetim
             [(started, sid, date) for sid, date in rows])
         conn.commit()
 
+    failed = {"in_a_row": 0}
+    guard = threading.Lock()
+
     def one(row):
+        with guard:
+            if failed["in_a_row"] >= STOP_AFTER_FAILURES:
+                return "unclaimed"  # this batch keeps failing: leave the rest, attempts intact
         try:
-            return judge_session_day(row[0], row[1], index, cli, runner, now_fn)
+            outcome = judge_session_day(row[0], row[1], index, cli, runner, now_fn)
         except Exception as ex:  # one bad session-day must not stop the batch
-            print(f"[hours {datetime.now():%Y-%m-%d %H:%M:%S}] {row[0]} {row[1]}: {ex}")
-            _record_crash(row[0], row[1], ex, now_fn)
-            return "error"
+            _record_crash(row[0], row[1], ex, now_fn)  # record first: printing can fail too
+            try:
+                print(f"[hours {datetime.now():%Y-%m-%d %H:%M:%S}] {row[0]} {row[1]}: {ex}")
+            except Exception:
+                pass  # e.g. the launcher's strict cp1252 stdout
+            outcome = "error"
+        with guard:
+            if outcome == "done":
+                failed["in_a_row"] = 0
+            elif outcome == "error":
+                failed["in_a_row"] += 1
+        return outcome
 
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENCY) as pool:
         return dict(Counter(pool.map(one, rows)))
@@ -771,8 +810,8 @@ def main(argv=None) -> int:
             requeued = conn.execute(
                 "UPDATE person_hour_estimates SET status = 'pending', attempts = 0, error = NULL"
                 " WHERE status = 'error' AND attempts >= ?"
-                " AND error NOT IN ('no_source', 'no_messages', 'no_events')",
-                (MAX_ATTEMPTS,)).rowcount
+                f" AND error NOT IN ({', '.join('?' * len(NO_CALL_PROBLEMS))})",
+                (MAX_ATTEMPTS, *NO_CALL_PROBLEMS)).rowcount
             conn.commit()
             print(f"Re-queued {requeued} session-day{'s' if requeued != 1 else ''} that had failed.")
         queued = discover(conn, datetime.now(), index, backfill_days=args.backfill)
@@ -836,7 +875,8 @@ def _print_totals(judged: int) -> None:
         ready = len(pending_rows(conn, max(counts["pending"], 1), datetime.now()))
         nothing_to_judge = conn.execute(
             "SELECT COUNT(*) FROM person_hour_estimates WHERE status = 'error' AND attempts >= ?"
-            " AND error IN ('no_source', 'no_messages', 'no_events')", (MAX_ATTEMPTS,)).fetchone()[0]
+            f" AND error IN ({', '.join('?' * len(NO_CALL_PROBLEMS))})",
+            (MAX_ATTEMPTS, *NO_CALL_PROBLEMS)).fetchone()[0]
     waiting = counts["pending"]
     line = (f"Finished: {judged} judged this run, {waiting} still waiting "
             f"({waiting - ready} in the one-hour retry wait), "

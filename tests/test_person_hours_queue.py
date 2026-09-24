@@ -87,3 +87,15 @@ def test_calls_last_hour_counts_recent_attempts(conn):
         [("a", "2026-09-20T11:30:00"), ("b", "2026-09-20T10:30:00"), ("c", None)])
     conn.commit()
     assert ph.calls_last_hour(conn, NOW) == 1
+
+
+def test_discover_revives_rows_whose_transcript_came_back(conn, tmp_path):
+    add_message(conn, "s1", "2026-09-20T09:00:00")
+    ph.discover(conn, NOW, {"s1": tmp_path / "s1.jsonl"})
+    conn.execute("UPDATE person_hour_estimates SET status = 'error', attempts = 3, error = 'no_source'")
+    conn.commit()
+    ph.discover(conn, NOW, {})  # still missing: nothing changes
+    assert _rows(conn)[("s1", "2026-09-20")]["status"] == "error"
+    ph.discover(conn, NOW, {"s1": tmp_path / "s1.jsonl"})
+    row = _rows(conn)[("s1", "2026-09-20")]
+    assert (row["status"], row["attempts"], row["error"]) == ("pending", 0, None)

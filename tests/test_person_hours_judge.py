@@ -133,3 +133,22 @@ def test_day_whose_messages_moved_is_not_judged(conn, tmp_path):
     run = FakeRun()
     assert _judge(index, run) == "skipped"
     assert _row(conn, "s1")["error"] == "no_messages" and run.calls == []
+
+
+def test_judge_pending_leaves_the_rest_after_repeated_failures(conn, tmp_path):
+    index = {}
+    for sid in "abcdefghij":
+        index.update(queued_session(conn, tmp_path, sid, NOW))
+    run = FakeRun(stdout="Error: not logged in", returncode=1)
+    out = ph.judge_pending(10, "claude", index, runner=run, now_fn=lambda: NOW)
+    assert out["error"] == len(run.calls)
+    assert ph.STOP_AFTER_FAILURES <= len(run.calls) < ph.STOP_AFTER_FAILURES + ph.MAX_CONCURRENCY
+    assert out["error"] + out["unclaimed"] == 10
+    attempts = [r[0] for r in conn.execute("SELECT attempts FROM person_hour_estimates")]
+    assert sum(attempts) == len(run.calls)  # the rows left alone kept every attempt
+
+
+def test_no_call_failures_do_not_count_toward_the_cap(conn, tmp_path):
+    queued_session(conn, tmp_path, "gone", NOW)
+    assert ph.judge_pending(5, "claude", {}, runner=FakeRun(), now_fn=lambda: NOW) == {"skipped": 1}
+    assert ph.calls_last_hour(conn, NOW) == 0

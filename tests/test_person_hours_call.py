@@ -82,3 +82,10 @@ def test_find_claude_cli_skips_cmd_shims(tmp_path, monkeypatch):
     monkeypatch.setattr(ph.shutil, "which", lambda name: r"C:\npm\claude.CMD")
     monkeypatch.setattr(ph.Path, "home", lambda: tmp_path)
     assert ph.find_claude_cli() is None
+
+
+def test_call_judge_records_the_model_that_wrote_the_answer():
+    env = json.loads(envelope(GOOD_ESTIMATE))
+    env["modelUsage"] = {"claude-haiku-4-5": {"outputTokens": 20},
+                         "claude-sonnet-5": {"outputTokens": 1500}}
+    assert ph.call_judge("S", "claude", runner=FakeRun(stdout=json.dumps(env)))["model"] == "claude-sonnet-5"
