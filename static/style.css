@@ -197,7 +197,8 @@ body {
 .auth-banner-text span { color: var(--text-secondary); }
 .auth-banner-actions { display: flex; gap: 8px; flex-shrink: 0; }
 .auth-banner-actions a { text-decoration: none; }
-.btn-refresh:disabled { opacity: 0.6; cursor: default; }
+.btn-refresh:disabled,
+.btn-refresh[aria-disabled="true"] { opacity: 0.6; cursor: default; }
 .btn-refresh:focus-visible { outline: 2px solid var(--claude-orange); outline-offset: 2px; }
 
 .conn-dot {
@@ -210,6 +211,19 @@ body {
 .conn-dot.ok   { background: #7BC87B; }
 .conn-dot.warn { background: var(--claude-amber); }
 .conn-dot.bad  { background: var(--claude-red); }
+
+/* Visually hidden, still read by screen readers */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 
 /* ─── Ingest banner ─── */
 .ingest-banner {

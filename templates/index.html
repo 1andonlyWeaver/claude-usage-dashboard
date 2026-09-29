@@ -37,7 +37,7 @@
           <div class="window-range" id="window7dRange" title="Current 7-day quota window">7d · —</div>
         </div>
         <span class="conn-dot" id="connDot" aria-hidden="true"></span>
-        <div class="last-updated" id="lastUpdated">Connecting…</div>
+        <div class="last-updated" id="lastUpdated" tabindex="-1">Connecting…</div>
         <button class="btn-refresh" id="btnRefresh" onclick="triggerRefresh()" title="Re-parse session files (R)">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
@@ -49,7 +49,7 @@
     </header>
 
     <!-- Claude sign-in problems (hidden while connected or merely unreachable) -->
-    <div class="auth-banner" id="authBanner" role="status" hidden>
+    <div class="auth-banner" id="authBanner" hidden>
       <span class="auth-banner-icon" aria-hidden="true">&#9888;</span>
       <div class="auth-banner-text">
         <strong id="authTitle"></strong>
@@ -57,6 +57,8 @@
       </div>
       <div class="auth-banner-actions" id="authActions"></div>
     </div>
+    <!-- Always in the page, so screen readers announce changes to it (the banner itself comes and goes) -->
+    <div id="authLive" class="sr-only" role="status"></div>
 
     <!-- Ingest progress bar (hidden when done) -->
     <div class="ingest-banner" id="ingestBanner" style="display:none">

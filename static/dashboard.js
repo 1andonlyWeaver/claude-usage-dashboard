@@ -103,7 +103,9 @@ let quotaState = { five: null, seven: null };
 const CONNECTION_ATTENTION = new Set(['not-installed', 'signed-out', 'login-required']);
 const CONNECTION_QUIET = new Set(['connected', 'unavailable']);  // no banner for these
 let connectionState = null;
-let _connectionKey = '';
+let _connectionKey = '';   // what the banner shows; renewToken clears it to force a redraw
+let _liveKey = '';         // last real change, so a forced redraw isn't announced again
+let _liveState = null;     // state at that change; null until the first reading
 
 function renderConnection(c) {
   connectionState = c;
@@ -114,28 +116,60 @@ function renderConnection(c) {
   if (typeof showDiagnostics === 'function' && document.getElementById('settingsPanel')?.classList.contains('open')) {
     showDiagnostics(c);
   }
-  // The banner is a live region: rewrite it only when something changed.
+  // Rewrite the banner only when something changed.
   const key = [c.state, c.title, c.detail, c.actions.join(','), c.login_running].join('|');
   if (key === _connectionKey) return;
   _connectionKey = key;
+  if (key !== _liveKey) {
+    announceConnection(c, _liveState);
+    _liveKey = key;
+    _liveState = c.state;
+  }
   const banner = document.getElementById('authBanner');
+  const actions = document.getElementById('authActions');
+  // Rebuilding the buttons would drop keyboard focus, so remember where it was.
+  const focused = actions.contains(document.activeElement) ? document.activeElement : null;
+  const focusedAction = focused && focused.dataset.action;
   if (CONNECTION_QUIET.has(c.state)) {
     banner.hidden = true;
+    if (focused) document.getElementById('lastUpdated').focus();
     return;
   }
   banner.classList.toggle('attention', CONNECTION_ATTENTION.has(c.state));
   document.getElementById('authTitle').textContent = c.title;
   document.getElementById('authDetail').textContent = c.detail;
-  const actions = document.getElementById('authActions');
   actions.textContent = '';
   for (const a of c.actions) actions.append(connectionAction(a, c));
   banner.hidden = false;
+  if (focused) {
+    (actions.querySelector(`[data-action="${focusedAction}"]`)
+      || actions.firstElementChild
+      || document.getElementById('lastUpdated')).focus();
+  }
+}
+
+// The banner comes and goes, so screen readers hear changes through #authLive, which
+// is always in the page. A recovery is announced only after a problem, not on page load.
+function announceConnection(c, prevState) {
+  let text = '';
+  if (c.state === 'connected') {
+    if (prevState && !CONNECTION_QUIET.has(prevState)) text = 'Connected to Claude.';
+  } else if (!CONNECTION_QUIET.has(c.state)) {
+    text = c.title + ' ' + c.detail;
+  }
+  setConnectionLive(text);
+}
+
+function setConnectionLive(text) {
+  const live = document.getElementById('authLive');
+  if (live.textContent !== text) live.textContent = text;
 }
 
 function connectionAction(action, c) {
   if (action === 'install') {
     const link = document.createElement('a');
     link.className = 'btn-refresh';
+    link.dataset.action = 'install';
     link.href = c.install_url;
     link.target = '_blank';
     link.rel = 'noopener';
@@ -145,9 +179,11 @@ function connectionAction(action, c) {
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'btn-refresh';
+  btn.dataset.action = action;
+  // aria-disabled, not disabled: a disabled button can't hold focus.
   if (action === 'sign-in') {
     btn.textContent = c.login_running ? 'Waiting for sign-in…' : 'Sign in';
-    btn.disabled = c.login_running;
+    if (c.login_running) btn.setAttribute('aria-disabled', 'true');
     btn.addEventListener('click', signIn);
   } else {
     btn.textContent = 'Renew now';
@@ -156,26 +192,32 @@ function connectionAction(action, c) {
   return btn;
 }
 
-async function signIn() {
+async function signIn(ev) {
+  if (ev?.currentTarget?.getAttribute('aria-disabled') === 'true') return;
   try {
     renderConnection(await apiFetch('/api/connection/login', { method: 'POST' }));
   } catch (e) {
-    document.getElementById('authDetail').textContent = "Couldn't open the sign-in window.";
+    const msg = "Couldn't open the sign-in window.";
+    document.getElementById('authDetail').textContent = msg;
+    setConnectionLive(msg);
   }
 }
 
 async function renewToken(ev) {
   const btn = ev.currentTarget;
-  btn.disabled = true;
+  if (btn.getAttribute('aria-disabled') === 'true') return;
+  btn.setAttribute('aria-disabled', 'true');
   btn.textContent = 'Renewing…';
   let renewed = false;
   try {
     renewed = (await apiFetch('/api/connection/renew', { method: 'POST' })).renewed;
   } catch (e) { /* reported below */ }
-  _connectionKey = '';  // redraw the banner, which restores the button
+  _connectionKey = '';  // redraw the banner, which restores the button and its focus
   await fetchQuota();
   if (!renewed) {
-    document.getElementById('authDetail').textContent = "Couldn't renew the token. Use Sign in instead.";
+    const msg = "Couldn't renew the token. Use Sign in instead.";
+    document.getElementById('authDetail').textContent = msg;
+    setConnectionLive(msg);
   }
 }
 
