@@ -5,6 +5,7 @@ The usage API needs the access token Claude Code keeps in that file. This module
 it, renews it when asked, and tracks whether the stored credentials have been refused.
 """
 import json
+import re
 import subprocess
 import threading
 import time
@@ -32,6 +33,11 @@ _token_refresh_lock = threading.Lock()
 _last_token_refresh_attempt = 0.0  # monotonic time of last attempt; throttles refresh
 _auth_dead = False  # True once a refresh returns invalid_grant — refresh token revoked, re-login required
 _auth_dead_creds_sig = None  # credentials-file signature when _auth_dead was set; a change means a re-login may have landed
+
+
+def redact(text: str) -> str:
+    """Hide anything that looks like an Anthropic token, for text headed to a log."""
+    return re.sub(r"sk-ant-[A-Za-z0-9_\-]+", "sk-ant-…", text)
 
 
 def read_credentials() -> dict | None:

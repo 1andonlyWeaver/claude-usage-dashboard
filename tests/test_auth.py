@@ -185,3 +185,9 @@ def test_sign_in_can_be_retried_after_the_console_closes(monkeypatch):
     assert not auth.login_running()
     assert auth.launch_login("C:/claude.exe") is True
     assert len(FakePopen.launched) == 2
+
+
+def test_redact_hides_token_text():
+    text = auth.redact("Invalid header value b'Bearer sk-ant-oat-ABC123' then sk-ant-ort_X-9")
+    assert "ABC123" not in text and "X-9" not in text
+    assert "Bearer sk-ant-" in text

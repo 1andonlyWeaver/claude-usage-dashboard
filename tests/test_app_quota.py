@@ -45,6 +45,27 @@ def test_auto_renewal_retries_once_after_a_401(isolated_credentials, monkeypatch
     assert app._fetch_usage_sync()["ok"] is True and len(calls) == 2
 
 
+def test_auto_renewal_refused_again_asks_for_sign_in(isolated_credentials, monkeypatch):
+    settings.update({"auto_refresh_token": True})
+    write_credentials(isolated_credentials)
+    urlopen, calls = fake_urlopen([http_error(401), http_error(401)])
+    monkeypatch.setattr(app.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(auth, "refresh_token", lambda force=False: True)
+    assert app._fetch_usage_sync()["error"] == "login-required"
+    assert len(calls) == 2 and auth.rejected()
+
+
+def test_an_exception_that_quotes_the_token_stays_out_of_the_error(isolated_credentials, monkeypatch, capsys):
+    write_credentials(isolated_credentials)
+
+    def urlopen(*args, **kwargs):
+        raise ValueError("Invalid header value b'Bearer sk-ant-oat-SECRET\\n'")
+    monkeypatch.setattr(app.urllib.request, "urlopen", urlopen)
+    result = app._fetch_usage_sync()
+    assert result["error"] == "network-error"
+    assert "SECRET" not in str(result) and "SECRET" not in capsys.readouterr().out
+
+
 def test_credentials_change_lifts_an_auth_backoff(monkeypatch):
     cache = {"error": "token-expired", "retry_after": 1e12, "creds_sig": ("old",)}
     monkeypatch.setattr(auth, "credentials_signature", lambda: ("new",))

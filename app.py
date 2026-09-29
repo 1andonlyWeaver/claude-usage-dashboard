@@ -167,7 +167,7 @@ def _fetch_usage_sync(_already_retried: bool = False) -> dict:
     """Call the Anthropic usage API synchronously. Returns a result dict:
     On success: {"ok": True, "data": {...}, "retry_after": None}
     On rate-limit: {"ok": False, "error": "rate-limited", "retry_after": <seconds>}
-    On other failure: {"ok": False, "error": "<message>", "retry_after": None}
+    On other failure: {"ok": False, "error": "http-<status>" or "network-error", "retry_after": None}
 
     Without a usable token the error is auth.usable_token's status and nothing is sent.
     A 401 means the stored token was refused: with automatic renewal on, renew once and
@@ -213,7 +213,8 @@ def _fetch_usage_sync(_already_retried: bool = False) -> dict:
                 print(f"[quota {ts}] HTTP 401 - attempting OAuth refresh")
                 if auth.refresh_token():
                     return _fetch_usage_sync(_already_retried=True)
-            elif not auto:
+            else:
+                # Read-only, or a freshly renewed token refused too: nothing here can fix it.
                 auth.mark_rejected(sig)
             if auth.rejected():
                 return {"ok": False, "error": "login-required", "retry_after": None}
@@ -221,8 +222,10 @@ def _fetch_usage_sync(_already_retried: bool = False) -> dict:
         return {"ok": False, "error": f"http-{e.code}", "retry_after": None}
     except Exception as ex:
         ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print(f"[quota {ts}] exception: {ex}")
-        return {"ok": False, "error": str(ex), "retry_after": None}
+        # The error code goes out through /api/connection and the diagnostics, so it stays a
+        # fixed string; some exception messages quote the request headers, token included.
+        print(f"[quota {ts}] exception: {auth.redact(str(ex))}")
+        return {"ok": False, "error": "network-error", "retry_after": None}
 
 
 def _resets_at_passed(value) -> bool:
