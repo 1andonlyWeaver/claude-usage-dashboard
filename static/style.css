@@ -172,25 +172,44 @@ body {
 }
 .btn-refresh svg { flex-shrink: 0; }
 
-/* ─── Quota auth banner ─── */
+/* ─── Claude connection banner ─── */
 .auth-banner {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px;
   padding: 10px 18px;
-  background: rgba(217,95,95,0.1);
-  border: 1px solid rgba(217,95,95,0.3);
+  background: rgba(201,169,110,0.08);
+  border: 1px solid rgba(201,169,110,0.35);
   border-radius: var(--radius-sm);
   margin-bottom: 20px;
   font-size: 0.8rem;
-  color: var(--claude-red);
+  color: var(--text-primary);
 }
-.auth-banner code {
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: rgba(217,95,95,0.14);
-  font-size: 0.95em;
+.auth-banner[hidden] { display: none; }
+.auth-banner.attention {
+  background: rgba(217,95,95,0.1);
+  border-color: rgba(217,95,95,0.4);
 }
+.auth-banner-icon { color: var(--claude-amber); font-size: 1rem; }
+.auth-banner.attention .auth-banner-icon { color: var(--claude-red); }
+.auth-banner-text { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 12rem; }
+.auth-banner-text span { color: var(--text-secondary); }
+.auth-banner-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.auth-banner-actions a { text-decoration: none; }
+.btn-refresh:disabled { opacity: 0.6; cursor: default; }
+.btn-refresh:focus-visible { outline: 2px solid var(--claude-orange); outline-offset: 2px; }
+
+.conn-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex-shrink: 0;
+}
+.conn-dot.ok   { background: #7BC87B; }
+.conn-dot.warn { background: var(--claude-amber); }
+.conn-dot.bad  { background: var(--claude-red); }
 
 /* ─── Ingest banner ─── */
 .ingest-banner {

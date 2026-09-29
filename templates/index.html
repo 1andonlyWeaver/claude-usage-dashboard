@@ -36,6 +36,7 @@
           <div class="window-range" id="window5hRange" title="Current 5-hour quota window">5h · —</div>
           <div class="window-range" id="window7dRange" title="Current 7-day quota window">7d · —</div>
         </div>
+        <span class="conn-dot" id="connDot" aria-hidden="true"></span>
         <div class="last-updated" id="lastUpdated">Connecting…</div>
         <button class="btn-refresh" id="btnRefresh" onclick="triggerRefresh()" title="Re-parse session files (R)">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -47,10 +48,14 @@
       </div>
     </header>
 
-    <!-- Quota auth failure (hidden unless the OAuth token is dead) -->
-    <div class="auth-banner" id="authBanner" style="display:none" role="status">
-      <span aria-hidden="true">&#9888;</span>
-      <span id="authMsg"></span>
+    <!-- Claude sign-in problems (hidden while connected or merely unreachable) -->
+    <div class="auth-banner" id="authBanner" role="status" hidden>
+      <span class="auth-banner-icon" aria-hidden="true">&#9888;</span>
+      <div class="auth-banner-text">
+        <strong id="authTitle"></strong>
+        <span id="authDetail"></span>
+      </div>
+      <div class="auth-banner-actions" id="authActions"></div>
     </div>
 
     <!-- Ingest progress bar (hidden when done) -->

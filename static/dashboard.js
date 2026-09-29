@@ -96,41 +96,108 @@ function startQuotaPolling() {
 
 let quotaState = { five: null, seven: null };
 
+// ─── Claude connection ───────────────────────────────────────
 // Without live quota the session charts silently switch their y-axis to raw tokens, which
-// looks like a rendering quirk rather than a signed-out dashboard. Say so out loud.
-function setAuthBanner(error) {
+// looks like a rendering quirk rather than a sign-in problem. Say what's wrong and offer
+// the fix. The server decides the state (auth.connection_status); this only draws it.
+const CONNECTION_ATTENTION = new Set(['not-installed', 'signed-out', 'login-required']);
+const CONNECTION_QUIET = new Set(['connected', 'unavailable']);  // no banner for these
+let connectionState = null;
+let _connectionKey = '';
+
+function renderConnection(c) {
+  connectionState = c;
+  const dot = document.getElementById('connDot');
+  dot.className = 'conn-dot ' + (c.state === 'connected' ? 'ok'
+    : CONNECTION_ATTENTION.has(c.state) ? 'bad' : 'warn');
+  dot.title = c.title;
+  if (typeof showDiagnostics === 'function' && document.getElementById('settingsPanel')?.classList.contains('open')) {
+    showDiagnostics(c);
+  }
+  // The banner is a live region: rewrite it only when something changed.
+  const key = [c.state, c.title, c.detail, c.actions.join(','), c.login_running].join('|');
+  if (key === _connectionKey) return;
+  _connectionKey = key;
   const banner = document.getElementById('authBanner');
-  const msg = document.getElementById('authMsg');
-  if (!banner || !msg) return;
-  if (error !== 'login-required' && error !== 'no-credentials') {
-    banner.style.display = 'none';
+  if (CONNECTION_QUIET.has(c.state)) {
+    banner.hidden = true;
     return;
   }
-  msg.innerHTML = error === 'no-credentials'
-    ? 'No Claude credentials found — quota is unavailable, so the session charts are '
-      + 'plotting raw tokens instead of % of quota. Sign in with <code>claude auth login</code>.'
-    : 'Signed out of the quota API (stored token expired) — the session charts are '
-      + 'plotting raw tokens instead of % of quota. Run <code>claude auth login</code>; '
-      + 'the dashboard picks the new token up within a minute.';
-  banner.style.display = 'flex';
+  banner.classList.toggle('attention', CONNECTION_ATTENTION.has(c.state));
+  document.getElementById('authTitle').textContent = c.title;
+  document.getElementById('authDetail').textContent = c.detail;
+  const actions = document.getElementById('authActions');
+  actions.textContent = '';
+  for (const a of c.actions) actions.append(connectionAction(a, c));
+  banner.hidden = false;
+}
+
+function connectionAction(action, c) {
+  if (action === 'install') {
+    const link = document.createElement('a');
+    link.className = 'btn-refresh';
+    link.href = c.install_url;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.textContent = 'How to install Claude Code';
+    return link;
+  }
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn-refresh';
+  if (action === 'sign-in') {
+    btn.textContent = c.login_running ? 'Waiting for sign-in…' : 'Sign in';
+    btn.disabled = c.login_running;
+    btn.addEventListener('click', signIn);
+  } else {
+    btn.textContent = 'Renew now';
+    btn.addEventListener('click', renewToken);
+  }
+  return btn;
+}
+
+async function signIn() {
+  try {
+    renderConnection(await apiFetch('/api/connection/login', { method: 'POST' }));
+  } catch (e) {
+    document.getElementById('authDetail').textContent = "Couldn't open the sign-in window.";
+  }
+}
+
+async function renewToken(ev) {
+  const btn = ev.currentTarget;
+  btn.disabled = true;
+  btn.textContent = 'Renewing…';
+  let renewed = false;
+  try {
+    renewed = (await apiFetch('/api/connection/renew', { method: 'POST' })).renewed;
+  } catch (e) { /* reported below */ }
+  _connectionKey = '';  // redraw the banner, which restores the button
+  await fetchQuota();
+  if (!renewed) {
+    document.getElementById('authDetail').textContent = "Couldn't renew the token. Use Sign in instead.";
+  }
 }
 
 async function fetchQuota() {
   try {
     const data = await apiFetch('/api/quota');
     const hasError = !!data.error;
-    setAuthBanner(data.error);
+    const conn = data.connection;
+    if (conn) renderConnection(conn);
     document.getElementById('gauge5h').classList.toggle('stale', hasError);
     document.getElementById('gauge7d').classList.toggle('stale', hasError);
 
     const hasData = data.five_hour_resets_at != null;
     document.getElementById('windowInfo').classList.toggle('stale', hasError);
     if (hasError) {
-      const authError = data.error === 'login-required' || data.error === 'no-credentials';
-      document.getElementById('lastUpdated').textContent = authError
-        ? '⚠ Re-login required — run "claude auth login", then press R'
-        : 'Quota unavailable: ' + data.error + (hasData ? '' : ' — retrying');
-      _setQuotaPollRate(QUOTA_POLL_ERROR);
+      // A sign-in problem is fixed by a file change the server spots on each poll, so keep
+      // polling fast; slow down only for real outages and rate limits.
+      const signInProblem = conn && !CONNECTION_QUIET.has(conn.state);
+      document.getElementById('lastUpdated').textContent = signInProblem
+        ? 'Quota paused'
+        : 'Quota unavailable, retrying';
+      _setQuotaPollRate(signInProblem ? QUOTA_POLL_NORMAL : QUOTA_POLL_ERROR);
       if (!hasData) return;
     } else {
       _setQuotaPollRate(QUOTA_POLL_NORMAL);
