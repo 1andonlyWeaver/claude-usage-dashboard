@@ -9,9 +9,7 @@ import time
 import traceback
 import urllib.request
 import urllib.error
-import urllib.parse
 from contextlib import closing
-from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException, Query
@@ -20,12 +18,12 @@ from fastapi.templating import Jinja2Templates
 from fastapi.requests import Request
 from fastapi.responses import JSONResponse
 
+import auth
 import db
 import paths
 import person_hours
 
 BASE_DIR = paths.RESOURCE_DIR  # static/ and templates/
-CREDENTIALS_FILE = Path.home() / ".claude" / ".credentials.json"
 
 USAGE_API_URL = "https://api.anthropic.com/api/oauth/usage"
 USAGE_API_BETA_HEADER = "oauth-2025-04-20"
@@ -41,14 +39,6 @@ QUOTA_CACHE_MAX_STALE = 600  # seconds: accept disk-cached data up to 10 min old
 # resets_at is missing or unparseable.
 FIVE_HOUR_WINDOW = 5 * 3600
 SEVEN_DAY_WINDOW = 7 * 24 * 3600
-
-# OAuth token refresh — reverse-engineered from public Claude Code clients.
-# If Anthropic changes these, refresh will fail and the dashboard falls back to
-# needing the CLI to refresh the token.
-OAUTH_REFRESH_URL = "https://claude.ai/v1/oauth/token"
-OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-TOKEN_REFRESH_LEEWAY = 120        # refresh if accessToken expires within this many seconds
-TOKEN_REFRESH_MIN_INTERVAL = 60   # never attempt refresh more than once per this many seconds
 
 app = FastAPI(title="Claude Usage Dashboard")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
@@ -69,12 +59,6 @@ _usage_cache: dict = {
     "fail_count": 0,     # consecutive failure count for exponential backoff
 }
 _fetch_lock = asyncio.Lock()  # prevents concurrent API calls when cache is stale
-
-# OAuth token refresh state
-_token_refresh_lock = threading.Lock()
-_last_token_refresh_attempt = 0.0  # monotonic time of last attempt; throttles refresh
-_auth_dead = False  # True once a refresh returns invalid_grant — refresh token revoked, re-login required
-_auth_dead_creds_sig = None  # credentials-file signature when _auth_dead was set; a change means a re-login may have landed
 
 # Person-hours judge worker. PERSON_HOURS_WORKER=off disables it (e.g. for a test server).
 HOURS_WORKER_ENABLED = os.environ.get("PERSON_HOURS_WORKER", "on").lower() not in ("0", "off", "false")
@@ -175,168 +159,6 @@ def _periodic_ingest():
         t.start()
 
 
-def _read_credentials() -> dict | None:
-    """Return the full credentials JSON, or None if missing/malformed."""
-    try:
-        return json.loads(CREDENTIALS_FILE.read_text())
-    except Exception:
-        return None
-
-
-def _write_credentials_atomic(updated: dict) -> bool:
-    """Atomically rewrite ~/.claude/.credentials.json. Returns True on success."""
-    try:
-        tmp = CREDENTIALS_FILE.with_suffix(CREDENTIALS_FILE.suffix + ".tmp")
-        tmp.write_text(json.dumps(updated, indent=2))
-        tmp.replace(CREDENTIALS_FILE)
-        return True
-    except Exception as ex:
-        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print(f"[oauth {ts}] failed to write credentials: {ex}")
-        return False
-
-
-def _credentials_signature() -> tuple | None:
-    """(mtime, size) of the credentials file, or None if it can't be stat'd.
-
-    Used to tell whether `claude auth login` has rewritten the file since we last found
-    the stored refresh token to be expired.
-    """
-    try:
-        st = CREDENTIALS_FILE.stat()
-        return (st.st_mtime_ns, st.st_size)
-    except OSError:
-        return None
-
-
-def _refresh_oauth_token() -> bool:
-    """Refresh the OAuth access token using the stored refreshToken.
-
-    Calls Anthropic's OAuth token endpoint and rewrites ~/.claude/.credentials.json
-    with the new accessToken/expiresAt on success. Throttled to one attempt per
-    TOKEN_REFRESH_MIN_INTERVAL seconds to prevent tight loops if refresh fails.
-    Returns True on success.
-    """
-    global _last_token_refresh_attempt, _auth_dead, _auth_dead_creds_sig
-    with _token_refresh_lock:
-        if _auth_dead:
-            if _credentials_signature() == _auth_dead_creds_sig:
-                # The stored refresh token is expired and nothing has rewritten the
-                # credentials file since we learned that. Re-POSTing it every minute can
-                # only fail again — wait for `claude auth login` to replace the file.
-                return False
-            # Credentials changed on disk, so a re-login may have landed. Retry now rather
-            # than waiting out the throttle left over from the last doomed attempt.
-            _auth_dead = False
-            _auth_dead_creds_sig = None
-            _last_token_refresh_attempt = 0.0
-        now = time.monotonic()
-        if now - _last_token_refresh_attempt < TOKEN_REFRESH_MIN_INTERVAL:
-            return False
-        _last_token_refresh_attempt = now
-
-        creds = _read_credentials()
-        if not creds:
-            return False
-        oauth = creds.get("claudeAiOauth") or {}
-        refresh_token = oauth.get("refreshToken")
-        if not refresh_token:
-            return False
-
-        body = urllib.parse.urlencode({
-            "grant_type": "refresh_token",
-            "client_id": OAUTH_CLIENT_ID,
-            "refresh_token": refresh_token,
-        }).encode("utf-8")
-        # claude.ai is behind Cloudflare and 403s the default Python-urllib User-Agent.
-        # Mimic a generic browser-ish UA so the request gets through.
-        req = urllib.request.Request(
-            OAUTH_REFRESH_URL,
-            data=body,
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "application/json",
-                "User-Agent": "claude-usage-dashboard/1.0",
-            },
-            method="POST",
-        )
-        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            body = ""
-            try:
-                body = e.read().decode("utf-8", "replace")
-            except Exception:
-                pass
-            print(f"[oauth {ts}] refresh failed: HTTP {e.code} - {body[:300]}")
-            # invalid_grant (or 401) means the stored refresh token is revoked/expired:
-            # no amount of retrying will help — the user must re-login via the CLI.
-            if "invalid_grant" in body or e.code == 401:
-                _auth_dead = True
-                _auth_dead_creds_sig = _credentials_signature()
-            return False
-        except Exception as ex:
-            print(f"[oauth {ts}] refresh failed: {ex}")
-            return False
-
-        new_access = payload.get("access_token")
-        if not new_access:
-            print(f"[oauth {ts}] refresh response missing access_token")
-            return False
-
-        expires_in = int(payload.get("expires_in") or 36000)
-        new_expires_at = int(time.time() * 1000) + expires_in * 1000
-
-        oauth["accessToken"] = new_access
-        if payload.get("refresh_token"):
-            oauth["refreshToken"] = payload["refresh_token"]
-        oauth["expiresAt"] = new_expires_at
-        creds["claudeAiOauth"] = oauth
-
-        if not _write_credentials_atomic(creds):
-            return False
-        _auth_dead = False  # a fresh token was minted — clear any prior dead-token state
-        _auth_dead_creds_sig = None
-        print(f"[oauth {ts}] refreshed token (expires in {expires_in}s)")
-        return True
-
-
-def _read_oauth_token() -> tuple[str | None, str]:
-    """Return (accessToken, status), refreshing pre-emptively if it's about to expire.
-
-    status is one of:
-      'ok'             — a usable token is available
-      'login-required' — token is expired and the refresh token is dead (re-login needed)
-      'no-credentials' — no credentials file or no stored token
-    """
-    global _auth_dead, _auth_dead_creds_sig
-    creds = _read_credentials()
-    if not creds:
-        return None, "no-credentials"
-    oauth = creds.get("claudeAiOauth") or {}
-    token = oauth.get("accessToken")
-    if not token:
-        return None, "no-credentials"
-    expires_at_ms = oauth.get("expiresAt") or 0
-    seconds_left = (expires_at_ms / 1000) - time.time()
-    if seconds_left >= TOKEN_REFRESH_LEEWAY:
-        _auth_dead = False  # comfortably-valid token present; clear any stale dead-token flag
-        _auth_dead_creds_sig = None
-        return token, "ok"
-    # Expired or near-expiry — attempt a refresh (throttled internally).
-    if _refresh_oauth_token():
-        creds = _read_credentials() or {}
-        token = (creds.get("claudeAiOauth") or {}).get("accessToken")
-        return token, "ok"
-    # Refresh didn't succeed. If the token is actually expired and the refresh token is
-    # known-dead, the user must re-login; otherwise keep using the still-valid token.
-    if seconds_left < 0 and _auth_dead:
-        return token, "login-required"
-    return token, "ok"
-
-
 def _fetch_usage_sync(_already_retried: bool = False) -> dict:
     """Call the Anthropic usage API synchronously. Returns a result dict:
     On success: {"ok": True, "data": {...}, "retry_after": None}
@@ -345,7 +167,7 @@ def _fetch_usage_sync(_already_retried: bool = False) -> dict:
 
     On 401, attempts a one-shot OAuth refresh and retries the request once.
     """
-    token, auth_status = _read_oauth_token()
+    token, auth_status = auth.read_oauth_token()
     if auth_status == "login-required":
         # Access token expired and refresh token is dead — calling the API just yields a
         # 429/401 that masks the real cause, so surface the actionable error directly.
@@ -384,9 +206,9 @@ def _fetch_usage_sync(_already_retried: bool = False) -> dict:
             return {"ok": False, "error": "rate-limited", "retry_after": retry_secs}
         if e.code == 401 and not _already_retried:
             print(f"[quota {ts}] HTTP 401 - attempting OAuth refresh")
-            if _refresh_oauth_token():
+            if auth.refresh_token():
                 return _fetch_usage_sync(_already_retried=True)
-            if _auth_dead:
+            if auth.rejected():
                 return {"ok": False, "error": "login-required", "retry_after": None}
         print(f"[quota {ts}] HTTP {e.code}")
         return {"ok": False, "error": f"http-{e.code}", "retry_after": None}
@@ -561,14 +383,6 @@ def _cached_five_hour_pct() -> float | None:
     return disk.get("five_hour_pct") if disk else None
 
 
-def _token_seconds_left() -> float | None:
-    """Seconds until the stored OAuth access token expires, or None without credentials."""
-    oauth = (_read_credentials() or {}).get("claudeAiOauth") or {}
-    if not oauth.get("accessToken"):
-        return None
-    return (oauth.get("expiresAt") or 0) / 1000 - time.time()
-
-
 def _hours_tick():
     """Judge queued session-days for the person-hours view, then reschedule.
 
@@ -578,16 +392,16 @@ def _hours_tick():
     try:
         if _hours_lock.acquire(blocking=False):
             try:
-                left = _token_seconds_left()
+                left = auth.token_seconds_left()
                 if left is not None and left < person_hours.TOKEN_MIN_SECONDS:
                     # Refresh here, in the process that already owns token refresh, so the CLI
                     # never starts a call on a token it would have to refresh itself.
-                    _refresh_oauth_token()
-                    left = _token_seconds_left()
+                    auth.refresh_token()
+                    left = auth.token_seconds_left()
                 person_hours.run_tick(datetime.now(), {
                     # A re-login rewrites the credentials file; don't stay paused until a
                     # quota poll happens to notice.
-                    "auth_dead": _auth_dead and _credentials_signature() == _auth_dead_creds_sig,
+                    "auth_dead": auth.rejected(),
                     "ingest_running": bool(_ingest_status.get("running")),
                     "five_hour_pct": _cached_five_hour_pct(),
                     "token_seconds_left": left,
@@ -626,7 +440,7 @@ async def startup():
         _ingest_status["done"] = True
     # Pre-refresh the OAuth token so the first /api/quota poll doesn't pay the latency
     # (or fail with 401 when the token expired while the machine was off).
-    threading.Thread(target=_read_oauth_token, daemon=True).start()
+    threading.Thread(target=auth.read_oauth_token, daemon=True).start()
     t = threading.Timer(90, _periodic_ingest)
     t.daemon = True
     t.start()

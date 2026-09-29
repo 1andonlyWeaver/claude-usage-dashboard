@@ -1,4 +1,3 @@
-import json
 import time
 
 import pytest
@@ -22,7 +21,7 @@ class FakeTimer:
 def timers(monkeypatch):
     FakeTimer.started = []
     monkeypatch.setattr(app.threading, "Timer", FakeTimer)
-    monkeypatch.setattr(app, "_token_seconds_left", lambda: 3600.0)
+    monkeypatch.setattr(app.auth, "token_seconds_left", lambda: 3600.0)
     return FakeTimer.started
 
 
@@ -48,15 +47,6 @@ def test_cached_five_hour_pct_uses_memory_then_disk(monkeypatch, tmp_path):
     monkeypatch.setitem(app._usage_cache, "data", None)
     monkeypatch.setattr(app, "QUOTA_CACHE_FILE", tmp_path / "missing.json")
     assert app._cached_five_hour_pct() is None
-
-
-def test_token_seconds_left(monkeypatch, tmp_path):
-    creds = tmp_path / "credentials.json"
-    monkeypatch.setattr(app, "CREDENTIALS_FILE", creds)
-    assert app._token_seconds_left() is None
-    creds.write_text(json.dumps({"claudeAiOauth": {"accessToken": "t",
-                                                   "expiresAt": (time.time() + 3600) * 1000}}))
-    assert 3500 < app._token_seconds_left() <= 3600
 
 
 def test_hours_tick_reschedules_after_a_failed_tick(timers, monkeypatch):
@@ -87,20 +77,18 @@ def test_hours_tick_reschedules_even_when_logging_fails(timers, monkeypatch):
 def test_hours_tick_refreshes_a_token_that_would_expire_mid_tick(timers, monkeypatch):
     lefts = iter([100.0, 30000.0])
     refreshed, seen = [], []
-    monkeypatch.setattr(app, "_token_seconds_left", lambda: next(lefts))
-    monkeypatch.setattr(app, "_refresh_oauth_token", lambda: refreshed.append(1) or True)
+    monkeypatch.setattr(app.auth, "token_seconds_left", lambda: next(lefts))
+    monkeypatch.setattr(app.auth, "refresh_token", lambda: refreshed.append(1) or True)
     monkeypatch.setattr(app, "_cached_five_hour_pct", lambda: 10.0)
     monkeypatch.setattr(app.person_hours, "run_tick", lambda now, gates: seen.append(gates))
     app._hours_tick()
     assert refreshed == [1] and seen[0]["token_seconds_left"] == 30000.0
 
 
-def test_hours_tick_ignores_auth_dead_after_a_relogin(timers, monkeypatch):
+def test_hours_tick_passes_whether_the_credentials_were_refused(timers, monkeypatch):
     seen = []
-    monkeypatch.setattr(app, "_auth_dead", True)
-    monkeypatch.setattr(app, "_auth_dead_creds_sig", ("old",))
-    monkeypatch.setattr(app, "_credentials_signature", lambda: ("new",))
+    monkeypatch.setattr(app.auth, "rejected", lambda: True)
     monkeypatch.setattr(app, "_cached_five_hour_pct", lambda: 10.0)
     monkeypatch.setattr(app.person_hours, "run_tick", lambda now, gates: seen.append(gates))
     app._hours_tick()
-    assert seen[0]["auth_dead"] is False
+    assert seen[0]["auth_dead"] is True

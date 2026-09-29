@@ -1,6 +1,8 @@
-"""Shared fixtures. Every test gets its own throwaway usage DB, so none can touch data/usage.db."""
+"""Shared fixtures. Every test gets its own throwaway usage DB, settings file and Claude
+credentials path, so none can touch data/ or ~/.claude."""
 import pytest
 
+import auth
 import db
 import ingest
 import person_hours
@@ -21,6 +23,17 @@ def isolated_settings(tmp_path, monkeypatch):
     """Settings live in a per-test file, so every test starts from the defaults."""
     path = tmp_path / "settings.json"
     monkeypatch.setattr(settings, "SETTINGS_PATH", path)
+    return path
+
+
+@pytest.fixture(autouse=True)
+def isolated_credentials(tmp_path, monkeypatch):
+    """Point auth at a per-test credentials file (absent until a test writes one) and reset its state."""
+    path = tmp_path / "credentials.json"
+    monkeypatch.setattr(auth, "CREDENTIALS_FILE", path)
+    monkeypatch.setattr(auth, "_auth_dead", False)
+    monkeypatch.setattr(auth, "_auth_dead_creds_sig", None)
+    monkeypatch.setattr(auth, "_last_token_refresh_attempt", 0.0)
     return path
 
 
