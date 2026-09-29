@@ -989,3 +989,52 @@ body {
   .session-row { grid-template-columns: auto 1fr auto auto auto; }
   .session-hours { display: none; }
 }
+
+/* ─── Settings panel ─── */
+.btn-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255,245,235,0.05);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  padding: 7px;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+.btn-icon:hover { background: rgba(255,245,235,0.1); color: var(--text-primary); }
+.btn-icon:focus-visible,
+.panel-close:focus-visible,
+.setting-row input:focus-visible { outline: 2px solid var(--claude-orange); outline-offset: 2px; }
+.settings-section { display: flex; flex-direction: column; gap: 14px; margin-bottom: 28px; }
+.settings-heading { font-family: var(--font-display); font-size: 0.85rem; font-weight: 600; }
+.setting-row { display: flex; gap: 12px; align-items: flex-start; cursor: pointer; }
+.setting-row input {
+  margin-top: 3px;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--claude-orange);
+  flex-shrink: 0;
+}
+.setting-name { display: block; font-size: 0.85rem; color: var(--text-primary); }
+.setting-help {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-top: 2px;
+}
+.setting-error { font-size: 0.75rem; color: var(--claude-red); }
+.setting-error:empty { display: none; }
+.diagnostics {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  background: rgba(255,245,235,0.04);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

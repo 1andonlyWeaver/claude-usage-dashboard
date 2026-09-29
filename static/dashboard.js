@@ -1447,6 +1447,93 @@ async function loadPanelHours(sessionId) {
 function closePanel() {
   document.getElementById('sessionPanel').classList.remove('open');
   document.getElementById('panelOverlay').classList.remove('open');
+  closeSettings();
+}
+
+// ─── Settings panel ──────────────────────────────────────────
+let _settingsReturnFocus = null;
+
+// While the modal is open, keep keyboard focus out of the page behind it.
+function setBackgroundInert(on) {
+  for (const el of document.querySelectorAll('.header, .main, #authBanner, #authLive, #ingestBanner, #sessionPanel')) {
+    el.inert = on;
+  }
+}
+
+async function openSettings() {
+  _settingsReturnFocus = document.activeElement;
+  const panel = document.getElementById('settingsPanel');
+  panel.inert = false;
+  panel.classList.add('open');
+  document.getElementById('panelOverlay').classList.add('open');
+  setBackgroundInert(true);
+  document.getElementById('settingsError').textContent = '';
+  panel.querySelector('.panel-close').focus();
+  try {
+    const [s, c] = await Promise.all([apiFetch('/api/settings'), apiFetch('/api/connection')]);
+    document.getElementById('setJudge').checked = s.judge_enabled;
+    document.getElementById('setRenew').checked = s.auto_refresh_token;
+    showDiagnostics(c);
+  } catch (e) {
+    document.getElementById('settingsError').textContent = "Couldn't load settings.";
+  }
+}
+
+function closeSettings() {
+  const panel = document.getElementById('settingsPanel');
+  if (!panel.classList.contains('open')) return;
+  panel.classList.remove('open');
+  panel.inert = true;
+  setBackgroundInert(false);
+  document.getElementById('panelOverlay').classList.remove('open');
+  if (_settingsReturnFocus) _settingsReturnFocus.focus();
+}
+
+function showDiagnostics(c) {
+  document.getElementById('connSummary').textContent = c.title;
+  // The quota poll calls this every 5 s. Rewriting identical text would wipe the selection
+  // that copyDiagnostics leaves for a blocked clipboard.
+  const pre = document.getElementById('connDiagnostics');
+  if (pre.textContent !== c.diagnostics) pre.textContent = c.diagnostics;
+}
+
+async function saveSetting(key, input) {
+  const err = document.getElementById('settingsError');
+  err.textContent = '';
+  input.disabled = true;
+  try {
+    const s = await apiFetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ [key]: input.checked }),
+    });
+    input.checked = s[key];
+    if (key === 'judge_enabled' && costUnit === 'hours') loadHours();
+    if (key === 'auto_refresh_token') fetchQuota();
+  } catch (e) {
+    input.checked = !input.checked;
+    err.textContent = "Couldn't save that setting.";
+  } finally {
+    input.disabled = false;
+    input.focus();
+  }
+}
+
+async function copyDiagnostics(btn) {
+  const pre = document.getElementById('connDiagnostics');
+  try {
+    await navigator.clipboard.writeText(pre.textContent);
+    btn.textContent = 'Copied';
+  } catch (e) {
+    // Clipboard blocked: select the text so Ctrl+C works.
+    const range = document.createRange();
+    range.selectNodeContents(pre);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    btn.textContent = 'Press Ctrl+C to copy';
+  }
+  setTimeout(() => { btn.textContent = 'Copy diagnostics'; }, 2000);
 }
 
 // ─── Cost ────────────────────────────────────────────────────
@@ -1496,10 +1583,10 @@ function setCostUnit(unit) {
 const HOURS_PAUSE_TEXT = {
   quota: 'Paused: 5-hour quota ≥ 80%',
   auth: 'Paused: sign in to Claude Code to resume',
-  token: 'Paused until the login token refreshes',
+  token: 'Paused until Claude Code renews its sign-in token',
   ingest: 'Paused while session files are parsed',
   failing: 'Paused: recent estimate calls failed; retrying hourly',
-  disabled: 'Paused: estimates are turned off on this server',
+  disabled: 'Estimates are off. Turn them on in Settings.',
 };
 
 function fmtHoursNum(h) {
