@@ -709,8 +709,10 @@ _worker = {"reason": None, "last_tick": None, "failed_in_a_row": 0}
 
 
 def skip_reason(*, cli_found, auth_dead, ingest_running, five_hour_pct, token_seconds_left,
-                calls_last_hour):
+                calls_last_hour, enabled=True):
     """Why this tick shouldn't call the judge, or None to go ahead. First match wins."""
+    if not enabled:  # the person hasn't opted in: judging spends their quota
+        return "disabled"
     if not cli_found:
         return "unavailable"
     if auth_dead or token_seconds_left is None:  # before quota: a stale quota % hides "sign in"
@@ -749,9 +751,9 @@ def worker_status(counts: dict) -> dict:
 def run_tick(now: datetime, gates: dict, runner=None, now_fn=datetime.now) -> dict:
     """One worker pass: queue quiet session-days, then judge within the hourly budget.
 
-    `gates` carries the server's state: auth_dead, ingest_running, five_hour_pct and
-    token_seconds_left. Queuing still happens while paused, so provisional numbers know
-    which session-days are scheduled runs.
+    `gates` carries the server's state: enabled (the person opted in), auth_dead,
+    ingest_running, five_hour_pct and token_seconds_left. Queuing still happens while paused,
+    so provisional numbers know which session-days are scheduled runs.
 
     After STOP_AFTER_FAILURES failed calls in a row it judges at most one session-day an
     hour (reason "failing" in between) until one succeeds, so a broken CLI or login can't

@@ -12,7 +12,7 @@ import urllib.error
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.requests import Request
@@ -63,7 +63,8 @@ _usage_cache: dict = {
 }
 _fetch_lock = asyncio.Lock()  # prevents concurrent API calls when cache is stale
 
-# Person-hours judge worker. PERSON_HOURS_WORKER=off disables it (e.g. for a test server).
+# PERSON_HOURS_WORKER=off stops the judge worker entirely (no queueing either), e.g. for a
+# test server. Otherwise it runs, and judges only once the person opts in (settings.py).
 HOURS_WORKER_ENABLED = os.environ.get("PERSON_HOURS_WORKER", "on").lower() not in ("0", "off", "false")
 _hours_lock = threading.Lock()
 
@@ -422,35 +423,47 @@ def _connection() -> dict:
                                             auto_refresh=settings.get("auto_refresh_token"))}
 
 
+def _judge_enabled() -> bool:
+    """Judge calls happen only when the person opted in and PERSON_HOURS_WORKER allows it."""
+    return HOURS_WORKER_ENABLED and settings.get("judge_enabled")
+
+
+def _hours_pass():
+    """One judge-worker pass. Skipped if another pass is still running."""
+    if not _hours_lock.acquire(blocking=False):
+        return
+    try:
+        left = auth.token_seconds_left()
+        if (settings.get("auto_refresh_token") and left is not None
+                and left < person_hours.TOKEN_MIN_SECONDS):
+            # Renew here, in the process that already owns token renewal, so the CLI
+            # never starts a call on a token it would have to renew itself.
+            auth.refresh_token()
+            left = auth.token_seconds_left()
+        person_hours.run_tick(datetime.now(), {
+            "enabled": _judge_enabled(),
+            # A re-login rewrites the credentials file; don't stay paused until a
+            # quota poll happens to notice.
+            "auth_dead": auth.rejected(),
+            "ingest_running": bool(_ingest_status.get("running")),
+            "five_hour_pct": _cached_five_hour_pct(),
+            "token_seconds_left": left,
+        })
+    except Exception as ex:
+        print(f"[hours {datetime.now():%Y-%m-%d %H:%M:%S}] tick failed - "
+              f"{type(ex).__name__}: {ex}")
+    finally:
+        _hours_lock.release()
+
+
 def _hours_tick():
-    """Judge queued session-days for the person-hours view, then reschedule.
+    """Run a judge-worker pass, then reschedule.
 
     Like _periodic_ingest, it reschedules in an outer finally: under the launcher, stdout is
     a strict cp1252 file, so even logging a failure can raise.
     """
     try:
-        if _hours_lock.acquire(blocking=False):
-            try:
-                left = auth.token_seconds_left()
-                if (settings.get("auto_refresh_token") and left is not None
-                        and left < person_hours.TOKEN_MIN_SECONDS):
-                    # Refresh here, in the process that already owns token refresh, so the CLI
-                    # never starts a call on a token it would have to refresh itself.
-                    auth.refresh_token()
-                    left = auth.token_seconds_left()
-                person_hours.run_tick(datetime.now(), {
-                    # A re-login rewrites the credentials file; don't stay paused until a
-                    # quota poll happens to notice.
-                    "auth_dead": auth.rejected(),
-                    "ingest_running": bool(_ingest_status.get("running")),
-                    "five_hour_pct": _cached_five_hour_pct(),
-                    "token_seconds_left": left,
-                })
-            except Exception as ex:
-                print(f"[hours {datetime.now():%Y-%m-%d %H:%M:%S}] tick failed - "
-                      f"{type(ex).__name__}: {ex}")
-            finally:
-                _hours_lock.release()
+        _hours_pass()
     finally:
         t = threading.Timer(person_hours.TICK_SECONDS, _hours_tick)
         t.daemon = True
@@ -547,6 +560,26 @@ async def connection_renew():
     return {"renewed": renewed, **_connection()}
 
 
+@app.get("/api/settings")
+def get_settings():
+    return settings.load()
+
+
+@app.post("/api/settings")
+def post_settings(changes: dict = Body(...)):
+    """Change settings. Takes effect at once: both are read live."""
+    before = settings.load()
+    try:
+        after = settings.update(changes)
+    except ValueError as ex:
+        raise HTTPException(400, str(ex))
+    if after["judge_enabled"] and not before["judge_enabled"] and HOURS_WORKER_ENABLED:
+        threading.Thread(target=_hours_pass, daemon=True).start()  # don't wait 5 minutes
+    if after["auto_refresh_token"] != before["auto_refresh_token"]:
+        _usage_cache["retry_after"] = 0.0  # re-check the token under the new rule
+    return after
+
+
 @app.get("/api/ingest-status")
 async def ingest_status():
     return _ingest_status
@@ -619,7 +652,7 @@ def hours(days: int = 30):
     with closing(db.get_conn()) as conn:
         counts = person_hours.queue_counts(conn)
     worker = person_hours.worker_status(counts)
-    if not HOURS_WORKER_ENABLED:
+    if not _judge_enabled():
         worker = {**worker, "state": "paused", "reason": "disabled"}
     data["worker"] = worker
     return data

@@ -75,7 +75,7 @@ def test_hours_tick_reschedules_even_when_logging_fails(timers, monkeypatch):
     assert not app._hours_lock.locked()
 
 
-def test_hours_tick_refreshes_a_token_that_would_expire_mid_tick(timers, monkeypatch):
+def test_hours_pass_renews_a_token_that_would_expire_mid_tick_when_allowed(timers, monkeypatch):
     settings.update({"auto_refresh_token": True})
     lefts = iter([100.0, 30000.0])
     refreshed, seen = [], []
@@ -94,3 +94,32 @@ def test_hours_tick_passes_whether_the_credentials_were_refused(timers, monkeypa
     monkeypatch.setattr(app.person_hours, "run_tick", lambda now, gates: seen.append(gates))
     app._hours_tick()
     assert seen[0]["auth_dead"] is True
+
+
+def test_hours_pass_leaves_the_token_alone_in_read_only_mode(timers, monkeypatch):
+    seen = []
+    monkeypatch.setattr(app.auth, "token_seconds_left", lambda: 100.0)
+    monkeypatch.setattr(app.auth, "refresh_token", lambda force=False: pytest.fail("renewed"))
+    monkeypatch.setattr(app, "_cached_five_hour_pct", lambda: 10.0)
+    monkeypatch.setattr(app.person_hours, "run_tick", lambda now, gates: seen.append(gates))
+    app._hours_tick()
+    assert seen[0]["token_seconds_left"] == 100.0
+
+
+def test_hours_pass_passes_the_judge_setting(timers, monkeypatch):
+    seen = []
+    monkeypatch.setattr(app, "HOURS_WORKER_ENABLED", True)
+    monkeypatch.setattr(app, "_cached_five_hour_pct", lambda: 10.0)
+    monkeypatch.setattr(app.person_hours, "run_tick", lambda now, gates: seen.append(gates))
+    app._hours_pass()
+    settings.update({"judge_enabled": True})
+    app._hours_pass()
+    assert [g["enabled"] for g in seen] == [False, True]
+
+
+def test_hours_endpoint_reports_disabled_until_opted_in(conn, monkeypatch):
+    monkeypatch.setattr(app, "HOURS_WORKER_ENABLED", True)
+    monkeypatch.setitem(ph._worker, "reason", None)
+    assert app.hours(30)["worker"]["reason"] == "disabled"
+    settings.update({"judge_enabled": True})
+    assert app.hours(30)["worker"]["state"] == "idle"
