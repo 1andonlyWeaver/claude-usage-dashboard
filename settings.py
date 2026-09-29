@@ -6,6 +6,7 @@ quota poll or judge tick without a restart. Reads are a few a minute; no cache n
 """
 import json
 import threading
+import time
 
 import paths
 
@@ -16,7 +17,7 @@ DEFAULTS = {
     "auto_refresh_token": False,  # renewing rewrites ~/.claude/.credentials.json: opt-in
 }
 
-_write_lock = threading.Lock()
+_lock = threading.RLock()
 
 
 def load() -> dict:
@@ -24,14 +25,15 @@ def load() -> dict:
 
     A missing or unreadable file, or a stored value of the wrong type, gives the default.
     """
-    try:
-        stored = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        stored = {}
-    if not isinstance(stored, dict):
-        stored = {}
-    return {key: stored[key] if type(stored.get(key)) is type(default) else default
-            for key, default in DEFAULTS.items()}
+    with _lock:
+        try:
+            stored = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            stored = {}
+        if not isinstance(stored, dict):
+            stored = {}
+        return {key: stored[key] if type(stored.get(key)) is type(default) else default
+                for key, default in DEFAULTS.items()}
 
 
 def get(key: str):
@@ -45,10 +47,19 @@ def update(changes: dict) -> dict:
             raise ValueError(f"unknown setting: {key}")
         if type(value) is not type(DEFAULTS[key]):
             raise ValueError(f"{key} must be {type(DEFAULTS[key]).__name__}")
-    with _write_lock:
+    with _lock:
         merged = {**load(), **changes}
         SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp = SETTINGS_PATH.with_name(SETTINGS_PATH.name + ".tmp")
         tmp.write_text(json.dumps(merged, indent=2), encoding="utf-8")
-        tmp.replace(SETTINGS_PATH)
+        # Retry replace on PermissionError: Windows may refuse to replace if antivirus/indexer has the file open
+        for attempt in range(5):
+            try:
+                tmp.replace(SETTINGS_PATH)
+                break
+            except PermissionError:
+                if attempt < 4:
+                    time.sleep(0.02)
+                else:
+                    raise
     return merged

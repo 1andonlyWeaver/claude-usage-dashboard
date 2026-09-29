@@ -1,4 +1,5 @@
 import json
+import threading
 
 import pytest
 
@@ -34,3 +35,33 @@ def test_unreadable_file_or_wrong_types_fall_back_to_defaults(isolated_settings)
     isolated_settings.write_text(json.dumps({"judge_enabled": "true", "auto_refresh_token": True}),
                                  encoding="utf-8")
     assert settings.load() == {"judge_enabled": False, "auto_refresh_token": True}
+
+
+def test_concurrent_read_write_stress():
+    """Stress test: tight-loop readers + frequent writers must not crash with PermissionError."""
+    stop_event = threading.Event()
+    exceptions = []
+
+    def reader_loop():
+        try:
+            while not stop_event.is_set():
+                settings.load()
+        except Exception as e:
+            exceptions.append(("reader", e))
+
+    reader = threading.Thread(target=reader_loop, daemon=True)
+    reader.start()
+
+    # Main thread: update ~100 times, alternating True/False
+    for i in range(100):
+        try:
+            value = bool(i % 2)
+            settings.update({"judge_enabled": value})
+        except Exception as e:
+            exceptions.append(("writer", e))
+
+    stop_event.set()
+    reader.join()
+
+    assert exceptions == [], f"Concurrent access raised exceptions: {exceptions}"
+    assert settings.load()["judge_enabled"] is True  # Last write was i=99 (odd, so True)
