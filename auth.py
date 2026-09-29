@@ -5,6 +5,7 @@ The usage API needs the access token Claude Code keeps in that file. This module
 it, renews it when asked, and tracks whether the stored credentials have been refused.
 """
 import json
+import subprocess
 import threading
 import time
 import urllib.error
@@ -14,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 CREDENTIALS_FILE = Path.home() / ".claude" / ".credentials.json"
+INSTALL_DOCS_URL = "https://code.claude.com/docs/en/setup"
 
 # OAuth token refresh — reverse-engineered from public Claude Code clients.
 # If Anthropic changes these, refresh will fail and the dashboard falls back to
@@ -212,3 +214,100 @@ def token_seconds_left() -> float | None:
     if not oauth.get("accessToken"):
         return None
     return (oauth.get("expiresAt") or 0) / 1000 - time.time()
+
+
+# ─── Connection status ───────────────────────────────────────
+def _clock(ts: float, now: float) -> str:
+    """'3:12 AM' for today, 'Sep 28, 3:12 AM' for another day, in local time."""
+    dt = datetime.fromtimestamp(ts)
+    t = dt.strftime("%I:%M %p").lstrip("0")
+    return t if dt.date() == datetime.fromtimestamp(now).date() else f"{dt:%b} {dt.day}, {t}"
+
+
+def connection_status(*, creds, creds_exists, cli_path, rejected, last_error, last_ok_at,
+                      now) -> dict:
+    """Plain-language state of the dashboard's link to the person's Claude account.
+
+    creds: parsed credentials JSON, or None when the file is missing or unreadable.
+    creds_exists: whether the credentials file exists at all.
+    cli_path: the claude CLI, or None. Signing in needs it.
+    rejected: auth.rejected(). last_error: the usage cache's error, None after a good fetch.
+    last_ok_at, now: epoch seconds.
+    The first matching state wins; see the spec's "Connection status" table.
+    """
+    oauth = (creds or {}).get("claudeAiOauth") or {}
+    expires_at = oauth["expiresAt"] / 1000 if oauth.get("expiresAt") else None
+    sign_in = ["sign-in"] if cli_path else ["install"]
+
+    def result(state, title, detail="", actions=()):
+        return {"state": state, "title": title, "detail": detail, "actions": list(actions),
+                "token_expires_at": expires_at, "last_ok_at": last_ok_at, "last_error": last_error}
+
+    if not oauth.get("accessToken"):
+        if not creds_exists and not cli_path:
+            return result("not-installed", "Claude Code isn't set up on this PC.",
+                          "Install Claude Code and sign in. The dashboard connects on its own after that.",
+                          ["install"])
+        if creds_exists and creds is None:
+            detail = "The Claude credentials file couldn't be read."
+        elif creds_exists:
+            detail = ("The Claude credentials file holds no sign-in. The Claude desktop app "
+                      "can keep its sign-in to itself and leave this file empty.")
+        else:
+            detail = "Sign in to Claude Code to see your quota."
+        return result("signed-out", "Not signed in to Claude Code.", detail, sign_in)
+    if rejected or last_error == "login-required":
+        return result("login-required", "Your Claude sign-in has expired.",
+                      "Sign in again to bring back the quota gauges.", sign_in)
+    if expires_at is not None and expires_at <= now:
+        return result("token-expired", f"Your sign-in token expired at {_clock(expires_at, now)}.",
+                      "It renews the next time you use Claude Code. Quota figures are paused until then.",
+                      ["renew", "sign-in"] if cli_path else ["renew"])
+    if last_error and last_error not in AUTH_ERRORS:
+        since = f"Showing figures from {_clock(last_ok_at, now)}. " if last_ok_at else ""
+        return result("unavailable", "Couldn't reach Anthropic for quota figures.",
+                      f"{since}Retrying automatically.")
+    return result("connected", "Connected to Claude.")
+
+
+def diagnostics(status: dict, *, cli_path, auto_refresh: bool, login_running: bool) -> str:
+    """A plain-text summary a person can paste into a message. Never includes a token."""
+    def when(ts):
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "never"
+    try:
+        creds_line = f"{CREDENTIALS_FILE} (modified {when(CREDENTIALS_FILE.stat().st_mtime)})"
+    except OSError:
+        creds_line = f"{CREDENTIALS_FILE} (missing)"
+    return "\n".join([
+        "Claude Usage Dashboard diagnostics",
+        f"State: {status['state']}",
+        f"Token expires: {when(status['token_expires_at']) if status['token_expires_at'] else 'unknown'}",
+        f"Last successful quota fetch: {when(status['last_ok_at'])}",
+        f"Last error: {status['last_error'] or 'none'}",
+        f"Claude CLI: {cli_path or 'not found'}",
+        f"Credentials file: {creds_line}",
+        f"Automatic token renewal: {'on' if auto_refresh else 'off'}",
+        f"Sign-in window open: {'yes' if login_running else 'no'}",
+    ])
+
+
+# ─── Signing in ──────────────────────────────────────────────
+_login_proc = None  # the `claude auth login` console, while one is open
+
+
+def login_running() -> bool:
+    return _login_proc is not None and _login_proc.poll() is None
+
+
+def launch_login(cli: str) -> bool:
+    """Open `claude auth login` in its own console window. False if one is still open.
+
+    The dashboard needs nothing back from the process: a successful sign-in rewrites the
+    credentials file, and the next quota poll notices.
+    """
+    global _login_proc
+    if login_running():
+        return False
+    _login_proc = subprocess.Popen([cli, "auth", "login", "--claudeai"],
+                                   creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+    return True

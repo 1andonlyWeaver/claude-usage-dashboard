@@ -34,6 +34,7 @@ def isolated_credentials(tmp_path, monkeypatch):
     monkeypatch.setattr(auth, "_auth_dead", False)
     monkeypatch.setattr(auth, "_auth_dead_creds_sig", None)
     monkeypatch.setattr(auth, "_last_token_refresh_attempt", 0.0)
+    monkeypatch.setattr(auth, "_login_proc", None)
     return path
 
 
@@ -48,7 +49,8 @@ def conn(isolated_db):
 
 @pytest.fixture(autouse=True)
 def no_real_cli(monkeypatch):
-    """No test may spawn the real claude CLI: it would spend quota."""
+    """No test may start a real process: the claude CLI would spend quota or open a sign-in window."""
     def forbidden(*args, **kwargs):
         pytest.fail("a test tried to run a real subprocess")
     monkeypatch.setattr(person_hours.subprocess, "run", forbidden)
+    monkeypatch.setattr(person_hours.subprocess, "Popen", forbidden)

@@ -1,10 +1,11 @@
 import json
 import time
+from datetime import datetime
 
 import pytest
 
 import auth
-from helpers import FakeResponse, fake_urlopen, http_error, write_credentials
+from helpers import FakePopen, FakeResponse, fake_urlopen, http_error, write_credentials
 
 
 def test_token_seconds_left(isolated_credentials):
@@ -102,3 +103,85 @@ def test_forced_refresh_skips_the_throttle_and_the_refused_flag(isolated_credent
     assert auth.refresh_token() is False and calls == []  # background renewal waits for a new file
     assert auth.refresh_token(force=True) is True and len(calls) == 1
     assert not auth.rejected()
+
+
+NOW = datetime(2026, 9, 29, 9, 0).timestamp()
+
+
+def creds(token="tok", expires_in=3600, expiry=True):
+    oauth = {"accessToken": token}
+    if expiry:
+        oauth["expiresAt"] = (NOW + expires_in) * 1000
+    return {"claudeAiOauth": oauth}
+
+
+BASE = dict(creds=creds(), creds_exists=True, cli_path="C:/claude.exe", rejected=False,
+            last_error=None, last_ok_at=NOW - 60, now=NOW)
+
+
+@pytest.mark.parametrize("change, state, actions", [
+    ({}, "connected", []),
+    ({"creds": creds(expiry=False)}, "connected", []),  # no-expiry
+    ({"creds": None, "creds_exists": False, "cli_path": None}, "not-installed", ["install"]),
+    ({"creds": None, "creds_exists": False}, "signed-out", ["sign-in"]),
+    ({"creds": creds(token="")}, "signed-out", ["sign-in"]),
+    ({"creds": None}, "signed-out", ["sign-in"]),
+    ({"creds": creds(token=""), "cli_path": None}, "signed-out", ["install"]),
+    ({"rejected": True}, "login-required", ["sign-in"]),
+    ({"last_error": "login-required"}, "login-required", ["sign-in"]),
+    ({"creds": creds(expires_in=-60)}, "token-expired", ["renew", "sign-in"]),
+    ({"creds": creds(expires_in=-60), "cli_path": None}, "token-expired", ["renew"]),
+    ({"creds": creds(expires_in=-60), "rejected": True}, "login-required", ["sign-in"]),
+    ({"last_error": "rate-limited"}, "unavailable", []),
+    ({"last_error": "http-503"}, "unavailable", []),
+])
+def test_connection_states(change, state, actions):
+    out = auth.connection_status(**{**BASE, **change})
+    assert (out["state"], out["actions"]) == (state, actions)
+    assert out["title"]
+
+
+def test_signed_out_detail_explains_a_blank_or_unreadable_file():
+    blank = auth.connection_status(**{**BASE, "creds": creds(token="")})
+    assert "desktop app" in blank["detail"]
+    unreadable = auth.connection_status(**{**BASE, "creds": None})
+    assert "couldn't be read" in unreadable["detail"]
+
+
+def test_unavailable_says_how_old_the_figures_are():
+    out = auth.connection_status(**{**BASE, "last_error": "rate-limited",
+                                    "last_ok_at": datetime(2026, 9, 29, 8, 42).timestamp()})
+    assert "8:42 AM" in out["detail"]
+
+
+def test_clock_adds_the_date_for_another_day():
+    ts = datetime(2026, 9, 29, 3, 12).timestamp()
+    assert auth._clock(ts, NOW) == "3:12 AM"
+    assert auth._clock(ts, datetime(2026, 9, 30, 9, 0).timestamp()) == "Sep 29, 3:12 AM"
+
+
+def test_diagnostics_never_include_tokens(isolated_credentials):
+    write_credentials(isolated_credentials, token="sk-ant-oat-SECRET", refresh="sk-ant-ort-SECRET")
+    status = auth.connection_status(**BASE)
+    text = auth.diagnostics(status, cli_path="C:/claude.exe", auto_refresh=False, login_running=False)
+    assert "SECRET" not in text
+    assert "State: connected" in text and str(isolated_credentials) in text
+
+
+def test_sign_in_opens_one_console_at_a_time(monkeypatch):
+    FakePopen.launched = []
+    monkeypatch.setattr(auth.subprocess, "Popen", FakePopen)
+    assert auth.launch_login("C:/claude.exe") is True
+    assert auth.launch_login("C:/claude.exe") is False
+    assert FakePopen.launched == [["C:/claude.exe", "auth", "login", "--claudeai"]]
+    assert auth.login_running()
+
+
+def test_sign_in_can_be_retried_after_the_console_closes(monkeypatch):
+    FakePopen.launched = []
+    monkeypatch.setattr(auth.subprocess, "Popen", FakePopen)
+    auth.launch_login("C:/claude.exe")
+    auth._login_proc.returncode = 1  # closed without signing in
+    assert not auth.login_running()
+    assert auth.launch_login("C:/claude.exe") is True
+    assert len(FakePopen.launched) == 2

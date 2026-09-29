@@ -59,6 +59,7 @@ _usage_cache: dict = {
     "error": None,       # last error string if data is None
     "fail_count": 0,     # consecutive failure count for exponential backoff
     "creds_sig": None,   # credentials-file signature seen on the last poll
+    "last_ok_at": None,  # wall-clock time of the last successful fetch
 }
 _fetch_lock = asyncio.Lock()  # prevents concurrent API calls when cache is stale
 
@@ -69,6 +70,7 @@ _hours_lock = threading.Lock()
 # Seed in-memory cache from disk on startup so restarts don't lose last known quota
 try:
     _saved = json.loads(QUOTA_CACHE_FILE.read_text())
+    _usage_cache["last_ok_at"] = _saved.get("time")
     if time.time() - _saved.get("time", 0) < QUOTA_CACHE_MAX_STALE:
         _usage_cache["data"] = _saved["data"]
         # Mark as stale so the next request will refresh, but non-None so fallback works
@@ -355,6 +357,7 @@ async def _get_usage_data() -> dict:
             cache["retry_after"] = 0.0
             cache["error"] = None
             cache["fail_count"] = 0
+            cache["last_ok_at"] = time.time()
             try:
                 QUOTA_CACHE_FILE.write_text(json.dumps({"data": parsed, "time": time.time()}))
             except Exception:
@@ -401,6 +404,19 @@ def _cached_five_hour_pct() -> float | None:
         return _bound_stale_quota(data, time.monotonic() - _usage_cache["fetched_at"]).get("five_hour_pct")
     disk = _read_disk_cache_data()
     return disk.get("five_hour_pct") if disk else None
+
+
+def _connection() -> dict:
+    """The connection status for the banner, the settings panel and (later) the tray."""
+    cli = person_hours.find_claude_cli()
+    status = auth.connection_status(
+        creds=auth.read_credentials(), creds_exists=auth.CREDENTIALS_FILE.exists(),
+        cli_path=cli, rejected=auth.rejected(), last_error=_usage_cache["error"],
+        last_ok_at=_usage_cache["last_ok_at"], now=time.time())
+    running = auth.login_running()
+    return {**status, "login_running": running, "install_url": auth.INSTALL_DOCS_URL,
+            "diagnostics": auth.diagnostics(status, cli_path=cli, login_running=running,
+                                            auto_refresh=settings.get("auto_refresh_token"))}
 
 
 def _hours_tick():
@@ -495,8 +511,37 @@ async def index(request: Request):
 
 @app.get("/api/quota")
 async def get_quota():
-    """Fetch live quota data from the Anthropic usage API."""
-    return await _get_usage_data()
+    """Live quota data from the Anthropic usage API, plus the connection status."""
+    data = await _get_usage_data()
+    return {**data, "connection": _connection()}
+
+
+@app.get("/api/connection")
+async def connection():
+    await _get_usage_data()  # so the state reflects a fetch, not just the file
+    return _connection()
+
+
+@app.post("/api/connection/login")
+def connection_login():
+    """Open `claude auth login` in a console window for the person to finish."""
+    cli = person_hours.find_claude_cli()
+    if not cli:
+        raise HTTPException(409, "Claude Code isn't installed")
+    auth.launch_login(cli)
+    return _connection()
+
+
+@app.post("/api/connection/renew")
+async def connection_renew():
+    """One token renewal the person asked for, then a fresh fetch with the result."""
+    renewed = await asyncio.get_running_loop().run_in_executor(
+        None, lambda: auth.refresh_token(force=True))
+    if renewed:
+        _usage_cache["retry_after"] = 0.0
+        _usage_cache["fetched_at"] = 0.0
+    await _get_usage_data()
+    return {"renewed": renewed, **_connection()}
 
 
 @app.get("/api/ingest-status")

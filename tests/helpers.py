@@ -163,3 +163,15 @@ def fake_urlopen(responses):
             raise item
         return item
     return urlopen, calls
+
+
+class FakePopen:
+    """subprocess.Popen stand-in. Set .returncode to simulate the process exiting."""
+    launched = []
+
+    def __init__(self, args, **kwargs):
+        FakePopen.launched.append(args)
+        self.returncode = None
+
+    def poll(self):
+        return self.returncode
