@@ -4,6 +4,7 @@ import pytest
 
 import app
 import person_hours as ph
+import settings
 from helpers import add_message
 
 
@@ -75,6 +76,7 @@ def test_hours_tick_reschedules_even_when_logging_fails(timers, monkeypatch):
 
 
 def test_hours_tick_refreshes_a_token_that_would_expire_mid_tick(timers, monkeypatch):
+    settings.update({"auto_refresh_token": True})
     lefts = iter([100.0, 30000.0])
     refreshed, seen = [], []
     monkeypatch.setattr(app.auth, "token_seconds_left", lambda: next(lefts))

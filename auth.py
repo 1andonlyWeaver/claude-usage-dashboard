@@ -23,6 +23,9 @@ OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 TOKEN_REFRESH_LEEWAY = 120        # refresh if accessToken expires within this many seconds
 TOKEN_REFRESH_MIN_INTERVAL = 60   # never attempt refresh more than once per this many seconds
 
+# usable_token statuses that mean "no token to send", as opposed to a failed request.
+AUTH_ERRORS = ("login-required", "no-credentials", "token-expired")
+
 _token_refresh_lock = threading.Lock()
 _last_token_refresh_attempt = 0.0  # monotonic time of last attempt; throttles refresh
 _auth_dead = False  # True once a refresh returns invalid_grant — refresh token revoked, re-login required
@@ -63,49 +66,60 @@ def credentials_signature() -> tuple | None:
         return None
 
 
+def mark_rejected(sig: tuple | None) -> None:
+    """Record that the credentials whose file had signature `sig` were refused.
+
+    Pass the signature taken before the token was read: if Claude Code rewrote the file
+    while the request was in flight, the refusal belongs to the old token, and rejected()
+    stays False so the next poll tries the new one.
+    """
+    global _auth_dead, _auth_dead_creds_sig
+    _auth_dead = True
+    _auth_dead_creds_sig = sig
+
+
 def rejected() -> bool:
     """True while the stored credentials are known bad: refused, and the file unchanged since."""
     return _auth_dead and credentials_signature() == _auth_dead_creds_sig
 
 
-def refresh_token() -> bool:
-    """Refresh the OAuth access token using the stored refreshToken.
+def refresh_token(force: bool = False) -> bool:
+    """Renew the access token with the stored refreshToken and rewrite the credentials file.
 
-    Calls Anthropic's OAuth token endpoint and rewrites ~/.claude/.credentials.json
-    with the new accessToken/expiresAt on success. Throttled to one attempt per
-    TOKEN_REFRESH_MIN_INTERVAL seconds to prevent tight loops if refresh fails.
-    Returns True on success.
+    Background callers are throttled to one attempt per TOKEN_REFRESH_MIN_INTERVAL and
+    wait for the file to change once a refresh token has been refused. force (the Renew
+    now button) skips both: a person asked for exactly one attempt. Returns True on success.
     """
     global _last_token_refresh_attempt, _auth_dead, _auth_dead_creds_sig
     with _token_refresh_lock:
-        if _auth_dead:
-            if credentials_signature() == _auth_dead_creds_sig:
-                # The stored refresh token is expired and nothing has rewritten the
-                # credentials file since we learned that. Re-POSTing it every minute can
-                # only fail again — wait for `claude auth login` to replace the file.
+        if not force:
+            if _auth_dead:
+                if credentials_signature() == _auth_dead_creds_sig:
+                    # Refused, and nothing has rewritten the file since. Re-POSTing the same
+                    # refresh token can only fail again: wait for a sign-in to replace it.
+                    return False
+                # The file changed, so a sign-in may have landed. Retry now rather than
+                # waiting out the throttle left over from the last doomed attempt.
+                _auth_dead = False
+                _auth_dead_creds_sig = None
+                _last_token_refresh_attempt = 0.0
+            if time.monotonic() - _last_token_refresh_attempt < TOKEN_REFRESH_MIN_INTERVAL:
                 return False
-            # Credentials changed on disk, so a re-login may have landed. Retry now rather
-            # than waiting out the throttle left over from the last doomed attempt.
-            _auth_dead = False
-            _auth_dead_creds_sig = None
-            _last_token_refresh_attempt = 0.0
-        now = time.monotonic()
-        if now - _last_token_refresh_attempt < TOKEN_REFRESH_MIN_INTERVAL:
-            return False
-        _last_token_refresh_attempt = now
+        _last_token_refresh_attempt = time.monotonic()
 
+        sig = credentials_signature()  # before reading: see mark_rejected
         creds = read_credentials()
         if not creds:
             return False
         oauth = creds.get("claudeAiOauth") or {}
-        refresh_token = oauth.get("refreshToken")
-        if not refresh_token:
+        stored_refresh = oauth.get("refreshToken")
+        if not stored_refresh:
             return False
 
         body = urllib.parse.urlencode({
             "grant_type": "refresh_token",
             "client_id": OAUTH_CLIENT_ID,
-            "refresh_token": refresh_token,
+            "refresh_token": stored_refresh,
         }).encode("utf-8")
         # claude.ai is behind Cloudflare and 403s the default Python-urllib User-Agent.
         # Mimic a generic browser-ish UA so the request gets through.
@@ -133,8 +147,7 @@ def refresh_token() -> bool:
             # invalid_grant (or 401) means the stored refresh token is revoked/expired:
             # no amount of retrying will help — the user must re-login via the CLI.
             if "invalid_grant" in body or e.code == 401:
-                _auth_dead = True
-                _auth_dead_creds_sig = credentials_signature()
+                mark_rejected(sig)
             return False
         except Exception as ex:
             print(f"[oauth {ts}] refresh failed: {ex}")
@@ -162,38 +175,35 @@ def refresh_token() -> bool:
         return True
 
 
-def read_oauth_token() -> tuple[str | None, str]:
-    """Return (accessToken, status), refreshing pre-emptively if it's about to expire.
+def usable_token(auto_refresh: bool) -> tuple[str | None, str]:
+    """(access token, status) for a usage-API call. The token is None unless status is 'ok'.
 
-    status is one of:
-      'ok'             — a usable token is available
-      'login-required' — token is expired and the refresh token is dead (re-login needed)
-      'no-credentials' — no credentials file or no stored token
+    status is 'ok' or one of AUTH_ERRORS:
+      'no-credentials' — no credentials file, or no token in it
+      'login-required' — the stored credentials were refused (see rejected())
+      'token-expired'  — the token has expired and wasn't renewed
+
+    Read-only unless auto_refresh: an expired token is reported, never renewed or sent.
+    The usage API answers an expired token with 429 rather than 401, which used to show
+    up as rate limiting. A token with no expiresAt is tried; the API decides.
     """
-    global _auth_dead, _auth_dead_creds_sig
-    creds = read_credentials()
-    if not creds:
-        return None, "no-credentials"
-    oauth = creds.get("claudeAiOauth") or {}
+    oauth = (read_credentials() or {}).get("claudeAiOauth") or {}
     token = oauth.get("accessToken")
     if not token:
         return None, "no-credentials"
-    expires_at_ms = oauth.get("expiresAt") or 0
-    seconds_left = (expires_at_ms / 1000) - time.time()
+    if rejected():
+        return None, "login-required"
+    expires_at_ms = oauth.get("expiresAt")
+    if not expires_at_ms:
+        return token, "ok"
+    seconds_left = expires_at_ms / 1000 - time.time()
     if seconds_left >= TOKEN_REFRESH_LEEWAY:
-        _auth_dead = False  # comfortably-valid token present; clear any stale dead-token flag
-        _auth_dead_creds_sig = None
         return token, "ok"
-    # Expired or near-expiry — attempt a refresh (throttled internally).
-    if refresh_token():
-        creds = read_credentials() or {}
-        token = (creds.get("claudeAiOauth") or {}).get("accessToken")
-        return token, "ok"
-    # Refresh didn't succeed. If the token is actually expired and the refresh token is
-    # known-dead, the user must re-login; otherwise keep using the still-valid token.
-    if seconds_left < 0 and _auth_dead:
-        return token, "login-required"
-    return token, "ok"
+    if auto_refresh and refresh_token():
+        return (read_credentials() or {}).get("claudeAiOauth", {}).get("accessToken"), "ok"
+    if seconds_left > 0:
+        return token, "ok"  # close to expiry, but still good for this call
+    return None, "login-required" if rejected() else "token-expired"
 
 
 def token_seconds_left() -> float | None:

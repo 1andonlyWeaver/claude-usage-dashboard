@@ -22,6 +22,7 @@ import auth
 import db
 import paths
 import person_hours
+import settings
 
 BASE_DIR = paths.RESOURCE_DIR  # static/ and templates/
 
@@ -57,6 +58,7 @@ _usage_cache: dict = {
     "retry_after": 0.0,  # monotonic time before which we should not retry
     "error": None,       # last error string if data is None
     "fail_count": 0,     # consecutive failure count for exponential backoff
+    "creds_sig": None,   # credentials-file signature seen on the last poll
 }
 _fetch_lock = asyncio.Lock()  # prevents concurrent API calls when cache is stale
 
@@ -165,13 +167,13 @@ def _fetch_usage_sync(_already_retried: bool = False) -> dict:
     On rate-limit: {"ok": False, "error": "rate-limited", "retry_after": <seconds>}
     On other failure: {"ok": False, "error": "<message>", "retry_after": None}
 
-    On 401, attempts a one-shot OAuth refresh and retries the request once.
+    Without a usable token the error is auth.usable_token's status and nothing is sent.
+    A 401 means the stored token was refused: with automatic renewal on, renew once and
+    retry; otherwise record the refusal so the dashboard asks the person to sign in.
     """
-    token, auth_status = auth.read_oauth_token()
-    if auth_status == "login-required":
-        # Access token expired and refresh token is dead — calling the API just yields a
-        # 429/401 that masks the real cause, so surface the actionable error directly.
-        return {"ok": False, "error": "login-required", "retry_after": None}
+    auto = settings.get("auto_refresh_token")
+    sig = auth.credentials_signature()  # the file this token comes from, for mark_rejected
+    token, auth_status = auth.usable_token(auto_refresh=auto)
     if not token:
         return {"ok": False, "error": auth_status, "retry_after": None}
 
@@ -204,10 +206,13 @@ def _fetch_usage_sync(_already_retried: bool = False) -> dict:
                 retry_secs = 300
             print(f"[quota {ts}] 429 - Retry-After: {retry_after_raw!r}, all headers: {all_headers}")
             return {"ok": False, "error": "rate-limited", "retry_after": retry_secs}
-        if e.code == 401 and not _already_retried:
-            print(f"[quota {ts}] HTTP 401 - attempting OAuth refresh")
-            if auth.refresh_token():
-                return _fetch_usage_sync(_already_retried=True)
+        if e.code == 401:
+            if auto and not _already_retried:
+                print(f"[quota {ts}] HTTP 401 - attempting OAuth refresh")
+                if auth.refresh_token():
+                    return _fetch_usage_sync(_already_retried=True)
+            elif not auto:
+                auth.mark_rejected(sig)
             if auth.rejected():
                 return {"ok": False, "error": "login-required", "retry_after": None}
         print(f"[quota {ts}] HTTP {e.code}")
@@ -270,6 +275,20 @@ def _read_disk_cache_data() -> dict | None:
         return None
 
 
+def _retry_now_if_credentials_changed(cache: dict) -> None:
+    """Drop a credentials-related backoff as soon as the credentials file changes.
+
+    Signing in, or Claude Code renewing its token, rewrites the file. Checking it on each
+    5-second poll picks the new token up at once instead of after AUTH_RETRY. Backoffs
+    for other failures (rate limits, network) are left alone.
+    """
+    sig = auth.credentials_signature()
+    if sig != cache.get("creds_sig"):
+        cache["creds_sig"] = sig
+        if cache.get("error") in (*auth.AUTH_ERRORS, "http-401"):
+            cache["retry_after"] = 0.0
+
+
 async def _get_usage_data() -> dict:
     """Return cached usage data, refreshing from the API when the cache is stale.
 
@@ -279,6 +298,7 @@ async def _get_usage_data() -> dict:
     """
     now = time.monotonic()
     cache = _usage_cache
+    _retry_now_if_credentials_changed(cache)
 
     # Return in-memory cache if still fresh
     if cache["data"] and (now - cache["fetched_at"]) < CACHE_MAX_AGE:
@@ -348,7 +368,7 @@ async def _get_usage_data() -> dict:
             # don't benefit from long waits and may resolve on the next poll).
             cache["fail_count"] = cache.get("fail_count", 0) + 1
             api_retry = result.get("retry_after") or 0
-            if result.get("error") in ("login-required", "no-credentials"):
+            if result.get("error") in auth.AUTH_ERRORS:
                 # Auth errors resolve via re-login, not waiting. Re-check often and cheaply
                 # (the dead-token short-circuit spends no network) so recovery is near-automatic.
                 backoff = AUTH_RETRY
@@ -393,7 +413,8 @@ def _hours_tick():
         if _hours_lock.acquire(blocking=False):
             try:
                 left = auth.token_seconds_left()
-                if left is not None and left < person_hours.TOKEN_MIN_SECONDS:
+                if (settings.get("auto_refresh_token") and left is not None
+                        and left < person_hours.TOKEN_MIN_SECONDS):
                     # Refresh here, in the process that already owns token refresh, so the CLI
                     # never starts a call on a token it would have to refresh itself.
                     auth.refresh_token()
@@ -438,9 +459,9 @@ async def startup():
         thread.start()
     else:
         _ingest_status["done"] = True
-    # Pre-refresh the OAuth token so the first /api/quota poll doesn't pay the latency
-    # (or fail with 401 when the token expired while the machine was off).
-    threading.Thread(target=auth.read_oauth_token, daemon=True).start()
+    if settings.get("auto_refresh_token"):
+        # Renew a token that expired while the machine was off, before the first poll needs it.
+        threading.Thread(target=auth.usable_token, args=(True,), daemon=True).start()
     t = threading.Timer(90, _periodic_ingest)
     t.daemon = True
     t.start()
