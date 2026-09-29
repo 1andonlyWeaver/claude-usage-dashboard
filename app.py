@@ -21,9 +21,10 @@ from fastapi.requests import Request
 from fastapi.responses import JSONResponse
 
 import db
+import paths
 import person_hours
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = paths.RESOURCE_DIR  # static/ and templates/
 CREDENTIALS_FILE = Path.home() / ".claude" / ".credentials.json"
 
 USAGE_API_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -32,7 +33,7 @@ CACHE_MAX_AGE = 360       # seconds before re-fetching
 CACHE_MIN_RETRY = 300     # minimum seconds between failed attempts (5 min)
 CACHE_MAX_RETRY = 3600    # maximum retry backoff (1 hour)
 AUTH_RETRY = 30           # short backoff for auth errors (login-required) so re-login is picked up quickly
-QUOTA_CACHE_FILE = Path(__file__).parent / "data" / "quota_cache.json"
+QUOTA_CACHE_FILE = paths.DATA_DIR / "quota_cache.json"
 QUOTA_CACHE_MAX_STALE = 600  # seconds: accept disk-cached data up to 10 min old on startup
 # A quota percentage describes a fixed rolling window, so a cached figure is wrong — not
 # merely stale — once that window has rolled over. _bound_stale_quota normally decides that
@@ -605,6 +606,7 @@ def _hours_tick():
 @app.on_event("startup")
 async def startup():
     """Kick off ingest if DB is missing or stale, then schedule periodic ingest and judging."""
+    paths.DATA_DIR.mkdir(parents=True, exist_ok=True)  # the quota cache write assumes it exists
     stats = db.db_stats()
     if stats.get("exists"):
         # Existing DBs get newer tables (person_hour_estimates) before any request or the
@@ -867,8 +869,8 @@ if __name__ == "__main__":
 
     # When launched via pythonw.exe, stdout/stderr are None — redirect to log file
     if sys.stdout is None or sys.stderr is None:
-        log_dir = BASE_DIR / "logs"
-        log_dir.mkdir(exist_ok=True)
+        log_dir = paths.LOG_DIR
+        log_dir.mkdir(parents=True, exist_ok=True)
         log_file = open(log_dir / "dashboard.log", "a", buffering=1)
         sys.stdout = log_file
         sys.stderr = log_file
