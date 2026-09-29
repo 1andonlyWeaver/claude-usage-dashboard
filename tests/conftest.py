@@ -4,6 +4,7 @@ import pytest
 import db
 import ingest
 import person_hours
+import settings
 
 
 @pytest.fixture(autouse=True)
@@ -12,6 +13,14 @@ def isolated_db(tmp_path, monkeypatch):
     path = tmp_path / "usage.db"
     monkeypatch.setattr(db, "DB_PATH", path)
     monkeypatch.setattr(ingest, "DB_PATH", path)
+    return path
+
+
+@pytest.fixture(autouse=True)
+def isolated_settings(tmp_path, monkeypatch):
+    """Settings live in a per-test file, so every test starts from the defaults."""
+    path = tmp_path / "settings.json"
+    monkeypatch.setattr(settings, "SETTINGS_PATH", path)
     return path
 
 
