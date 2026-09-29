@@ -11,6 +11,7 @@ import urllib.request
 import urllib.error
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
 
 from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
@@ -44,6 +45,37 @@ SEVEN_DAY_WINDOW = 7 * 24 * 3600
 app = FastAPI(title="Claude Usage Dashboard")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
+
+LOCAL_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def _blocked(method: str, host: str | None, origin: str | None) -> str | None:
+    """Why the local server should refuse a request, or None to serve it.
+
+    The Host must name this machine: a DNS-rebinding page reaches 127.0.0.1 under its own
+    hostname, so this keeps other sites from reading the API. A state-changing request
+    that carries an Origin must come from the dashboard's own origin. Browsers attach
+    Origin to every cross-site POST, so a web page can't press Sign in or change settings;
+    curl and scripts send no Origin and keep working.
+    """
+    try:
+        hostname = urlsplit("//" + (host or "")).hostname
+    except ValueError:
+        hostname = None
+    if hostname not in LOCAL_HOSTNAMES:
+        return "host not allowed"
+    if method not in SAFE_METHODS and origin is not None and origin != f"http://{host}":
+        return "cross-origin request refused"
+    return None
+
+
+@app.middleware("http")
+async def _local_only(request: Request, call_next):
+    reason = _blocked(request.method, request.headers.get("host"), request.headers.get("origin"))
+    if reason:
+        return JSONResponse({"detail": reason}, status_code=403)
+    return await call_next(request)
 
 # Ingest state. _ingest_lock is held for the whole of every ingest run (periodic, startup,
 # or /api/refresh), so two runs never write to the DB at once.

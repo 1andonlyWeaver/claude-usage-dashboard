@@ -73,7 +73,6 @@ Running from source doesn't change: `python app.py --port 8080` and the Task Sch
   - Chart.js is vendored into `static/vendor/` (MIT) and the fonts into `static/fonts/` (OFL).
   - The connection banner is rebuilt from `/api/connection`.
   - A settings panel, opened from a gear icon, holds the judge toggle, the automatic refresh toggle, connection diagnostics, and the version/update notice.
-  - Mutating requests send the per-launch token, read from a `<meta>` tag.
 
 ## Connection status
 
@@ -108,8 +107,10 @@ Behavior that fixes today's confusing symptoms:
 
 The app can now launch processes. Without a guard, a web page open in the user's browser could trigger them by POSTing to `127.0.0.1`. The guard has two checks:
 
-- Every `/api/*` request must carry a `Host` of `127.0.0.1:<port>` or `localhost:<port>`. This blocks DNS rebinding.
-- Every non-GET request must carry `X-App-Token`: a random value generated at launch and injected into the page.
+- Every request must carry a `Host` of `127.0.0.1`, `localhost` or `[::1]` (any port). This blocks DNS rebinding.
+- Every state-changing request (not GET, HEAD or OPTIONS) that carries an `Origin` must come from the dashboard's own origin (`http://<Host>`). Browsers attach `Origin` to every cross-site POST, so a web page can't trigger Sign in or change settings. curl and scripts send no `Origin` and keep working, so `curl -X POST http://127.0.0.1:8080/api/refresh` still does.
+
+This replaces the per-launch `X-App-Token` header first planned, which would have broken the curl recovery steps for no extra protection.
 
 ## Packaging and release
 
@@ -157,7 +158,7 @@ Unit tests (pytest), added with the phase that introduces each piece:
 - `connection_status()` across all six states, including the blank-token file.
 - A changed credentials signature clears the backoff.
 - No usage-API call is made when `expiresAt` has passed.
-- The guard returns 403 for a foreign `Host` and for a POST without the token.
+- The guard returns 403 for a foreign `Host` and for a cross-origin POST, and serves an Origin-less POST.
 - Settings defaults and live reads.
 - `paths` when frozen and from source, by monkeypatching `sys.frozen` and `sys._MEIPASS`.
 - Parsing `wsl -l -q` UTF-16 output.
