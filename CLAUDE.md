@@ -17,6 +17,8 @@ conda activate claude-usage-dashboard && python app.py --port 8080
 # Serves at http://127.0.0.1:8080/
 ```
 
+`environment.yml` installs `requirements.txt` (the pinned runtime packages) plus the test tools. When you upgrade a runtime package, change its pin in `requirements.txt`.
+
 Manual ingest only (without starting the server):
 ```bash
 conda activate claude-usage-dashboard && python ingest.py
@@ -39,6 +41,8 @@ auth.py      Claude Code OAuth token — reads ~/.claude/.credentials.json, rene
 paths.py     Where bundled files, data and logs live (repo when run from source, %LOCALAPPDATA% when frozen; CUD_DATA_DIR overrides data)
 settings.py  User settings in data/settings.json: judge opt-in, automatic token renewal
 applog.py    The log file: opens logs/dashboard.log as UTF-8, rotates it at 5 MB, makes print() safe on any stdout
+version.py   __version__, a bare release number (2.0.0) shown in Settings and the diagnostics
+requirements.txt  Pinned runtime packages for the release build; environment.yml installs it too
 tests/       pytest suite
 templates/   Jinja2 HTML (single index.html)
 static/      dashboard.js (Chart.js, quota polling), style.css (glassmorphism dark theme)

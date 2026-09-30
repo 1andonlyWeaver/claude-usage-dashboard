@@ -24,6 +24,7 @@ import db
 import paths
 import person_hours
 import settings
+import version
 
 BASE_DIR = paths.RESOURCE_DIR  # static/ and templates/
 
@@ -50,7 +51,7 @@ async def _lifespan(_app):
     yield
 
 
-app = FastAPI(title="Claude Usage Dashboard", lifespan=_lifespan)
+app = FastAPI(title="Claude Usage Dashboard", version=version.__version__, lifespan=_lifespan)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
@@ -587,7 +588,8 @@ def _asset_url(rel_path: str) -> str:
 
 @app.get("/")
 async def index(request: Request):
-    return templates.TemplateResponse(request, "index.html", {"asset_url": _asset_url})
+    return templates.TemplateResponse(request, "index.html",
+                                      {"asset_url": _asset_url, "version": version.__version__})
 
 
 @app.get("/api/quota")

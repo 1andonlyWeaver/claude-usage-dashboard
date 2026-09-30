@@ -7,8 +7,5 @@ dependencies:
   - pip
   - pytest
   - pip:
-    - fastapi
-    - uvicorn[standard]
-    - jinja2
-    - orjson
-    - httpx2
+    - -r requirements.txt
+    - httpx2  # tests only: starlette's TestClient

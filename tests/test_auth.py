@@ -6,6 +6,7 @@ from datetime import datetime
 import pytest
 
 import auth
+import version
 from helpers import FakePopen, FakeResponse, fake_urlopen, http_error, write_credentials
 
 
@@ -268,3 +269,10 @@ def test_redact_hides_token_text():
     text = auth.redact("Invalid header value b'Bearer sk-ant-oat-ABC123' then sk-ant-ort_X-9")
     assert "ABC123" not in text and "X-9" not in text
     assert "Bearer sk-ant-" in text
+
+
+def test_diagnostics_name_the_app_version():
+    status = auth.connection_status(**BASE)
+    text = auth.diagnostics(status, cli_path=None, auto_refresh=False, login_running=False)
+    assert text.splitlines()[:2] == ["Claude Usage Dashboard diagnostics",
+                                     f"App version: {version.__version__}"]

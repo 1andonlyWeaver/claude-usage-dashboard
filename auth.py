@@ -15,6 +15,8 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
+import version
+
 CREDENTIALS_FILE = Path.home() / ".claude" / ".credentials.json"
 INSTALL_DOCS_URL = "https://code.claude.com/docs/en/setup"
 
@@ -304,6 +306,7 @@ def diagnostics(status: dict, *, cli_path, auto_refresh: bool, login_running: bo
         creds_line = f"{CREDENTIALS_FILE} (missing)"
     return "\n".join([
         "Claude Usage Dashboard diagnostics",
+        f"App version: {version.__version__}",
         f"State: {status['state']}",
         f"Token expires: {when(status['token_expires_at']) if status['token_expires_at'] else 'unknown'}",
         f"Last successful quota fetch: {when(status['last_ok_at'])}",

@@ -1,0 +1,6 @@
+# Runtime packages, pinned for the release build. environment.yml installs this file too,
+# so a source run and the build use the same versions.
+fastapi==0.142.2
+uvicorn==0.54.0
+jinja2==3.1.6
+orjson==3.12.0
