@@ -17,7 +17,8 @@ def test_version_is_a_bare_release_number():
 def test_runtime_requirements_are_pinned():
     lines = (REPO / "requirements.txt").read_text(encoding="utf-8").splitlines()
     reqs = [line.strip() for line in lines if line.strip() and not line.startswith("#")]
-    assert {r.split("==")[0].lower() for r in reqs} == {"fastapi", "uvicorn", "jinja2", "orjson"}
+    assert {r.split("==")[0].lower() for r in reqs} == {"fastapi", "uvicorn", "jinja2", "orjson",
+                                                          "pywebview", "pystray", "pillow"}
     for req in reqs:
         assert re.fullmatch(r"[A-Za-z0-9_.\-]+==\d[\w.]*", req), req
 

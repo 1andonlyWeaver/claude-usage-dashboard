@@ -17,7 +17,7 @@ conda activate claude-usage-dashboard && python app.py --port 8080
 # Serves at http://127.0.0.1:8080/
 ```
 
-`environment.yml` installs `requirements.txt` (the pinned runtime packages) plus the test tools. When you upgrade a runtime package, change its pin in `requirements.txt`.
+`environment.yml` installs `requirements.txt` (the pinned runtime packages) plus the test tools. When you upgrade a runtime package, change its pin in `requirements.txt`. An env created before the desktop packages (pywebview, pystray, Pillow) were pinned needs `pip install -r requirements.txt` inside the activated env.
 
 Manual ingest only (without starting the server):
 ```bash
@@ -42,6 +42,7 @@ paths.py     Where bundled files, data and logs live (repo when run from source,
 settings.py  User settings in data/settings.json: judge opt-in, automatic token renewal
 autostart.py  Start at login for the desktop app: the HKCU Run value, and Task Manager's StartupApproved switch for it
 instance.py  One desktop app per Windows session: the Local\ClaudeUsageDashboard mutex, data/runtime.json (port, pid), proxy-free calls to the app's own server
+tray.py      The desktop app's tray icon (pystray): menu, amber attention dot, one notification when the sign-in needs the person; polls /api/connection every 30 s
 applog.py    The log file: opens logs/dashboard.log as UTF-8, rotates it at 5 MB, makes print() safe on any stdout
 version.py   __version__, a bare release number (2.0.0) shown in Settings and the diagnostics
 requirements.txt  Pinned runtime packages for the release build; environment.yml installs it too
