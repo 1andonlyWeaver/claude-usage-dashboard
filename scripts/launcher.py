@@ -1,7 +1,8 @@
 """
 Launcher for the Claude usage dashboard server.
 Intended to be run via pythonw.exe from Windows Task Scheduler at login.
-Checks if port 8080 is already in use before starting, logs to logs/dashboard.log.
+Checks if port 8080 is already in use before starting, logs to logs/dashboard.log
+(UTF-8; moved to dashboard.log.1 at startup once it passes 5 MB).
 
 The server is bound to a Windows Job Object (KILL_ON_JOB_CLOSE) so that whenever
 this launcher exits — including when Task Scheduler stops the task — the OS tears
@@ -18,7 +19,10 @@ from datetime import datetime
 from pathlib import Path
 
 REPO_DIR = Path(__file__).parent.parent
-LOG_FILE = REPO_DIR / "logs" / "dashboard.log"
+sys.path.insert(0, str(REPO_DIR))  # Task Scheduler runs this file directly; the repo isn't on sys.path
+import applog  # noqa: E402
+
+LOG_FILE = applog.LOG_FILE
 PORT = 8080
 
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
@@ -28,7 +32,7 @@ JobObjectExtendedLimitInformation = 9
 def log(msg: str):
     LOG_FILE.parent.mkdir(exist_ok=True)
     timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
-    with open(LOG_FILE, "a") as f:
+    with open(LOG_FILE, "a", encoding="utf-8", errors="backslashreplace") as f:
         f.write(f"{timestamp} {msg}\n")
 
 
@@ -113,6 +117,7 @@ def bind_to_kill_on_close_job(proc) -> "wintypes.HANDLE | None":
         return None
 
 
+applog.rotate()  # before this run's first line, so the whole run lands in one file
 if port_in_use(PORT):
     log(f"Port {PORT} already in use — skipping startup.")
     sys.exit(0)
@@ -125,7 +130,7 @@ log("Starting dashboard server...")
 proc = subprocess.Popen(
     [sys.executable, "app.py", "--port", str(PORT)],
     cwd=str(REPO_DIR),
-    stdout=open(LOG_FILE, "a"),
+    stdout=applog.open_log(),
     stderr=subprocess.STDOUT,
 )
 # Bind the child to a kill-on-close job so stopping this launcher (e.g. via

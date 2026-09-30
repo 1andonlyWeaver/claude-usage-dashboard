@@ -131,7 +131,7 @@ This replaces the per-launch `X-App-Token` header first planned, which would hav
   6. Smoke-test the frozen exe with `--smoke`.
   7. `gh release create` with `ClaudeUsageDashboard-Setup-<ver>.exe` attached.
 - **`--smoke`** starts the server on a free port, GETs `/` and `/api/connection`, and exits 0 or 1.
-- **Logging when frozen**: UTF-8 `LOG_DIR/dashboard.log`, rotated to `.1` at startup once it passes 5 MB. Opening the log as UTF-8 avoids the cp1252 encoding failures the launcher has today.
+- **Logging**: UTF-8 `LOG_DIR/dashboard.log`, rotated to `.1` at startup once it passes 5 MB (`applog.py`). This applies to the frozen app and to source runs under the launcher or `pythonw`. Opening the log as UTF-8 avoids the cp1252 encoding failures the launcher used to have.
 - **Docs**
   - `LICENSE` (MIT).
   - `README.md` for colleagues: what the app is, requirements (Windows 10/11, Claude Code installed and signed in), how to install, getting past SmartScreen ("More info", then "Run anyway"), what the judge costs, and where data lives.

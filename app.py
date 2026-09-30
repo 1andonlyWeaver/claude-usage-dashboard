@@ -197,8 +197,8 @@ def _periodic_ingest():
             finally:
                 _ingest_lock.release()
     finally:
-        # Reschedule no matter what, even if logging itself fails (under the launcher,
-        # stdout is a strict cp1252 file), or periodic ingest stops until a restart.
+        # Reschedule no matter what, even if logging itself fails, or periodic ingest
+        # stops until a restart.
         t = threading.Timer(90, _periodic_ingest)
         t.daemon = True
         t.start()
@@ -525,8 +525,8 @@ def _hours_pass():
 def _hours_tick():
     """Run a judge-worker pass, then reschedule.
 
-    Like _periodic_ingest, it reschedules in an outer finally: under the launcher, stdout is
-    a strict cp1252 file, so even logging a failure can raise.
+    Like _periodic_ingest, it reschedules in an outer finally, so not even a failure while
+    logging a failure can stop the worker.
     """
     try:
         _hours_pass()
@@ -844,17 +844,19 @@ async def window(
 
 
 if __name__ == "__main__":
-    import sys
-    import uvicorn
     import argparse
+    import sys
 
-    # When launched via pythonw.exe, stdout/stderr are None — redirect to log file
+    import uvicorn
+
+    import applog
+
     if sys.stdout is None or sys.stderr is None:
-        log_dir = paths.LOG_DIR
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = open(log_dir / "dashboard.log", "a", buffering=1)
-        sys.stdout = log_file
-        sys.stderr = log_file
+        # pythonw.exe starts with no stdout/stderr: log to the file instead
+        sys.stdout = sys.stderr = applog.open_log()
+    else:
+        # A console is fine as it is, but a file handed over by the launcher opens as cp1252
+        applog.utf8_stdio()
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8080)

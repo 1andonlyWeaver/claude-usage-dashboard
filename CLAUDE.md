@@ -38,13 +38,14 @@ person_hours.py  Person-hours judge — one-day transcript summaries, `claude -p
 auth.py      Claude Code OAuth token — reads ~/.claude/.credentials.json, renews it on request, connection status, sign-in launcher
 paths.py     Where bundled files, data and logs live (repo when run from source, %LOCALAPPDATA% when frozen; CUD_DATA_DIR overrides data)
 settings.py  User settings in data/settings.json: judge opt-in, automatic token renewal
+applog.py    The log file: opens logs/dashboard.log as UTF-8, rotates it at 5 MB, makes print() safe on any stdout
 tests/       pytest suite
 templates/   Jinja2 HTML (single index.html)
 static/      dashboard.js (Chart.js, quota polling), style.css (glassmorphism dark theme)
 data/        usage.db — auto-created on first run; not committed
 scripts/     launcher.py (Task Scheduler entry point — port check, spawns server, stays alive so TS tracks it)
              register-task.ps1 (one-time setup), start-dashboard.bat (legacy manual launcher)
-logs/        dashboard.log — server output when run via Task Scheduler; not committed
+logs/        dashboard.log — server output under Task Scheduler or pythonw, UTF-8; moved to dashboard.log.1 at startup once past 5 MB; not committed
 ```
 
 **Data flow**: JSONL session files (top-level + subagent transcripts) → `ingest.py` → `data/usage.db` → `db.py` queries → FastAPI endpoints → `dashboard.js` charts
