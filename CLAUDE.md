@@ -33,7 +33,7 @@ conda activate claude-usage-dashboard && python -m pytest
 ## Architecture
 
 ```
-app.py       FastAPI server — 20 API endpoints, local-only request guard, background ingest and person-hours threads, serves templates/
+app.py       FastAPI server — 22 API endpoints, local-only request guard, background ingest and person-hours threads, serves templates/
 db.py        SQLite query layer — pricing constants, token aggregations, cost calculations, person-hours figures
 ingest.py    ETL pipeline — scans ~/.claude/projects/**/*.jsonl, deduplicates, writes to SQLite
 person_hours.py  Person-hours judge — one-day transcript summaries, `claude -p` (Sonnet) calls, queue, worker gating, CLI
@@ -189,11 +189,13 @@ The cost card's `$ | h` toggle shows estimated person-hours: how long a competen
 
 ## API Endpoints
 
-`/api/quota`, `/api/connection`, `/api/connection/login` (POST), `/api/connection/renew` (POST), `/api/settings` (GET/POST), `/api/ingest-status`, `/api/refresh` (POST), `/api/daily`, `/api/projects`, `/api/models`, `/api/heatmap`, `/api/sessions`, `/api/session/{id}`, `/api/session/{id}/hours`, `/api/rate`, `/api/cost`, `/api/hours`, `/api/sources`, `/api/stats`, `/api/window`
+`/api/quota`, `/api/connection`, `/api/connection/login` (POST), `/api/connection/renew` (POST), `/api/settings` (GET/POST), `/api/ingest-status`, `/api/refresh` (POST), `/api/daily`, `/api/projects`, `/api/models`, `/api/heatmap`, `/api/sessions`, `/api/session/{id}`, `/api/session/{id}/hours`, `/api/rate`, `/api/cost`, `/api/hours`, `/api/sources`, `/api/stats`, `/api/window`, `/api/app/info`, `/api/app/show` (POST)
 
 `/api/hours?days=30` returns person-hours for the cost card's `h` view: interactive hours (judged + provisional), scheduled runs, active hours, leverage, hours by project, the judge model, and the `worker` state. `/api/session/{id}/hours` returns per-day person-hours for the drill-down panel. `/api/sessions` rows carry `person_hours` and `hours_status` (`done` / `provisional` / `partial`; null for Desktop sessions).
 
 `/api/connection` returns the connection state with `title`, `detail`, `actions` (`install` / `sign-in` / `renew`), `login_running` and a token-free `diagnostics` text. `/api/connection/login` opens `claude auth login --claudeai` in a console window, one at a time (409 without the CLI, 500 with the reason if Windows won't start it). `/api/connection/renew` makes one forced token renewal. `/api/settings` reads or changes `judge_enabled` and `auto_refresh_token` (400 on unknown keys or non-boolean values).
+
+`/api/app/info` names the program on the port (`name`, `version`, `desktop`, `pid`, `data_dir`, `log_dir`). `/api/app/show` brings the desktop window forward; a second launch of the desktop app calls it. It answers 409 when `app.py` runs on its own, with no window attached.
 
 `/api/window?type=5h|7d&group_by=none|token_type|project|model` — token buckets within the current quota window (5-min or 60-min buckets).
 
