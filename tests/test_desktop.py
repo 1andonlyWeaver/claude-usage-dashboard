@@ -1,4 +1,5 @@
 """The desktop entry point: port choice, the server thread, the window's rules, and --smoke."""
+import platform
 import socket
 
 import pytest
@@ -7,6 +8,22 @@ import app
 import desktop
 
 URL = "http://127.0.0.1:8765/"
+
+# uvicorn calls platform.system() on its server thread. The first call in a process asks WMI,
+# and when that fails or times out it runs `ver` as a subprocess, which the autouse guard in
+# conftest.py turns into a failure. Answer it now, at collection, before any guard is installed.
+platform.uname()
+
+
+@pytest.fixture(autouse=True)
+def isolated_quota_state(tmp_path, monkeypatch):
+    """The smoke tests call /api/connection for real, which reads and updates the quota cache.
+
+    Give each test its own copy of the in-memory cache and a disk cache under tmp_path, so
+    nothing reads data/quota_cache.json or leaves fail_count and retry_after behind.
+    """
+    monkeypatch.setattr(app, "_usage_cache", dict(app._usage_cache))
+    monkeypatch.setattr(app, "QUOTA_CACHE_FILE", tmp_path / "quota_cache.json")
 
 
 def free_port():
