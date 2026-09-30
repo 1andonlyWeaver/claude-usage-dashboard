@@ -48,7 +48,7 @@ That costs quota from your plan: about 1–2% of a week's quota to catch up on t
 
 ## Where your data lives
 
-Running from source, it all stays in the repo folder. `data\` holds the database, a quota cache and your settings, and `logs\dashboard.log` is the server's log. The installed app will keep the same files under `%LOCALAPPDATA%\ClaudeUsageDashboard`.
+Running from source, it all stays in the repo folder. `data\` holds the database, a quota cache and your settings. The server prints its log to the console you started it from; started without a console (with `pythonw`), it writes to `logs\dashboard.log` instead. The installed app will keep the same files under `%LOCALAPPDATA%\ClaudeUsageDashboard`.
 
 Think twice before deleting `data\usage.db`. The dashboard rebuilds it from your logs on the next start, but Claude Code deletes logs older than 30 days by default, so anything older is gone for good, person-hours estimates included.
 
