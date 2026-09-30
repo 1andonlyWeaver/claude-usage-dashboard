@@ -39,10 +39,11 @@ ingest.py    ETL pipeline — scans ~/.claude/projects/**/*.jsonl, deduplicates,
 person_hours.py  Person-hours judge — one-day transcript summaries, `claude -p` (Sonnet) calls, queue, worker gating, CLI
 auth.py      Claude Code OAuth token — reads ~/.claude/.credentials.json, renews it on request, connection status, sign-in launcher
 paths.py     Where bundled files, data and logs live (repo when run from source, %LOCALAPPDATA% when frozen; CUD_DATA_DIR overrides data)
-settings.py  User settings in data/settings.json: judge opt-in, automatic token renewal
+settings.py  User settings in data/settings.json: judge opt-in, automatic token renewal, the desktop app's preferred_port (8765)
 autostart.py  Start at login for the desktop app: the HKCU Run value, and Task Manager's StartupApproved switch for it
 instance.py  One desktop app per Windows session: the Local\ClaudeUsageDashboard mutex, data/runtime.json (port, pid), proxy-free calls to the app's own server
 tray.py      The desktop app's tray icon (pystray): menu, amber attention dot, one notification when the sign-in needs the person; polls /api/connection every 30 s
+desktop.py   Desktop entry point: pywebview window (close hides to tray), uvicorn thread on preferred_port or a free one, tray, second-launch handoff, --background, --smoke
 applog.py    The log file: opens logs/dashboard.log as UTF-8, rotates it at 5 MB, makes print() safe on any stdout
 version.py   __version__, a bare release number (2.0.0) shown in Settings and the diagnostics
 requirements.txt  Pinned runtime packages for the release build; environment.yml installs it too

@@ -15,6 +15,7 @@ SETTINGS_PATH = paths.DATA_DIR / "settings.json"
 DEFAULTS = {
     "judge_enabled": False,       # the person-hours judge spends subscription quota: opt-in
     "auto_refresh_token": False,  # renewing rewrites ~/.claude/.credentials.json: opt-in
+    "preferred_port": 8765,       # the desktop app's first-choice port (desktop.py); no UI
 }
 
 # A virus scanner or the indexer can hold settings.json open and make the replace fail; wait it out for about 1 s.
