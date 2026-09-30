@@ -41,6 +41,7 @@ auth.py      Claude Code OAuth token — reads ~/.claude/.credentials.json, rene
 paths.py     Where bundled files, data and logs live (repo when run from source, %LOCALAPPDATA% when frozen; CUD_DATA_DIR overrides data)
 settings.py  User settings in data/settings.json: judge opt-in, automatic token renewal
 autostart.py  Start at login for the desktop app: the HKCU Run value, and Task Manager's StartupApproved switch for it
+instance.py  One desktop app per Windows session: the Local\ClaudeUsageDashboard mutex, data/runtime.json (port, pid), proxy-free calls to the app's own server
 applog.py    The log file: opens logs/dashboard.log as UTF-8, rotates it at 5 MB, makes print() safe on any stdout
 version.py   __version__, a bare release number (2.0.0) shown in Settings and the diagnostics
 requirements.txt  Pinned runtime packages for the release build; environment.yml installs it too
@@ -174,7 +175,7 @@ The cost card's `$ | h` toggle shows estimated person-hours: how long a competen
 
 ## Gotchas
 
-- **Tests never touch `data/usage.db`.** An autouse fixture in `tests/conftest.py` points `db.DB_PATH` and `ingest.DB_PATH` at a per-test temp file. `tests/conftest.py` also redirects `settings.SETTINGS_PATH` and `auth.CREDENTIALS_FILE` to per-test temp files and forbids `subprocess.run` / `subprocess.Popen`. Every test also gets an in-memory `winreg` in `autostart` (`tests/fake_winreg.py`), so none can touch the real registry.
+- **Tests never touch `data/usage.db`.** An autouse fixture in `tests/conftest.py` points `db.DB_PATH` and `ingest.DB_PATH` at a per-test temp file. `tests/conftest.py` also redirects `settings.SETTINGS_PATH` and `auth.CREDENTIALS_FILE` to per-test temp files and forbids `subprocess.run` / `subprocess.Popen`. Every test also gets an in-memory `winreg` in `autostart` (`tests/fake_winreg.py`), so none can touch the real registry. `instance.RUNTIME_FILE` points at a per-test file too.
 - **Local-only guard.** Requests whose Host isn't `127.0.0.1`, `localhost` or `[::1]` get 403, and so do state-changing requests whose `Origin` isn't the dashboard's own. curl sends no `Origin`, so `curl -X POST http://127.0.0.1:8080/api/refresh` still works.
 - **Credentials writes go through `auth.refresh_token()` only**, and it runs only when automatic renewal is on or the user clicks Renew now. Everything else reads the file.
 - **Settings file.** `settings.load()` reads `data/settings.json` on every call, so a change applies on the next quota poll or judge tick without a restart. One `RLock` guards reads and writes, and `update()` tries the file replace up to 10 times over about a second on a Windows `PermissionError` (antivirus or an indexer holding the file). A missing or unreadable file, or a stored value of the wrong type, gives the default.

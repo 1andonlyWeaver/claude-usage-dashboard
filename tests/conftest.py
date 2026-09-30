@@ -6,6 +6,7 @@ import auth
 import autostart
 import db
 import ingest
+import instance
 import person_hours
 import settings
 from fake_winreg import FakeWinreg
@@ -73,3 +74,11 @@ def fake_registry(monkeypatch):
     registry = FakeWinreg()
     monkeypatch.setattr(autostart, "winreg", registry)
     return registry
+
+
+@pytest.fixture(autouse=True)
+def isolated_runtime(tmp_path, monkeypatch):
+    """runtime.json goes to a per-test file, so no test can point a real second launch at a test server."""
+    path = tmp_path / "runtime.json"
+    monkeypatch.setattr(instance, "RUNTIME_FILE", path)
+    return path
