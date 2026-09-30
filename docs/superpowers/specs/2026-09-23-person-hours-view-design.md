@@ -177,7 +177,7 @@ claude -p --safe-mode --model sonnet --no-session-persistence --tools ""
 - CLI path: `shutil.which("claude")`, falling back to `~/.local/bin/claude.exe`. Task Scheduler's `PATH` may not include the user's.
 - From the JSON envelope (the last line that parses, if the CLI printed anything before it), store `result` (parsed), `usage` tokens, `total_cost_usd`, and the model with the most output tokens in `modelUsage`. An `is_error` envelope is recorded as `cli: <result or subtype> (HTTP <api_error_status>)`, and `stop_reason: "refusal"` as `refusal`.
 - npm `claude.cmd`/`.bat` shims are skipped, because `cmd.exe` would cut the multi-line system prompt at its first newline. The working directory is created if missing.
-- The judge inherits the server's environment minus `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK` and `CLAUDE_CODE_USE_VERTEX` (since 2026-09-30), so it always bills the subscription.
+- The judge inherits the server's environment minus `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and the `CLAUDE_CODE_USE_BEDROCK` / `_VERTEX` / `_FOUNDRY` switches (since 2026-09-30), so none of those can move the bill off the subscription. A key from Claude Code's own settings (`apiKeyHelper`) still can.
 
 ### Validation
 

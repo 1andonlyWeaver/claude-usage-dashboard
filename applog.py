@@ -3,8 +3,8 @@ The dashboard's log file, dashboard.log in paths.LOG_DIR.
 
 It's written as UTF-8. The Task Scheduler launcher used to hand the server a cp1252 file,
 where printing any character outside cp1252 raised UnicodeEncodeError in whichever thread
-was logging. At startup the log moves to dashboard.log.1 once it passes 5 MB, replacing the
-previous .1, so it can't grow without bound.
+was logging. At each start the log moves to dashboard.log.1 once it passes 5 MB, replacing the
+previous .1. One long run can still take it past 5 MB.
 """
 import os
 import sys
@@ -37,8 +37,8 @@ def open_log(path: Path = LOG_FILE):
 
 
 def utf8_stdio() -> None:
-    """Make print() write UTF-8 wherever stdout points, and never raise on a character."""
+    """Make print() write UTF-8 a line at a time wherever stdout points, and never raise on a character."""
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
-            reconfigure(encoding="utf-8", errors="backslashreplace")
+            reconfigure(encoding="utf-8", errors="backslashreplace", line_buffering=True)

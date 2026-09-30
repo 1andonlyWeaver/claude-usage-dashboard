@@ -10,7 +10,7 @@ It reads Claude Code's session logs in `%USERPROFILE%\.claude\projects`, the sam
 
 It also reads your Claude Code sign-in token from `%USERPROFILE%\.claude\.credentials.json`. The token only goes to Anthropic: to `api.anthropic.com` to read your quota percentages, and to `claude.ai` when you ask for it to be renewed. Unless you ask for a renewal, the dashboard never changes that file.
 
-Nothing else leaves your PC, and there's no analytics or telemetry. The optional person-hours estimates described below also send summaries to Claude, through your own Claude Code.
+Nothing else leaves your PC, and there's no analytics or telemetry. The optional person-hours estimates described below also send Claude an extract of each day's sessions, through your own Claude Code: your prompts and Claude's last replies, both clipped, plus the paths of files it changed and the descriptions of shell commands it ran.
 
 ## What you need
 
@@ -42,7 +42,7 @@ Settings (the gear icon) can renew the token automatically. That's off by defaul
 
 ## Person-hours estimates (off by default)
 
-The cost card can show roughly how long your work would have taken a person without AI. Turn on **Estimate person-hours** in Settings to get them. The dashboard then has Claude (Sonnet, through your Claude Code sign-in) read a summary of each day's sessions and estimate the hours.
+The cost card can show roughly how long your work would have taken a person without AI. Turn on **Estimate person-hours** in Settings to get them. The dashboard then has Claude (Sonnet, through your Claude Code sign-in) read that extract of each day's sessions and estimate the hours.
 
 That costs quota from your plan: about 1–2% of a week's quota to catch up on the last 90 days, then about 0.1–0.2% a week. It never bills an API key, even if `ANTHROPIC_API_KEY` is set on your PC. Claude's short summary of each day's work is stored with its estimate.
 

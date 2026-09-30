@@ -43,7 +43,7 @@ def test_running_distros_come_from_wsl_exe_without_a_console(monkeypatch):
     assert kw["timeout"] == 10
 
 
-def test_running_distros_are_reused_for_a_minute(monkeypatch):
+def test_running_distros_are_reused_only_briefly(monkeypatch):
     run = FakeRun(stdout=utf16("Ubuntu\r\n"))
     with_wsl(monkeypatch, run)
     clock = [1000.0]
@@ -72,16 +72,16 @@ def test_without_wsl_exe_nothing_runs():
     assert ingest.running_wsl_distros() == []
 
 
-def test_wsl_exe_is_looked_up_on_path_then_in_system32(monkeypatch, tmp_path):
-    monkeypatch.setattr(ingest.shutil, "which", lambda name: None)
+def test_wsl_exe_prefers_system32_then_path(monkeypatch, tmp_path):
     monkeypatch.setenv("SystemRoot", str(tmp_path))
+    monkeypatch.setattr(ingest.shutil, "which", lambda name: None)
     assert _real_wsl_exe() is None
+    monkeypatch.setattr(ingest.shutil, "which", lambda name: r"C:\bin\wsl.exe")
+    assert _real_wsl_exe() == r"C:\bin\wsl.exe"
     exe = tmp_path / "System32" / "wsl.exe"
     exe.parent.mkdir()
     exe.write_bytes(b"")
     assert _real_wsl_exe() == str(exe)
-    monkeypatch.setattr(ingest.shutil, "which", lambda name: r"C:\bin\wsl.exe")
-    assert _real_wsl_exe() == r"C:\bin\wsl.exe"
 
 
 def fake_shares(tmp_path, monkeypatch, running):

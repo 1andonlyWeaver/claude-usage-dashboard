@@ -31,7 +31,7 @@ DESKTOP_SESSIONS_DIR = Path(os.environ.get("APPDATA", "")) / "Claude" / "local-a
 
 # Windows shows each running WSL distro's files under both names; \\wsl$ is the older one.
 WSL_UNC_PREFIXES = (r"\\wsl.localhost", r"\\wsl$")
-WSL_CHECK_SECONDS = 60  # reuse the running-distro list this long; one ingest pass asks several times
+WSL_CHECK_SECONDS = 10  # covers the lookups inside one ingest pass; short enough that a distro stopped since is seen as stopped
 _DISTRO_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _clock = time.monotonic
 _wsl_lock = threading.Lock()
@@ -40,12 +40,12 @@ _wsl_running = []
 
 
 def _wsl_exe():
-    """Path to wsl.exe, or None on a PC without it."""
-    found = shutil.which("wsl.exe")
-    if found:
-        return found
+    """Path to wsl.exe, or None on a PC without it. System32 comes first: shutil.which
+    would also look in the current directory."""
     candidate = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "wsl.exe"
-    return str(candidate) if candidate.exists() else None
+    if candidate.exists():
+        return str(candidate)
+    return shutil.which("wsl.exe")
 
 
 def parse_wsl_list(raw: bytes) -> list:
@@ -76,7 +76,7 @@ def _query_running_distros() -> list:
 
 
 def running_wsl_distros() -> list:
-    """Names of the WSL distros running now, asked of wsl.exe at most once a minute.
+    """Names of the WSL distros running now, asked of wsl.exe at most every WSL_CHECK_SECONDS.
 
     Stopped distros are left alone on purpose: reading one through \\\\wsl.localhost starts
     it, and ingest runs every 90 s. A distro's transcripts only change while it runs, so

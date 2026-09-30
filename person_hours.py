@@ -394,8 +394,8 @@ def _parse_envelope(stdout):
 # Environment variables that point the CLI at an API account or a cloud provider instead
 # of the person's Claude subscription. The judge is opt-in on the understanding that it
 # spends subscription quota, so it never passes these on.
-BILLING_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
-               "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
+BILLING_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK",
+               "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
 
 
 def judge_env() -> dict:
@@ -411,7 +411,7 @@ def call_judge(summary_text: str, cli: str, runner=None) -> dict:
     --safe-mode keeps the user's CLAUDE.md, plugins, hooks and MCP servers out of the
     judge's context; --no-session-persistence keeps the call out of ~/.claude/projects,
     so the dashboard never ingests its own judge sessions.
-    It runs without BILLING_ENV, so it always uses the Claude subscription.
+    It runs without BILLING_ENV, so none of those variables can move the bill off the Claude subscription.
     """
     runner = runner or subprocess.run
     workdir = db.DB_PATH.parent  # the CLI needs an existing cwd; a missing one fails as WinError 267
@@ -706,7 +706,7 @@ def judge_pending(limit: int, cli: str, index: dict, runner=None, now_fn=datetim
             try:
                 print(f"[hours {datetime.now():%Y-%m-%d %H:%M:%S}] {row[0]} {row[1]}: {ex}")
             except Exception:
-                pass  # e.g. the launcher's strict cp1252 stdout
+                pass  # e.g. stdout is a closed handle
             outcome = "error"
         with guard:
             if outcome == "done":

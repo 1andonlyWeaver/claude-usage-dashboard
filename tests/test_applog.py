@@ -66,6 +66,7 @@ def test_utf8_stdio_makes_print_safe_on_a_cp1252_stream(monkeypatch):
     monkeypatch.setattr(sys, "stdout", stream)
     monkeypatch.setattr(sys, "stderr", None)  # pythonw.exe has none
     applog.utf8_stdio()
+    assert stream.line_buffering
     print("☃ 🚀")
     stream.flush()
     assert raw.getvalue().decode("utf-8").strip() == "☃ 🚀"
