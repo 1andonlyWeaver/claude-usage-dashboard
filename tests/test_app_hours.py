@@ -27,6 +27,7 @@ def timers(monkeypatch):
 
 
 def test_hours_endpoint_reports_a_disabled_worker(conn, monkeypatch):
+    settings.update({"judge_enabled": True})  # opted in, so only the env switch can disable it
     monkeypatch.setattr(app, "HOURS_WORKER_ENABLED", False)
     add_message(conn, "s1", "2026-09-20T09:00:00")
     out = app.hours(30)
