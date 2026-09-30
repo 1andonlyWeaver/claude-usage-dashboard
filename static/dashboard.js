@@ -96,41 +96,150 @@ function startQuotaPolling() {
 
 let quotaState = { five: null, seven: null };
 
+// ─── Claude connection ───────────────────────────────────────
 // Without live quota the session charts silently switch their y-axis to raw tokens, which
-// looks like a rendering quirk rather than a signed-out dashboard. Say so out loud.
-function setAuthBanner(error) {
+// looks like a rendering quirk rather than a sign-in problem. Say what's wrong and offer
+// the fix. The server decides the state (auth.connection_status); this only draws it.
+const CONNECTION_ATTENTION = new Set(['not-installed', 'signed-out', 'login-required']);
+const CONNECTION_QUIET = new Set(['connected', 'unavailable']);  // no banner for these
+let connectionState = null;
+let _connectionKey = '';   // what the banner shows; renewToken clears it to force a redraw
+let _liveKey = '';         // last real change, so a forced redraw isn't announced again
+let _liveState = null;     // state at that change; null until the first reading
+
+function renderConnection(c) {
+  connectionState = c;
+  const dot = document.getElementById('connDot');
+  dot.className = 'conn-dot ' + (c.state === 'connected' ? 'ok'
+    : CONNECTION_ATTENTION.has(c.state) ? 'bad' : 'warn');
+  dot.title = c.title;
+  if (typeof showDiagnostics === 'function' && document.getElementById('settingsPanel')?.classList.contains('open')) {
+    showDiagnostics(c);
+  }
+  // Rewrite the banner only when something changed.
+  const key = [c.state, c.title, c.detail, c.actions.join(','), c.login_running].join('|');
+  if (key === _connectionKey) return;
+  _connectionKey = key;
+  if (key !== _liveKey) {
+    announceConnection(c, _liveState);
+    _liveKey = key;
+    _liveState = c.state;
+  }
   const banner = document.getElementById('authBanner');
-  const msg = document.getElementById('authMsg');
-  if (!banner || !msg) return;
-  if (error !== 'login-required' && error !== 'no-credentials') {
-    banner.style.display = 'none';
+  const actions = document.getElementById('authActions');
+  // Rebuilding the buttons would drop keyboard focus, so remember where it was.
+  const focused = actions.contains(document.activeElement) ? document.activeElement : null;
+  const focusedAction = focused && focused.dataset.action;
+  if (CONNECTION_QUIET.has(c.state)) {
+    banner.hidden = true;
+    if (focused) document.getElementById('lastUpdated').focus();
     return;
   }
-  msg.innerHTML = error === 'no-credentials'
-    ? 'No Claude credentials found — quota is unavailable, so the session charts are '
-      + 'plotting raw tokens instead of % of quota. Sign in with <code>claude auth login</code>.'
-    : 'Signed out of the quota API (stored token expired) — the session charts are '
-      + 'plotting raw tokens instead of % of quota. Run <code>claude auth login</code>; '
-      + 'the dashboard picks the new token up within a minute.';
-  banner.style.display = 'flex';
+  banner.classList.toggle('attention', CONNECTION_ATTENTION.has(c.state));
+  document.getElementById('authTitle').textContent = c.title;
+  document.getElementById('authDetail').textContent = c.detail;
+  actions.textContent = '';
+  for (const a of c.actions) actions.append(connectionAction(a, c));
+  banner.hidden = false;
+  if (focused) {
+    (actions.querySelector(`[data-action="${focusedAction}"]`)
+      || actions.firstElementChild
+      || document.getElementById('lastUpdated')).focus();
+  }
+}
+
+// The banner comes and goes, so screen readers hear changes through #authLive, which
+// is always in the page. A recovery is announced only after a problem, not on page load.
+function announceConnection(c, prevState) {
+  let text = '';
+  if (c.state === 'connected') {
+    if (prevState && !CONNECTION_QUIET.has(prevState)) text = 'Connected to Claude.';
+  } else if (!CONNECTION_QUIET.has(c.state)) {
+    text = c.title + ' ' + c.detail;
+  }
+  setConnectionLive(text);
+}
+
+function setConnectionLive(text) {
+  const live = document.getElementById('authLive');
+  if (live.textContent !== text) live.textContent = text;
+}
+
+function connectionAction(action, c) {
+  if (action === 'install') {
+    const link = document.createElement('a');
+    link.className = 'btn-refresh';
+    link.dataset.action = 'install';
+    link.href = c.install_url;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.textContent = 'How to install Claude Code';
+    return link;
+  }
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn-refresh';
+  btn.dataset.action = action;
+  // aria-disabled, not disabled: a disabled button can't hold focus.
+  if (action === 'sign-in') {
+    btn.textContent = c.login_running ? 'Waiting for sign-in…' : 'Sign in';
+    if (c.login_running) btn.setAttribute('aria-disabled', 'true');
+    btn.addEventListener('click', signIn);
+  } else {
+    btn.textContent = 'Renew now';
+    btn.addEventListener('click', renewToken);
+  }
+  return btn;
+}
+
+async function signIn(ev) {
+  if (ev?.currentTarget?.getAttribute('aria-disabled') === 'true') return;
+  try {
+    renderConnection(await apiFetch('/api/connection/login', { method: 'POST' }));
+  } catch (e) {
+    const msg = "Couldn't open the sign-in window.";
+    document.getElementById('authDetail').textContent = msg;
+    setConnectionLive(msg);
+  }
+}
+
+async function renewToken(ev) {
+  const btn = ev.currentTarget;
+  if (btn.getAttribute('aria-disabled') === 'true') return;
+  btn.setAttribute('aria-disabled', 'true');
+  btn.textContent = 'Renewing…';
+  let renewed = false;
+  try {
+    renewed = (await apiFetch('/api/connection/renew', { method: 'POST' })).renewed;
+  } catch (e) { /* reported below */ }
+  _connectionKey = '';  // redraw the banner, which restores the button and its focus
+  await fetchQuota();
+  if (!renewed) {
+    const msg = "Couldn't renew the token. Use Sign in instead.";
+    document.getElementById('authDetail').textContent = msg;
+    setConnectionLive(msg);
+  }
 }
 
 async function fetchQuota() {
   try {
     const data = await apiFetch('/api/quota');
     const hasError = !!data.error;
-    setAuthBanner(data.error);
+    const conn = data.connection;
+    if (conn) renderConnection(conn);
     document.getElementById('gauge5h').classList.toggle('stale', hasError);
     document.getElementById('gauge7d').classList.toggle('stale', hasError);
 
     const hasData = data.five_hour_resets_at != null;
     document.getElementById('windowInfo').classList.toggle('stale', hasError);
     if (hasError) {
-      const authError = data.error === 'login-required' || data.error === 'no-credentials';
-      document.getElementById('lastUpdated').textContent = authError
-        ? '⚠ Re-login required — run "claude auth login", then press R'
-        : 'Quota unavailable: ' + data.error + (hasData ? '' : ' — retrying');
-      _setQuotaPollRate(QUOTA_POLL_ERROR);
+      // A sign-in problem is fixed by a file change the server spots on each poll, so keep
+      // polling fast; slow down only for real outages and rate limits.
+      const signInProblem = conn && !CONNECTION_QUIET.has(conn.state);
+      document.getElementById('lastUpdated').textContent = signInProblem
+        ? 'Quota paused'
+        : 'Quota unavailable, retrying';
+      _setQuotaPollRate(signInProblem ? QUOTA_POLL_NORMAL : QUOTA_POLL_ERROR);
       if (!hasData) return;
     } else {
       _setQuotaPollRate(QUOTA_POLL_NORMAL);
@@ -1338,6 +1447,103 @@ async function loadPanelHours(sessionId) {
 function closePanel() {
   document.getElementById('sessionPanel').classList.remove('open');
   document.getElementById('panelOverlay').classList.remove('open');
+  closeSettings();
+}
+
+// ─── Settings panel ──────────────────────────────────────────
+let _settingsReturnFocus = null;
+
+// While the modal is open, keep keyboard focus out of the page behind it.
+function setBackgroundInert(on) {
+  for (const el of document.querySelectorAll('.header, .main, #authBanner, #authLive, #ingestBanner, #sessionPanel')) {
+    el.inert = on;
+  }
+}
+
+async function openSettings() {
+  _settingsReturnFocus = document.activeElement;
+  const panel = document.getElementById('settingsPanel');
+  panel.inert = false;
+  panel.classList.add('open');
+  document.getElementById('panelOverlay').classList.add('open');
+  setBackgroundInert(true);
+  document.getElementById('settingsError').textContent = '';
+  setCopyResult('');
+  panel.querySelector('.panel-close').focus();
+  try {
+    const [s, c] = await Promise.all([apiFetch('/api/settings'), apiFetch('/api/connection')]);
+    document.getElementById('setJudge').checked = s.judge_enabled;
+    document.getElementById('setRenew').checked = s.auto_refresh_token;
+    showDiagnostics(c);
+  } catch (e) {
+    document.getElementById('settingsError').textContent = "Couldn't load settings.";
+  }
+}
+
+function closeSettings() {
+  const panel = document.getElementById('settingsPanel');
+  if (!panel.classList.contains('open')) return;
+  panel.classList.remove('open');
+  panel.inert = true;
+  setBackgroundInert(false);
+  document.getElementById('panelOverlay').classList.remove('open');
+  if (_settingsReturnFocus) _settingsReturnFocus.focus();
+}
+
+function showDiagnostics(c) {
+  document.getElementById('connSummary').textContent = c.title;
+  // The quota poll calls this every 5 s. Rewriting identical text would wipe the selection
+  // that copyDiagnostics leaves for a blocked clipboard.
+  const pre = document.getElementById('connDiagnostics');
+  if (pre.textContent !== c.diagnostics) pre.textContent = c.diagnostics;
+}
+
+async function saveSetting(key, input) {
+  const err = document.getElementById('settingsError');
+  err.textContent = '';
+  input.disabled = true;
+  try {
+    const s = await apiFetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ [key]: input.checked }),
+    });
+    input.checked = s[key];
+    if (key === 'judge_enabled' && costUnit === 'hours') loadHours();
+    if (key === 'auto_refresh_token') fetchQuota();
+  } catch (e) {
+    input.checked = !input.checked;
+    err.textContent = "Couldn't save that setting.";
+  } finally {
+    input.disabled = false;
+    input.focus();
+  }
+}
+
+// Tell screen-reader users (the hidden status region) and sighted users (the line under the
+// button) how the copy went. The region is cleared first, then filled on the next tick, so
+// a repeated identical message is announced again.
+function setCopyResult(msg) {
+  const live = document.getElementById('settingsLive');
+  live.textContent = '';
+  document.getElementById('copyResult').textContent = msg;
+  if (msg) setTimeout(() => { live.textContent = msg; }, 0);
+}
+
+async function copyDiagnostics() {
+  const pre = document.getElementById('connDiagnostics');
+  try {
+    await navigator.clipboard.writeText(pre.textContent);
+    setCopyResult('Copied the diagnostics.');
+  } catch (e) {
+    // Clipboard blocked: select the text so Ctrl+C works.
+    const range = document.createRange();
+    range.selectNodeContents(pre);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    setCopyResult('Copying is blocked. The text is selected, so press Ctrl+C.');
+  }
 }
 
 // ─── Cost ────────────────────────────────────────────────────
@@ -1387,10 +1593,10 @@ function setCostUnit(unit) {
 const HOURS_PAUSE_TEXT = {
   quota: 'Paused: 5-hour quota ≥ 80%',
   auth: 'Paused: sign in to Claude Code to resume',
-  token: 'Paused until the login token refreshes',
+  token: 'Paused until Claude Code renews its sign-in token',
   ingest: 'Paused while session files are parsed',
   failing: 'Paused: recent estimate calls failed; retrying hourly',
-  disabled: 'Paused: estimates are turned off on this server',
+  disabled: 'Estimates are off. Turn them on in Settings.',
 };
 
 function fmtHoursNum(h) {

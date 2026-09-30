@@ -29,6 +29,7 @@ def reset_worker():
     ({"token_seconds_left": None}, "auth"),
     ({"token_seconds_left": 599}, "token"),
     ({"calls_last_hour": 20}, "rate"),
+    ({"enabled": False, "cli_found": False, "auth_dead": True}, "disabled"),
 ])
 def test_skip_reason(change, reason):
     assert ph.skip_reason(**{**BASE, **change}) == reason
@@ -70,6 +71,14 @@ def test_run_tick_still_queues_when_paused(conn, tmp_path, monkeypatch):
     monkeypatch.setattr(ph, "find_claude_cli", lambda: None)
     monkeypatch.setattr(ph, "index_sessions", lambda roots=None: {"s1": tmp_path / "s1.jsonl"})
     assert ph.run_tick(NOW, GATES) == {"skipped": "unavailable"}
+    assert ph.queue_counts(conn)["pending"] == 1
+
+
+def test_run_tick_queues_but_does_not_judge_when_disabled(conn, tmp_path, monkeypatch):
+    add_message(conn, "s1", "2026-09-20T09:00:00")
+    monkeypatch.setattr(ph, "find_claude_cli", lambda: "claude")
+    monkeypatch.setattr(ph, "index_sessions", lambda roots=None: {"s1": tmp_path / "s1.jsonl"})
+    assert ph.run_tick(NOW, {**GATES, "enabled": False}) == {"skipped": "disabled"}
     assert ph.queue_counts(conn)["pending"] == 1
 
 

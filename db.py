@@ -6,9 +6,10 @@ import sqlite3
 import statistics
 from contextlib import closing
 from datetime import datetime, timedelta
-from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "data" / "usage.db"
+import paths
+
+DB_PATH = paths.DATA_DIR / "usage.db"
 
 # First-party API pricing, per https://platform.claude.com/docs/en/about-claude/pricing
 # (checked 2026-09-23). Tuples are (input_price, output_price, cache_read_mult), prices

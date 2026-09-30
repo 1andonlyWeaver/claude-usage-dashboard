@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from itertools import chain
 from pathlib import Path
 
+import paths
+
 try:
     import orjson as json_lib
     def loads(s):
@@ -57,7 +59,7 @@ def get_project_dirs() -> list:
     return dirs
 
 
-DB_PATH = Path(__file__).parent / "data" / "usage.db"
+DB_PATH = paths.DATA_DIR / "usage.db"
 
 # API pricing per 1M tokens (input, output).
 # NOTE: currently unused — cost is computed at query time in db.py via price_for_model(),

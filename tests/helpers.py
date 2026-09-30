@@ -1,6 +1,9 @@
 """Builders for Claude Code transcripts, DB rows and claude CLI output used across tests."""
+import io
 import json
 import subprocess
+import time
+import urllib.error
 from datetime import datetime, timezone
 
 
@@ -114,3 +117,61 @@ def queued_session(conn, tmp_path, sid, now):
     add_message(conn, sid, "2026-09-20T09:05:00", project="Projects / www")
     person_hours.discover(conn, now, index={sid: main})
     return {sid: main}
+
+
+def write_credentials(path, token="tok", expires_in=3600, refresh="ref"):
+    """A Claude Code credentials file whose access token expires `expires_in` seconds from now.
+
+    expires_in=None leaves expiresAt out.
+    """
+    oauth = {"accessToken": token, "refreshToken": refresh}
+    if expires_in is not None:
+        oauth["expiresAt"] = int((time.time() + expires_in) * 1000)
+    path.write_text(json.dumps({"claudeAiOauth": oauth}), encoding="utf-8")
+    return path
+
+
+class FakeResponse:
+    """What urllib.request.urlopen returns, for a JSON body."""
+
+    def __init__(self, payload):
+        self._body = json.dumps(payload).encode("utf-8")
+        self.headers = {}
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def http_error(code, body=b""):
+    return urllib.error.HTTPError("https://example.invalid", code, "error", {}, io.BytesIO(body))
+
+
+def fake_urlopen(responses):
+    """A urlopen stand-in that returns or raises each item of `responses` in turn."""
+    calls = []
+
+    def urlopen(req, timeout=None):
+        calls.append(req)
+        item = responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+    return urlopen, calls
+
+
+class FakePopen:
+    """subprocess.Popen stand-in. Set .returncode to simulate the process exiting."""
+    launched = []
+
+    def __init__(self, args, **kwargs):
+        FakePopen.launched.append(args)
+        self.returncode = None
+
+    def poll(self):
+        return self.returncode

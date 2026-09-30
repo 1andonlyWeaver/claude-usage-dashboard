@@ -36,7 +36,15 @@
           <div class="window-range" id="window5hRange" title="Current 5-hour quota window">5h · —</div>
           <div class="window-range" id="window7dRange" title="Current 7-day quota window">7d · —</div>
         </div>
-        <div class="last-updated" id="lastUpdated">Connecting…</div>
+        <span class="conn-dot" id="connDot" aria-hidden="true"></span>
+        <div class="last-updated" id="lastUpdated" tabindex="-1">Connecting…</div>
+        <button class="btn-icon" id="btnSettings" type="button" onclick="openSettings()"
+                aria-label="Settings" aria-haspopup="dialog" aria-controls="settingsPanel">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
         <button class="btn-refresh" id="btnRefresh" onclick="triggerRefresh()" title="Re-parse session files (R)">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
@@ -47,11 +55,17 @@
       </div>
     </header>
 
-    <!-- Quota auth failure (hidden unless the OAuth token is dead) -->
-    <div class="auth-banner" id="authBanner" style="display:none" role="status">
-      <span aria-hidden="true">&#9888;</span>
-      <span id="authMsg"></span>
+    <!-- Claude sign-in problems (hidden while connected or merely unreachable) -->
+    <div class="auth-banner" id="authBanner" hidden>
+      <span class="auth-banner-icon" aria-hidden="true">&#9888;</span>
+      <div class="auth-banner-text">
+        <strong id="authTitle"></strong>
+        <span id="authDetail"></span>
+      </div>
+      <div class="auth-banner-actions" id="authActions"></div>
     </div>
+    <!-- Always in the page, so screen readers announce changes to it (the banner itself comes and goes) -->
+    <div id="authLive" class="sr-only" role="status"></div>
 
     <!-- Ingest progress bar (hidden when done) -->
     <div class="ingest-banner" id="ingestBanner" style="display:none">
@@ -283,6 +297,43 @@
         <div class="chart-wrap">
           <canvas id="sessionDetailChart"></canvas>
         </div>
+      </div>
+    </div>
+    <!-- Settings panel -->
+    <div class="session-panel settings-panel" id="settingsPanel" role="dialog" aria-modal="true"
+         aria-labelledby="settingsTitle" inert>
+      <div class="session-panel-inner">
+        <div class="session-panel-header">
+          <h2 class="session-panel-title" id="settingsTitle">Settings</h2>
+          <button class="panel-close" type="button" onclick="closeSettings()" aria-label="Close settings">✕</button>
+        </div>
+
+        <section class="settings-section" aria-label="Options">
+          <label class="setting-row">
+            <input type="checkbox" role="switch" id="setJudge" onchange="saveSetting('judge_enabled', this)">
+            <span>
+              <span class="setting-name">Estimate person-hours</span>
+              <span class="setting-help">Claude reads a summary of each day's sessions and estimates how long the work would take someone without AI. It runs through your Claude Code sign-in, so it uses your plan's quota: about 1–2% of a week's quota to catch up on the last 90 days, then about 0.1–0.2% a week.</span>
+            </span>
+          </label>
+          <label class="setting-row">
+            <input type="checkbox" role="switch" id="setRenew" onchange="saveSetting('auto_refresh_token', this)">
+            <span>
+              <span class="setting-name">Renew my sign-in token automatically</span>
+              <span class="setting-help">Keeps the quota gauges live when you haven't used Claude Code for a while. The dashboard writes the new token into Claude Code's credentials file. If Claude Code renews at the same moment, one of them can lose, and you'd have to sign in again.</span>
+            </span>
+          </label>
+          <p class="setting-error" id="settingsError" role="alert"></p>
+        </section>
+
+        <section class="settings-section" aria-labelledby="connHeading">
+          <h3 class="settings-heading" id="connHeading">Connection</h3>
+          <p class="setting-name" id="connSummary"></p>
+          <pre class="diagnostics" id="connDiagnostics"></pre>
+          <div><button class="btn-refresh" type="button" onclick="copyDiagnostics()">Copy diagnostics</button></div>
+          <p id="settingsLive" class="sr-only" role="status"></p>
+          <p class="setting-help" id="copyResult" aria-hidden="true"></p>
+        </section>
       </div>
     </div>
     <div class="panel-overlay" id="panelOverlay" onclick="closePanel()"></div>
