@@ -17,6 +17,11 @@ DEFAULTS = {
     "auto_refresh_token": False,  # renewing rewrites ~/.claude/.credentials.json: opt-in
 }
 
+# A virus scanner or the indexer can hold settings.json open and make the replace fail; wait it out for about 1 s.
+_REPLACE_ATTEMPTS = 10
+_REPLACE_FIRST_DELAY = 0.01
+_REPLACE_MAX_DELAY = 0.2
+
 _lock = threading.RLock()
 
 
@@ -52,14 +57,15 @@ def update(changes: dict) -> dict:
         SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp = SETTINGS_PATH.with_name(SETTINGS_PATH.name + ".tmp")
         tmp.write_text(json.dumps(merged, indent=2), encoding="utf-8")
-        # Retry replace on PermissionError: Windows may refuse to replace if antivirus/indexer has the file open
-        for attempt in range(5):
+        delay = _REPLACE_FIRST_DELAY
+        for attempt in range(_REPLACE_ATTEMPTS):
             try:
                 tmp.replace(SETTINGS_PATH)
                 break
             except PermissionError:
-                if attempt < 4:
-                    time.sleep(0.02)
-                else:
+                if attempt == _REPLACE_ATTEMPTS - 1:
+                    tmp.unlink(missing_ok=True)  # don't leave the half-applied change behind
                     raise
+                time.sleep(delay)
+                delay = min(delay * 2, _REPLACE_MAX_DELAY)
     return merged
