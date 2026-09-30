@@ -1468,6 +1468,7 @@ async function openSettings() {
   document.getElementById('panelOverlay').classList.add('open');
   setBackgroundInert(true);
   document.getElementById('settingsError').textContent = '';
+  setCopyResult('');
   panel.querySelector('.panel-close').focus();
   try {
     const [s, c] = await Promise.all([apiFetch('/api/settings'), apiFetch('/api/connection')]);
@@ -1519,11 +1520,21 @@ async function saveSetting(key, input) {
   }
 }
 
-async function copyDiagnostics(btn) {
+// Tell screen-reader users (the hidden status region) and sighted users (the line under the
+// button) how the copy went. The region is cleared first, then filled on the next tick, so
+// a repeated identical message is announced again.
+function setCopyResult(msg) {
+  const live = document.getElementById('settingsLive');
+  live.textContent = '';
+  document.getElementById('copyResult').textContent = msg;
+  if (msg) setTimeout(() => { live.textContent = msg; }, 0);
+}
+
+async function copyDiagnostics() {
   const pre = document.getElementById('connDiagnostics');
   try {
     await navigator.clipboard.writeText(pre.textContent);
-    btn.textContent = 'Copied';
+    setCopyResult('Copied the diagnostics.');
   } catch (e) {
     // Clipboard blocked: select the text so Ctrl+C works.
     const range = document.createRange();
@@ -1531,9 +1542,8 @@ async function copyDiagnostics(btn) {
     const sel = window.getSelection();
     sel.removeAllRanges();
     sel.addRange(range);
-    btn.textContent = 'Press Ctrl+C to copy';
+    setCopyResult('Copying is blocked. The text is selected, so press Ctrl+C.');
   }
-  setTimeout(() => { btn.textContent = 'Copy diagnostics'; }, 2000);
 }
 
 // ─── Cost ────────────────────────────────────────────────────

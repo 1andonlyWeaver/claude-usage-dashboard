@@ -330,7 +330,9 @@
           <h3 class="settings-heading" id="connHeading">Connection</h3>
           <p class="setting-name" id="connSummary"></p>
           <pre class="diagnostics" id="connDiagnostics"></pre>
-          <div><button class="btn-refresh" type="button" onclick="copyDiagnostics(this)">Copy diagnostics</button></div>
+          <div><button class="btn-refresh" type="button" onclick="copyDiagnostics()">Copy diagnostics</button></div>
+          <p id="settingsLive" class="sr-only" role="status"></p>
+          <p class="setting-help" id="copyResult" aria-hidden="true"></p>
         </section>
       </div>
     </div>
