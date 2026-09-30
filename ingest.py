@@ -2,9 +2,13 @@
 Parse Claude Code session JSONL files into SQLite for fast querying.
 Supports incremental updates - only re-parses changed files.
 """
-import sqlite3
 import os
 import re
+import shutil
+import sqlite3
+import subprocess
+import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from itertools import chain
@@ -25,38 +29,104 @@ PROJECTS_DIR = Path(os.path.expanduser("~")) / ".claude" / "projects"
 DESKTOP_SESSIONS_DIR = Path(os.environ.get("APPDATA", "")) / "Claude" / "local-agent-mode-sessions"
 
 
-def _get_wsl_projects_dir():
-    """Return the WSL ~/.claude/projects Path if accessible, else None.
+# Windows shows each running WSL distro's files under both names; \\wsl$ is the older one.
+WSL_UNC_PREFIXES = (r"\\wsl.localhost", r"\\wsl$")
+WSL_CHECK_SECONDS = 10  # covers the lookups inside one ingest pass; short enough that a distro stopped since is seen as stopped
+_DISTRO_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_clock = time.monotonic
+_wsl_lock = threading.Lock()
+_wsl_checked_at = None  # _clock() of the last wsl.exe query
+_wsl_running = []
 
-    Scans /home/ inside the Ubuntu distro via UNC path rather than running
-    wsl.exe, so it works regardless of whether the Linux username matches the
-    Windows username (e.g. on a different machine).
+
+def _wsl_exe():
+    """Path to wsl.exe, or None on a PC without it. System32 comes first: shutil.which
+    would also look in the current directory."""
+    candidate = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "wsl.exe"
+    if candidate.exists():
+        return str(candidate)
+    return shutil.which("wsl.exe")
+
+
+def parse_wsl_list(raw: bytes) -> list:
+    """Distro names from `wsl.exe --list --quiet` output.
+
+    wsl.exe writes UTF-16LE, or UTF-8 when WSL_UTF8=1 is set. Lines that can't be a distro
+    name, such as "There are no running distributions.", are dropped.
     """
-    for prefix in [r"\\wsl.localhost\Ubuntu", r"\\wsl$\Ubuntu"]:
-        home_root = Path(prefix) / "home"
+    text = raw.decode("utf-16-le" if b"\x00" in raw else "utf-8", errors="ignore")
+    names = []
+    for line in text.replace("\ufeff", "").splitlines():
+        name = line.strip()
+        if _DISTRO_NAME.fullmatch(name) and name not in names:
+            names.append(name)
+    return names
+
+
+def _query_running_distros() -> list:
+    exe = _wsl_exe()
+    if exe is None:
+        return []
+    try:
+        proc = subprocess.run([exe, "--list", "--running", "--quiet"], capture_output=True,
+                              timeout=10, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return parse_wsl_list(proc.stdout) if proc.returncode == 0 else []
+
+
+def running_wsl_distros() -> list:
+    """Names of the WSL distros running now, asked of wsl.exe at most every WSL_CHECK_SECONDS.
+
+    Stopped distros are left alone on purpose: reading one through \\\\wsl.localhost starts
+    it, and ingest runs every 90 s. A distro's transcripts only change while it runs, so
+    the first pass after it starts picks up anything new.
+    """
+    global _wsl_checked_at, _wsl_running
+    with _wsl_lock:
+        now = _clock()
+        if _wsl_checked_at is None or now - _wsl_checked_at >= WSL_CHECK_SECONDS:
+            _wsl_running = _query_running_distros()
+            _wsl_checked_at = now
+        return list(_wsl_running)
+
+
+def _wsl_distro_root(distro: str):
+    """The share a running distro's files are reachable under, or None."""
+    for prefix in WSL_UNC_PREFIXES:
+        root = Path(prefix, distro)
         try:
-            if not home_root.exists():
-                continue
-            for user_dir in home_root.iterdir():
-                wsl_projects = user_dir / ".claude" / "projects"
-                try:
-                    if wsl_projects.exists():
-                        return wsl_projects
-                except (OSError, PermissionError):
-                    pass
-            break  # found the UNC prefix, no need to try the fallback
-        except (OSError, PermissionError):
+            if (root / "home").is_dir():
+                return root
+        except OSError:
             pass
     return None
 
 
+def _get_wsl_projects_dirs() -> list:
+    """~/.claude/projects of every user under /home in every running WSL distro."""
+    found = []
+    for distro in running_wsl_distros():
+        root = _wsl_distro_root(distro)
+        if root is None:
+            continue
+        try:
+            users = sorted((root / "home").iterdir())
+        except OSError:
+            continue
+        for user_dir in users:
+            projects = user_dir / ".claude" / "projects"
+            try:
+                if projects.is_dir():
+                    found.append(projects)
+            except OSError:
+                pass
+    return found
+
+
 def get_project_dirs() -> list:
-    """Return list of all ~/.claude/projects roots to ingest (Windows + any WSL distros)."""
-    dirs = [PROJECTS_DIR]
-    wsl = _get_wsl_projects_dir()
-    if wsl:
-        dirs.append(wsl)
-    return dirs
+    """Every ~/.claude/projects root to ingest: Windows's, plus each user's in each running WSL distro."""
+    return [PROJECTS_DIR, *_get_wsl_projects_dirs()]
 
 
 DB_PATH = paths.DATA_DIR / "usage.db"
@@ -237,13 +307,16 @@ def _greedy_resolve(base_path: Path, rest: str) -> str:
 
 
 def _get_wsl_home(username: str):
-    """Return the WSL home Path for username if accessible, else None."""
-    for prefix in [r"\\wsl.localhost\Ubuntu", r"\\wsl$\Ubuntu"]:
-        p = Path(prefix) / "home" / username
+    """username's home in the first running WSL distro that has one, else None."""
+    for distro in running_wsl_distros():
+        root = _wsl_distro_root(distro)
+        if root is None:
+            continue
+        home = root / "home" / username
         try:
-            if p.exists():
-                return p
-        except (OSError, PermissionError):
+            if home.exists():
+                return home
+        except OSError:
             pass
     return None
 

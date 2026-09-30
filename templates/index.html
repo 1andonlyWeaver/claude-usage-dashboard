@@ -4,9 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Claude Code Usage</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&family=DM+Sans:wght@300;400;500&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ asset_url('fonts/fonts.css') }}">
   <link rel="stylesheet" href="{{ asset_url('style.css') }}">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='none' stroke='%23E07A5F' stroke-width='4' stroke-dasharray='60 28' stroke-linecap='round' transform='rotate(-90 16 16)'/></svg>">
 </head>
@@ -310,17 +308,19 @@
 
         <section class="settings-section" aria-label="Options">
           <label class="setting-row">
-            <input type="checkbox" role="switch" id="setJudge" onchange="saveSetting('judge_enabled', this)">
+            <input type="checkbox" role="switch" id="setJudge" aria-labelledby="setJudgeName"
+                   aria-describedby="setJudgeHelp" onchange="saveSetting('judge_enabled', this)">
             <span>
-              <span class="setting-name">Estimate person-hours</span>
-              <span class="setting-help">Claude reads a summary of each day's sessions and estimates how long the work would take someone without AI. It runs through your Claude Code sign-in, so it uses your plan's quota: about 1–2% of a week's quota to catch up on the last 90 days, then about 0.1–0.2% a week.</span>
+              <span class="setting-name" id="setJudgeName">Estimate person-hours</span>
+              <span class="setting-help" id="setJudgeHelp">Claude reads an extract of each day's sessions (your prompts, its last replies, file paths and shell-command descriptions, all clipped) and estimates how long the work would take someone without AI. It runs through your Claude Code sign-in, so it uses your plan's quota: about 1–2% of a week's quota to catch up on the last 90 days, then about 0.1–0.2% a week.</span>
             </span>
           </label>
           <label class="setting-row">
-            <input type="checkbox" role="switch" id="setRenew" onchange="saveSetting('auto_refresh_token', this)">
+            <input type="checkbox" role="switch" id="setRenew" aria-labelledby="setRenewName"
+                   aria-describedby="setRenewHelp" onchange="saveSetting('auto_refresh_token', this)">
             <span>
-              <span class="setting-name">Renew my sign-in token automatically</span>
-              <span class="setting-help">Keeps the quota gauges live when you haven't used Claude Code for a while. The dashboard writes the new token into Claude Code's credentials file. If Claude Code renews at the same moment, one of them can lose, and you'd have to sign in again.</span>
+              <span class="setting-name" id="setRenewName">Renew my sign-in token automatically</span>
+              <span class="setting-help" id="setRenewHelp">Keeps the quota gauges live when you haven't used Claude Code for a while. The dashboard writes the new token into Claude Code's credentials file. If Claude Code renews at the same moment, one of them can lose, and you'd have to sign in again.</span>
             </span>
           </label>
           <p class="setting-error" id="settingsError" role="alert"></p>
@@ -334,6 +334,7 @@
           <p id="settingsLive" class="sr-only" role="status"></p>
           <p class="setting-help" id="copyResult" aria-hidden="true"></p>
         </section>
+        <p class="setting-help">Claude Usage Dashboard {{ version }}</p>
       </div>
     </div>
     <div class="panel-overlay" id="panelOverlay" onclick="closePanel()"></div>
@@ -366,7 +367,7 @@
 
   </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script src="{{ asset_url('vendor/chart.umd.js') }}"></script>
   <script src="{{ asset_url('dashboard.js') }}"></script>
 </body>
 </html>
