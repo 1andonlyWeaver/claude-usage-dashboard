@@ -68,7 +68,7 @@ Running from source doesn't change: `python app.py --port 8080` and the Task Sch
   - The deprecated `@app.on_event("startup")` becomes a lifespan handler.
   - `db.DB_PATH`, `ingest.DB_PATH`, `QUOTA_CACHE_FILE` and the static/templates dirs come from `paths`. Both `DB_PATH` constants stay, because `tests/conftest.py` patches both. Creating the data dir at startup also fixes the quota-cache write at `app.py:516`, which fails silently when `data/` is missing.
 - **`person_hours.py`**: the judge subprocess env drops `ANTHROPIC_API_KEY`, so turning the judge on can never bill the API. With automatic refresh off, the existing `token` pause reason covers a token close to expiry. The CLI refreshes the token itself whenever it's used for real work.
-- **`ingest.py`**: WSL distros are found once per process with `wsl.exe -l -q` (the output is UTF-16), cached, and skipped when `wsl.exe` is missing. The `/home/*/.claude/projects` scan runs for every distro, not just `Ubuntu`.
+- **`ingest.py`**: the `/home/*/.claude/projects` scan runs for every *running* WSL distro, not just `Ubuntu`. The list comes from `wsl.exe --list --running --quiet` (the output is UTF-16), asked at most once a minute and skipped when `wsl.exe` is missing. Stopped distros are left alone: reading one through `\\wsl.localhost` starts it, and on 2026-09-30 the old scan was found starting Ubuntu on every 90-second ingest pass. (This replaces the first design, which listed all installed distros once per process.)
 - **Frontend**
   - Chart.js is vendored into `static/vendor/` (MIT) and the fonts into `static/fonts/` (OFL).
   - The connection banner is rebuilt from `/api/connection`.
@@ -161,7 +161,7 @@ Unit tests (pytest), added with the phase that introduces each piece:
 - The guard returns 403 for a foreign `Host` and for a cross-origin POST, and serves an Origin-less POST.
 - Settings defaults and live reads.
 - `paths` when frozen and from source, by monkeypatching `sys.frozen` and `sys._MEIPASS`.
-- Parsing `wsl -l -q` UTF-16 output.
+- Parsing `wsl.exe --list --quiet` UTF-16 output.
 - Version comparison in `updates`.
 - `autostart` with `winreg` mocked.
 - The judge env has no `ANTHROPIC_API_KEY`.

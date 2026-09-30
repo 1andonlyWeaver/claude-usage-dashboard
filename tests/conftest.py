@@ -55,3 +55,11 @@ def no_real_cli(monkeypatch):
         pytest.fail("a test tried to run a real subprocess")
     monkeypatch.setattr(person_hours.subprocess, "run", forbidden)
     monkeypatch.setattr(person_hours.subprocess, "Popen", forbidden)
+
+
+@pytest.fixture(autouse=True)
+def no_wsl(monkeypatch):
+    """Tests run as on a PC without WSL: none asks wsl.exe or reads a real distro, which would start it."""
+    monkeypatch.setattr(ingest, "_wsl_exe", lambda: None, raising=False)
+    monkeypatch.setattr(ingest, "_wsl_checked_at", None, raising=False)
+    monkeypatch.setattr(ingest, "_wsl_running", [], raising=False)
