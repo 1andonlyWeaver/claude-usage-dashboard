@@ -43,6 +43,7 @@ settings.py  User settings in data/settings.json: judge opt-in, automatic token 
 applog.py    The log file: opens logs/dashboard.log as UTF-8, rotates it at 5 MB, makes print() safe on any stdout
 version.py   __version__, a bare release number (2.0.0) shown in Settings and the diagnostics
 requirements.txt  Pinned runtime packages for the release build; environment.yml installs it too
+README.md    For the people who run the dashboard: what it reads and sends, sign-in, the judge's cost, where data lives. LICENSE is MIT
 tests/       pytest suite
 templates/   Jinja2 HTML (single index.html)
 static/      dashboard.js (Chart.js, quota polling), style.css (glassmorphism dark theme)
@@ -117,7 +118,7 @@ When updating pricing, change it in **both** `db.py` and `ingest.py`.
 
 ## Server Restart
 
-Changes to `app.py`, `auth.py`, `db.py`, `ingest.py`, `paths.py` or `settings.py` require a server restart to take effect (FastAPI loads these once at startup). Template, JS and CSS edits don't. After making any such change, automatically flag that a restart is needed and offer to restart the server.
+Changes to `app.py`, `applog.py`, `auth.py`, `db.py`, `ingest.py`, `paths.py`, `settings.py` or `version.py` require a server restart to take effect (FastAPI loads these once at startup). Template, JS and CSS edits don't. After making any such change, automatically flag that a restart is needed and offer to restart the server.
 
 **When running under Task Scheduler (normal):**
 ```powershell
@@ -175,7 +176,7 @@ The cost card's `$ | h` toggle shows estimated person-hours: how long a competen
 - **Tests never touch `data/usage.db`.** An autouse fixture in `tests/conftest.py` points `db.DB_PATH` and `ingest.DB_PATH` at a per-test temp file. `tests/conftest.py` also redirects `settings.SETTINGS_PATH` and `auth.CREDENTIALS_FILE` to per-test temp files and forbids `subprocess.run` / `subprocess.Popen`.
 - **Local-only guard.** Requests whose Host isn't `127.0.0.1`, `localhost` or `[::1]` get 403, and so do state-changing requests whose `Origin` isn't the dashboard's own. curl sends no `Origin`, so `curl -X POST http://127.0.0.1:8080/api/refresh` still works.
 - **Credentials writes go through `auth.refresh_token()` only**, and it runs only when automatic renewal is on or the user clicks Renew now. Everything else reads the file.
-- **Settings file.** `settings.load()` reads `data/settings.json` on every call, so a change applies on the next quota poll or judge tick without a restart. One `RLock` guards reads and writes, and `update()` retries the file replace up to 5 times on a Windows `PermissionError` (antivirus or an indexer holding the file). A missing or unreadable file, or a stored value of the wrong type, gives the default.
+- **Settings file.** `settings.load()` reads `data/settings.json` on every call, so a change applies on the next quota poll or judge tick without a restart. One `RLock` guards reads and writes, and `update()` tries the file replace up to 10 times over about a second on a Windows `PermissionError` (antivirus or an indexer holding the file). A missing or unreadable file, or a stored value of the wrong type, gives the default.
 - **Force re-ingest required** after schema migrations or `extract_project_name` changes — unchanged files are skipped otherwise. Use `POST /api/refresh?force=true` or delete `ingest_meta` rows manually.
 - **Subagent messages keep the parent's `session_id`.** Subagent transcript lines carry the parent session's `sessionId` (with `isSidechain: true`), and ingest stores them as-is. Session lists and drill-down therefore include subagent tokens, and every `COUNT(DISTINCT session_id)` metric counts a session once no matter how many agents it spawned. Nothing records which rows are sidechain; add a column if you ever need to split them out. Dedup is by `msg_id` (the API message id), and subagent ids don't overlap with the parent's (verified 2026-09-23: 0 shared ids across ~18.6k subagent messages, and no top-level file contains inlined `isSidechain` messages). Before this was added, subagent usage was missing entirely, which undercounted 30-day output tokens by about half and made `detect_other_pct` attribute subagent quota use to "other".
 - **Forked/resumed sessions share msg_ids.** A fork copies earlier messages into a new top-level file under a new `sessionId`, and `INSERT OR REPLACE` gives each shared `msg_id` to whichever file was ingested last. A force re-ingest can therefore move rows between the two sessions. Token totals are unaffected.

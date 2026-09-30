@@ -30,3 +30,11 @@ def test_the_settings_panel_and_the_api_show_the_version():
     client = TestClient(app.app, base_url="http://127.0.0.1:8080")
     assert f"Claude Usage Dashboard {version.__version__}" in client.get("/").text
     assert app.app.version == version.__version__
+
+
+def test_the_repo_carries_an_mit_license_and_a_readme():
+    license_text = (REPO / "LICENSE").read_text(encoding="utf-8")
+    assert license_text.startswith("MIT License")
+    assert "Copyright (c) 2026 Jonathan Weaver" in license_text
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    assert readme.startswith("# Claude Usage Dashboard")
