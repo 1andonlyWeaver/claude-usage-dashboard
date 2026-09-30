@@ -7,3 +7,4 @@
 # Binary files — no line ending conversion
 *.db binary
 *.pyc binary
+*.woff2 binary

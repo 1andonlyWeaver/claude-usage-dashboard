@@ -46,6 +46,7 @@ requirements.txt  Pinned runtime packages for the release build; environment.yml
 tests/       pytest suite
 templates/   Jinja2 HTML (single index.html)
 static/      dashboard.js (Chart.js, quota polling), style.css (glassmorphism dark theme)
+             vendor/chart.umd.js (Chart.js 4.4.4) and fonts/ (Sora, DM Sans, DM Mono, fonts.css): nothing loads from a CDN, so the page works offline
 data/        usage.db — auto-created on first run; not committed
 scripts/     launcher.py (Task Scheduler entry point — port check, spawns server, stays alive so TS tracks it)
              register-task.ps1 (one-time setup), start-dashboard.bat (legacy manual launcher)
