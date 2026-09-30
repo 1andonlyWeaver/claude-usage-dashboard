@@ -147,7 +147,7 @@ The cost card's `$ | h` toggle shows estimated person-hours: how long a competen
 - **Breaker**: after 3 failed calls in a row, the rest of that batch is left unclaimed; those rows wait an hour without losing an attempt. The worker then judges at most one session-day an hour (reason `failing`, shown as paused) until a call succeeds.
 - **Provisional figures**: unjudged session-days show active hours × the median judged leverage. The default of 5× applies until a group (interactive or scheduled) has 10 judged days with ≥ 0.1 active hours in the last 90 days. `db._leverage` caches the median until judged estimates change.
 - **Scheduled runs** (sessions whose first prompt starts with `<scheduled-task`) get their own line, not the headline. Until the worker queues a run, it counts as interactive.
-- **Quota**: judge calls use subscription quota, roughly 0.1–0.2% of the weekly quota once the backfill is done. They write no transcript, so `detect_other_pct()` counts an interval with a judge call as local activity.
+- **Quota**: judge calls use subscription quota, roughly 0.1–0.2% of the weekly quota once the backfill is done. They write no transcript, so `detect_other_pct()` counts an interval with a judge call as local activity. The CLI runs without `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK` and `CLAUDE_CODE_USE_VERTEX` (`person_hours.BILLING_ENV`), so an API key or cloud setup in the server's environment never takes the bill.
 - **Settings** are constants at the top of `person_hours.py`; the leverage constants are in `db.py`. `PERSON_HOURS_WORKER=off` stops the worker entirely (no queueing either), e.g. for a test server. The user-facing toggles (`judge_enabled`, `auto_refresh_token`) live in `data/settings.json`.
 - **Manual backfill**: `python person_hours.py --backfill 90 [--limit N] [--dry-run] [--retry-failed]`.
   - Keeps the hourly cap but skips the other gates (quota, auth, token, ingest) and ignores the Settings toggle, since a person ran it.
@@ -162,7 +162,6 @@ The cost card's `$ | h` toggle shows estimated person-hours: how long a competen
   - Resumed or forked sessions repeat earlier entries, so work they share can be judged under both sessions.
   - The backfill runs newest-first, so a multi-day session's later days often miss the "Earlier in this session" context.
   - A timed-out judge call doesn't kill child processes the CLI started.
-  - If `ANTHROPIC_API_KEY` is set in the server's environment, judge calls bill to the API rather than the subscription.
   - The spec's "Known limitations" section has the full list.
 
 ## Gotchas

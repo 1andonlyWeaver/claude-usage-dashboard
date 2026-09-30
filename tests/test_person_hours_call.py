@@ -89,3 +89,19 @@ def test_call_judge_records_the_model_that_wrote_the_answer():
     env["modelUsage"] = {"claude-haiku-4-5": {"outputTokens": 20},
                          "claude-sonnet-5": {"outputTokens": 1500}}
     assert ph.call_judge("S", "claude", runner=FakeRun(stdout=json.dumps(env)))["model"] == "claude-sonnet-5"
+
+
+def test_call_judge_never_passes_api_billing_variables(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-test")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "token")
+    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    monkeypatch.setenv("CUD_TEST_KEEP_ME", "yes")
+    run = FakeRun(stdout=envelope(GOOD_ESTIMATE))
+    ph.call_judge("S", "claude", runner=run)
+    env = run.calls[0][1]["env"]
+    names = {k.upper() for k in env}
+    assert not names & {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+                        "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"}
+    assert env["CUD_TEST_KEEP_ME"] == "yes"
+    assert "PATH" in names  # everything else is passed through
