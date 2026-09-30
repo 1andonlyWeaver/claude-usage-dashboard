@@ -51,10 +51,12 @@ const STACK_PALETTE = [
 // ─── Init ────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
   document.addEventListener('keydown', e => {
-    // "r" re-parses the logs, but not while typing, inside a dialog (Settings), or as part
-    // of a shortcut such as Ctrl+R, which already reloads the page.
+    // "r" re-parses the logs, but not while typing, while a dialog (Settings) is open, or as
+    // part of a shortcut such as Ctrl+R, which already reloads the page. A click on plain text
+    // inside the dialog drops focus to <body>, so the open check can't rely on the target alone.
     if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.metaKey && !e.altKey
-        && !e.target.closest('input, textarea, select, [role="dialog"]')) triggerRefresh();
+        && !e.target.closest('input, textarea, select, [role="dialog"]')
+        && !document.querySelector('[role="dialog"]:not([inert])')) triggerRefresh();
     if (e.key === 'Escape') closePanel();
   });
   setCostUnit(savedCostUnit());
