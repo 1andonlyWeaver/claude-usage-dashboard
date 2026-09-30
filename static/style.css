@@ -121,7 +121,7 @@ body {
 }
 .last-updated {
   font-size: 0.75rem;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-family: var(--font-mono);
 }
 .window-info {
