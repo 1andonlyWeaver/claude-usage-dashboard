@@ -26,6 +26,12 @@ class FakeIcon:
         self.notes = []
         self.menu_updates = 0
         self.stopped = False
+        self.ran = False
+
+    def run(self, setup=None):
+        self.ran = True
+        if setup is not None:
+            setup(self)
 
     def notify(self, message, title=None):
         self.notes.append((message, title))
@@ -163,3 +169,12 @@ def test_stop_ends_the_polls_and_removes_the_icon(monkeypatch):
     assert t.icon.stopped
     t._run_polls(t.icon)  # returns at once instead of polling every 30 s
     assert t.icon.visible
+
+
+def test_start_runs_the_icon_on_its_own_thread_and_join_waits_for_it(monkeypatch):
+    t = make_tray(monkeypatch, [])
+    t.stop()  # so the setup callback's poll loop returns at once
+    t.start()
+    t.join(timeout=2)
+    assert t.icon.ran and t.icon.visible
+    assert not t._thread.is_alive()

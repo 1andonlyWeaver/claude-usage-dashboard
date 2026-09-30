@@ -162,15 +162,22 @@ def _close_to_tray(shell: Shell, window) -> None:
     pywebview's closing event can't tell the close button from Windows signing out, so this
     handles the WinForms form's own FormClosing, whose CloseReason can.
     """
+    from System.Reflection import BindingFlags
     from System.Windows.Forms import CloseReason  # pythonnet; pywebview has loaded WinForms
 
     form = window.native
     shell.hwnd = form.Handle.ToInt64()
+    # WinForms keeps a cancelled close's reason, so a later Task Manager "End task" would read as
+    # the person's own close and be hidden too. Its setter is internal; reset it through reflection.
+    reason = form.GetType().GetProperty("CloseReason", BindingFlags.Instance | BindingFlags.NonPublic)
+    no_reason = getattr(CloseReason, "None")  # the enum member is named None, a keyword in Python
 
     def on_form_closing(sender, args):
         if shell.hides_on_close(args.CloseReason == CloseReason.UserClosing):
             args.Cancel = True
             sender.Hide()
+            if reason is not None:
+                reason.SetValue(sender, no_reason)
 
     form.FormClosing += on_form_closing
 
@@ -272,7 +279,10 @@ def main(argv=None) -> int:
         server.should_exit = True
         instance.release(lock)
         return 1
-    instance.write_runtime(port)
+    try:
+        instance.write_runtime(port)
+    except OSError as ex:
+        log(f"couldn't write runtime.json ({ex}); a second launch won't find this copy")
     log(f"serving {url}")
     shell = Shell(url, server)
     shell.tray = tray.Tray(shell, url, port)
@@ -281,6 +291,7 @@ def main(argv=None) -> int:
         run_window(shell, background=args.background)
     finally:
         shell.quit()  # also after Windows closed the window at sign-out
+        shell.tray.join(timeout=2)
         thread.join(timeout=10)
         instance.clear_runtime(os.getpid())
         instance.release(lock)

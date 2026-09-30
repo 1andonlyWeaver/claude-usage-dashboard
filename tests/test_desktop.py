@@ -209,6 +209,47 @@ def test_a_second_launch_that_reaches_nobody_fails_quietly(monkeypatch, quiet_ma
     assert desktop.main([]) == 1
 
 
+def test_startup_survives_a_runtime_file_it_cannot_write_and_quit_cleans_up(monkeypatch, quiet_main, capsys):
+    calls = []
+
+    class Server:
+        started = True
+        should_exit = False
+
+    class Thread:
+        def is_alive(self):
+            return False
+
+        def join(self, timeout=None):
+            calls.append("server joined")
+
+    class Tray:
+        def __init__(self, shell, url, port):
+            pass
+
+        def start(self):
+            calls.append("tray started")
+
+        def stop(self):
+            calls.append("tray stopped")
+
+        def join(self, timeout):
+            calls.append("tray joined")
+
+    def locked(port):
+        raise PermissionError(13, "The process cannot access the file")
+
+    monkeypatch.setattr(desktop.instance, "acquire", lambda: 99)
+    monkeypatch.setattr(desktop.instance, "release", lambda handle: calls.append(f"released {handle}"))
+    monkeypatch.setattr(desktop.instance, "write_runtime", locked)
+    monkeypatch.setattr(desktop, "start_server", lambda sock: (Server(), Thread()))
+    monkeypatch.setattr(desktop.tray, "Tray", Tray)
+    monkeypatch.setattr(desktop, "run_window", lambda shell, background: calls.append("window ran"))
+    assert desktop.main([]) == 0
+    assert calls == ["tray started", "window ran", "tray stopped", "tray joined", "server joined", "released 99"]
+    assert "couldn't write runtime.json" in capsys.readouterr().out
+
+
 def test_smoke_skips_the_mutex(monkeypatch, quiet_main):
     def no_mutex():
         raise AssertionError("--smoke must not take the mutex")

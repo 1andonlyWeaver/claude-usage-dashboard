@@ -76,6 +76,7 @@ class Tray:
         self.alerts = Alerts()
         self._badge_shown = False
         self._stop = threading.Event()
+        self._thread = None
         self.icon = icon or pystray.Icon(paths.APP_NAME, icon_image(False), TITLE, menu=self.menu())
 
     def menu(self) -> pystray.Menu:
@@ -90,12 +91,18 @@ class Tray:
 
     def start(self) -> None:
         """Show the icon from its own thread. Polling starts once the icon is up."""
-        threading.Thread(target=self.icon.run, kwargs={"setup": self._run_polls},
-                         name="tray", daemon=True).start()
+        self._thread = threading.Thread(target=self.icon.run, kwargs={"setup": self._run_polls},
+                                        name="tray", daemon=True)
+        self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
         self.icon.stop()
+
+    def join(self, timeout: float) -> None:
+        """Wait for the icon's thread to end, so the icon is gone from the tray before the app exits."""
+        if self._thread is not None:
+            self._thread.join(timeout)
 
     def _run_polls(self, icon) -> None:
         # pystray calls this on its own thread once the icon exists, so notify() works.
