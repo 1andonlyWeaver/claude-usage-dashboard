@@ -3,10 +3,12 @@ credentials path, so none can touch data/ or ~/.claude."""
 import pytest
 
 import auth
+import autostart
 import db
 import ingest
 import person_hours
 import settings
+from fake_winreg import FakeWinreg
 
 
 @pytest.fixture(autouse=True)
@@ -63,3 +65,11 @@ def no_wsl(monkeypatch):
     monkeypatch.setattr(ingest, "_wsl_exe", lambda: None, raising=False)
     monkeypatch.setattr(ingest, "_wsl_checked_at", None, raising=False)
     monkeypatch.setattr(ingest, "_wsl_running", [], raising=False)
+
+
+@pytest.fixture(autouse=True)
+def fake_registry(monkeypatch):
+    """No test reads or writes the real registry: autostart gets an in-memory winreg."""
+    registry = FakeWinreg()
+    monkeypatch.setattr(autostart, "winreg", registry)
+    return registry
