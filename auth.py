@@ -151,14 +151,14 @@ def refresh_token(force: bool = False) -> bool:
                 body = e.read().decode("utf-8", "replace")
             except Exception:
                 pass
-            print(f"[oauth {ts}] refresh failed: HTTP {e.code} - {body[:300]}")
+            print(f"[oauth {ts}] refresh failed: HTTP {e.code} - {redact(body)[:300]}")
             # invalid_grant (or 401) means the stored refresh token is revoked/expired:
             # no amount of retrying will help — the user must re-login via the CLI.
             if "invalid_grant" in body or e.code == 401:
                 mark_rejected(sig)
             return False
         except Exception as ex:
-            print(f"[oauth {ts}] refresh failed: {ex}")
+            print(f"[oauth {ts}] refresh failed: {redact(str(ex))}")
             return False
 
         new_access = payload.get("access_token")

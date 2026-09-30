@@ -120,6 +120,20 @@ def test_invalid_grant_marks_the_credentials_refused(isolated_credentials, monke
     assert auth.rejected()
 
 
+@pytest.mark.parametrize("failure", [
+    http_error(500, b'{"error": "sk-ant-ort01-SECRETBODY"}'),
+    RuntimeError("connection reset while sending sk-ant-ort01-SECRETEXC"),
+])
+def test_refresh_failure_logs_never_include_a_token(isolated_credentials, monkeypatch, capsys, failure):
+    write_credentials(isolated_credentials, expires_in=-60)
+    urlopen, _ = fake_urlopen([failure])
+    monkeypatch.setattr(auth.urllib.request, "urlopen", urlopen)
+    assert auth.refresh_token() is False
+    out = capsys.readouterr().out
+    assert "refresh failed" in out and "sk-ant-…" in out
+    assert "SECRET" not in out
+
+
 def test_forced_refresh_skips_the_throttle_and_the_refused_flag(isolated_credentials, monkeypatch):
     write_credentials(isolated_credentials, expires_in=-60)
     auth.mark_rejected(auth.credentials_signature())
