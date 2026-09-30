@@ -208,7 +208,9 @@ def usable_token(auto_refresh: bool) -> tuple[str | None, str]:
     if seconds_left >= TOKEN_REFRESH_LEEWAY:
         return token, "ok"
     if auto_refresh and refresh_token():
-        return (read_credentials() or {}).get("claudeAiOauth", {}).get("accessToken"), "ok"
+        renewed = ((read_credentials() or {}).get("claudeAiOauth") or {}).get("accessToken")
+        if renewed:
+            return renewed, "ok"
     if seconds_left > 0:
         return token, "ok"  # close to expiry, but still good for this call
     return None, "login-required" if rejected() else "token-expired"

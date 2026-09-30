@@ -61,6 +61,31 @@ def test_expired_token_is_renewed_when_allowed(isolated_credentials, monkeypatch
     assert auth.usable_token(auto_refresh=True) == ("renewed", "ok")
 
 
+@pytest.mark.parametrize("contents", ['{"claudeAiOauth": null}', "{}", "{not json"])
+def test_renewal_that_leaves_no_token_in_the_file_is_not_reported_ok(isolated_credentials,
+                                                                      monkeypatch, contents):
+    """refresh_token() says True but the file can't be read back: fall through, don't raise or return (None, 'ok')."""
+    write_credentials(isolated_credentials, expires_in=-60)
+
+    def renew(force=False):
+        isolated_credentials.write_text(contents, encoding="utf-8")
+        return True
+    monkeypatch.setattr(auth, "refresh_token", renew)
+    assert auth.usable_token(auto_refresh=True) == (None, "token-expired")
+
+
+def test_renewal_that_loses_the_token_still_uses_one_that_is_good_for_now(isolated_credentials,
+                                                                          monkeypatch):
+    """The first read found a token with a minute left; a bad renewal doesn't take it away."""
+    write_credentials(isolated_credentials, expires_in=60)
+
+    def renew(force=False):
+        isolated_credentials.write_text('{"claudeAiOauth": null}', encoding="utf-8")
+        return True
+    monkeypatch.setattr(auth, "refresh_token", renew)
+    assert auth.usable_token(auto_refresh=True) == ("tok", "ok")
+
+
 def test_refused_credentials_need_sign_in_until_the_file_changes(isolated_credentials):
     write_credentials(isolated_credentials)
     auth.mark_rejected(auth.credentials_signature())
