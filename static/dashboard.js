@@ -51,7 +51,10 @@ const STACK_PALETTE = [
 // ─── Init ────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
   document.addEventListener('keydown', e => {
-    if (e.key === 'r' || e.key === 'R') { if (!e.target.matches('input,textarea')) triggerRefresh(); }
+    // "r" re-parses the logs, but not while typing, inside a dialog (Settings), or as part
+    // of a shortcut such as Ctrl+R, which already reloads the page.
+    if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.metaKey && !e.altKey
+        && !e.target.closest('input, textarea, select, [role="dialog"]')) triggerRefresh();
     if (e.key === 'Escape') closePanel();
   });
   setCostUnit(savedCostUnit());
