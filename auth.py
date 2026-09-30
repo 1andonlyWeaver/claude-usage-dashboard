@@ -31,6 +31,7 @@ AUTH_ERRORS = ("login-required", "no-credentials", "token-expired")
 
 _token_refresh_lock = threading.Lock()
 _last_token_refresh_attempt = 0.0  # monotonic time of last attempt; throttles refresh
+_last_refresh_transient = False  # the last attempt failed in transit (network, OAuth server), not on the credentials
 _auth_dead = False  # True once a refresh returns invalid_grant — refresh token revoked, re-login required
 _auth_dead_creds_sig = None  # credentials-file signature when _auth_dead was set; a change means a re-login may have landed
 
@@ -98,7 +99,7 @@ def refresh_token(force: bool = False) -> bool:
     wait for the file to change once a refresh token has been refused. force (the Renew
     now button) skips both: a person asked for exactly one attempt. Returns True on success.
     """
-    global _last_token_refresh_attempt, _auth_dead, _auth_dead_creds_sig
+    global _last_token_refresh_attempt, _last_refresh_transient, _auth_dead, _auth_dead_creds_sig
     with _token_refresh_lock:
         if not force:
             if _auth_dead:
@@ -114,6 +115,7 @@ def refresh_token(force: bool = False) -> bool:
             if time.monotonic() - _last_token_refresh_attempt < TOKEN_REFRESH_MIN_INTERVAL:
                 return False
         _last_token_refresh_attempt = time.monotonic()
+        _last_refresh_transient = False
 
         sig = credentials_signature()  # before reading: see mark_rejected
         creds = read_credentials()
@@ -156,14 +158,18 @@ def refresh_token(force: bool = False) -> bool:
             # no amount of retrying will help — the user must re-login via the CLI.
             if "invalid_grant" in body or e.code == 401:
                 mark_rejected(sig)
+            else:
+                _last_refresh_transient = True
             return False
         except Exception as ex:
             print(f"[oauth {ts}] refresh failed: {redact(str(ex))}")
+            _last_refresh_transient = True
             return False
 
         new_access = payload.get("access_token")
         if not new_access:
             print(f"[oauth {ts}] refresh response missing access_token")
+            _last_refresh_transient = True
             return False
 
         expires_in = int(payload.get("expires_in") or 36000)
@@ -181,6 +187,16 @@ def refresh_token(force: bool = False) -> bool:
         _auth_dead_creds_sig = None
         print(f"[oauth {ts}] refreshed token (expires in {expires_in}s)")
         return True
+
+
+def last_refresh_transient() -> bool:
+    """True when the last renewal attempt failed on the network or at the OAuth server.
+
+    False when it succeeded, or failed on the stored credentials: a refused refresh token,
+    none in the file, or a renewed token that couldn't be saved. Those need a sign-in; a
+    transient failure may pass. A throttled call makes no attempt and changes nothing.
+    """
+    return _last_refresh_transient
 
 
 def usable_token(auto_refresh: bool) -> tuple[str | None, str]:
@@ -301,6 +317,7 @@ def diagnostics(status: dict, *, cli_path, auto_refresh: bool, login_running: bo
 
 # ─── Signing in ──────────────────────────────────────────────
 _login_proc = None  # the `claude auth login` console, while one is open
+_login_lock = threading.Lock()  # two quick Sign in clicks arrive on different threads
 
 
 def login_running() -> bool:
@@ -311,11 +328,12 @@ def launch_login(cli: str) -> bool:
     """Open `claude auth login` in its own console window. False if one is still open.
 
     The dashboard needs nothing back from the process: a successful sign-in rewrites the
-    credentials file, and the next quota poll notices.
+    credentials file, and the next quota poll notices. Raises OSError if the CLI can't start.
     """
     global _login_proc
-    if login_running():
-        return False
-    _login_proc = subprocess.Popen([cli, "auth", "login", "--claudeai"],
-                                   creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
-    return True
+    with _login_lock:
+        if login_running():
+            return False
+        _login_proc = subprocess.Popen([cli, "auth", "login", "--claudeai"],
+                                       creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+        return True

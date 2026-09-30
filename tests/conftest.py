@@ -34,6 +34,7 @@ def isolated_credentials(tmp_path, monkeypatch):
     monkeypatch.setattr(auth, "_auth_dead", False)
     monkeypatch.setattr(auth, "_auth_dead_creds_sig", None)
     monkeypatch.setattr(auth, "_last_token_refresh_attempt", 0.0)
+    monkeypatch.setattr(auth, "_last_refresh_transient", False)
     monkeypatch.setattr(auth, "_login_proc", None)
     return path
 

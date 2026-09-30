@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 
 import pytest
 
@@ -50,11 +51,75 @@ def test_sign_in_endpoint_reports_the_open_console(monkeypatch):
     assert len(FakePopen.launched) == 1
 
 
+def test_sign_in_endpoint_explains_a_cli_that_will_not_start(monkeypatch):
+    def broken(args, **kwargs):
+        raise FileNotFoundError(2, "The system cannot find the file specified")
+    monkeypatch.setattr(app.person_hours, "find_claude_cli", lambda: "C:/claude.exe")
+    monkeypatch.setattr(auth.subprocess, "Popen", broken)
+    with pytest.raises(app.HTTPException) as err:
+        app.connection_login()
+    assert err.value.status_code == 500
+    assert "cannot find the file" in err.value.detail
+    FakePopen.launched = []
+    monkeypatch.setattr(auth.subprocess, "Popen", FakePopen)
+    assert app.connection_login()["login_running"] is True  # the failed launch left nothing held
+
+
 def test_renew_endpoint_forces_one_attempt_and_refetches(no_fetch, monkeypatch):
     monkeypatch.setattr(auth, "refresh_token", lambda force=False: force)
     app._usage_cache["retry_after"] = 1e12
     out = asyncio.run(app.connection_renew())
     assert out["renewed"] is True and app._usage_cache["retry_after"] == 0.0
+
+
+class LongUptime:
+    """app's view of the time module on a PC that has been up for 30 days.
+
+    Uptime is what monotonic() counts, so this makes a cache stamped at 0.0 look 30 days old
+    whatever machine runs the test. asyncio keeps the real clock.
+    """
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+    def monotonic(self):
+        return time.monotonic() + 30 * 86400
+
+
+@pytest.fixture
+def failing_refetch(tmp_path, monkeypatch):
+    """Cached figures from 10 s ago, a long-running PC, and a usage API that can't be reached."""
+    monkeypatch.setattr(app, "time", LongUptime())
+    monkeypatch.setattr(app, "QUOTA_CACHE_FILE", tmp_path / "quota_cache.json")
+    monkeypatch.setattr(app, "_fetch_usage_sync",
+                        lambda: {"ok": False, "error": "network-error", "retry_after": None})
+    app._usage_cache.update(
+        data={"five_hour_pct": 40.0, "five_hour_resets_at": None,
+              "seven_day_pct": 55.0, "seven_day_resets_at": None},
+        fetched_at=app.time.monotonic() - 10, retry_after=0.0, error=None, fail_count=0)
+
+
+def renew_now(monkeypatch):
+    monkeypatch.setattr(auth, "refresh_token", lambda force=False: force)
+    asyncio.run(app.connection_renew())
+
+
+def reingest_now(monkeypatch):
+    monkeypatch.setattr(app, "_run_ingest_background", lambda force=False: None)
+    asyncio.run(app.refresh(force=False))
+
+
+@pytest.mark.parametrize("trigger", [renew_now, reingest_now])
+def test_a_failed_refetch_keeps_the_cached_figures(failing_refetch, monkeypatch, trigger):
+    trigger(monkeypatch)
+    out = asyncio.run(app._get_usage_data())
+    assert (out["five_hour_pct"], out["seven_day_pct"]) == (40.0, 55.0)
+
+
+def test_a_renewal_starts_the_fetch_backoff_over(failing_refetch, monkeypatch):
+    app._usage_cache["fail_count"] = 5  # an hour-long backoff by now
+    renew_now(monkeypatch)
+    assert app._usage_cache["retry_after"] - app.time.monotonic() <= app.CACHE_MIN_RETRY
 
 
 def test_successful_fetch_records_when(monkeypatch):

@@ -201,16 +201,19 @@ def _fetch_usage_sync(_already_retried: bool = False) -> dict:
     On success: {"ok": True, "data": {...}, "retry_after": None}
     On rate-limit: {"ok": False, "error": "rate-limited", "retry_after": <seconds>}
     On other failure: {"ok": False, "error": "http-<status>" or "network-error", "retry_after": None}
+    Every result also carries "creds_sig": the credentials-file signature taken before the
+    token was read, so the caller can tell whether a refused token has since been replaced.
 
     Without a usable token the error is auth.usable_token's status and nothing is sent.
     A 401 means the stored token was refused: with automatic renewal on, renew once and
-    retry; otherwise record the refusal so the dashboard asks the person to sign in.
+    retry. Otherwise, or when the renewal fails other than in transit, record the refusal
+    so the dashboard asks the person to sign in.
     """
     auto = settings.get("auto_refresh_token")
     sig = auth.credentials_signature()  # the file this token comes from, for mark_rejected
     token, auth_status = auth.usable_token(auto_refresh=auto)
     if not token:
-        return {"ok": False, "error": auth_status, "retry_after": None}
+        return {"ok": False, "error": auth_status, "retry_after": None, "creds_sig": sig}
 
     req = urllib.request.Request(
         USAGE_API_URL,
@@ -229,7 +232,8 @@ def _fetch_usage_sync(_already_retried: bool = False) -> dict:
                 print(f"[quota {ts}] OK - rate headers: {rate_headers}")
             else:
                 print(f"[quota {ts}] OK - no rate-limit headers in response")
-            return {"ok": True, "data": data, "retry_after": None, "rate_headers": rate_headers}
+            return {"ok": True, "data": data, "retry_after": None, "rate_headers": rate_headers,
+                    "creds_sig": sig}
     except urllib.error.HTTPError as e:
         ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         if e.code == 429:
@@ -240,25 +244,30 @@ def _fetch_usage_sync(_already_retried: bool = False) -> dict:
             except (ValueError, TypeError):
                 retry_secs = 300
             print(f"[quota {ts}] 429 - Retry-After: {retry_after_raw!r}, all headers: {all_headers}")
-            return {"ok": False, "error": "rate-limited", "retry_after": retry_secs}
+            return {"ok": False, "error": "rate-limited", "retry_after": retry_secs, "creds_sig": sig}
         if e.code == 401:
             if auto and not _already_retried:
                 print(f"[quota {ts}] HTTP 401 - attempting OAuth refresh")
                 if auth.refresh_token():
                     return _fetch_usage_sync(_already_retried=True)
+                if not auth.last_refresh_transient() and auth.credentials_signature() == sig:
+                    # Nothing to renew with, or the renewed token couldn't be saved: only a
+                    # sign-in helps. A network or server failure stays http-401 and is
+                    # retried; a changed file holds a newer token to try instead.
+                    auth.mark_rejected(sig)
             else:
                 # Read-only, or a freshly renewed token refused too: nothing here can fix it.
                 auth.mark_rejected(sig)
             if auth.rejected():
-                return {"ok": False, "error": "login-required", "retry_after": None}
+                return {"ok": False, "error": "login-required", "retry_after": None, "creds_sig": sig}
         print(f"[quota {ts}] HTTP {e.code}")
-        return {"ok": False, "error": f"http-{e.code}", "retry_after": None}
+        return {"ok": False, "error": f"http-{e.code}", "retry_after": None, "creds_sig": sig}
     except Exception as ex:
         ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         # The error code goes out through /api/connection and the diagnostics, so it stays a
         # fixed string; some exception messages quote the request headers, token included.
         print(f"[quota {ts}] exception: {auth.redact(str(ex))}")
-        return {"ok": False, "error": "network-error", "retry_after": None}
+        return {"ok": False, "error": "network-error", "retry_after": None, "creds_sig": sig}
 
 
 def _resets_at_passed(value) -> bool:
@@ -416,6 +425,12 @@ async def _get_usage_data() -> dict:
             else:
                 backoff = min(CACHE_MIN_RETRY * (2 ** (cache["fail_count"] - 1)), CACHE_MAX_RETRY)
             retry_secs = max(api_retry, backoff)
+            if (result["error"] in (*auth.AUTH_ERRORS, "http-401")
+                    and auth.credentials_signature() != result["creds_sig"]):
+                # The refused token has been replaced since it was read (Claude Code renewed
+                # it mid-request). Another poller may already have recorded the new file, in
+                # which case _retry_now_if_credentials_changed won't lift a backoff: skip it.
+                retry_secs = 0
             cache["retry_after"] = now + retry_secs
             # An unchanging failure logged every poll grew dashboard.log past 45 MB during
             # a multi-day logged-out stretch. Log the transition, then only a periodic
@@ -431,6 +446,17 @@ async def _get_usage_data() -> dict:
             if disk:
                 return {**disk, "error": result["error"]}
             return {"error": result["error"], "five_hour_pct": 0, "seven_day_pct": 0}
+
+
+def _refetch_quota_now() -> None:
+    """Make the next quota poll call the API: clear the backoff and mark the cache stale.
+
+    fetched_at moves back only as far as stale, never to 0: if the refetch fails, the
+    cached figures are still judged by their real age, not by how long the PC has been up.
+    """
+    _usage_cache["retry_after"] = 0.0
+    _usage_cache["fail_count"] = 0
+    _usage_cache["fetched_at"] = min(_usage_cache["fetched_at"], time.monotonic() - CACHE_MAX_AGE)
 
 
 def _cached_five_hour_pct() -> float | None:
@@ -576,7 +602,11 @@ def connection_login():
     cli = person_hours.find_claude_cli()
     if not cli:
         raise HTTPException(409, "Claude Code isn't installed")
-    auth.launch_login(cli)
+    try:
+        auth.launch_login(cli)
+    except OSError as ex:  # the CLI moved since it was found, or Windows wouldn't start it
+        print(f"[login {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] couldn't start {cli}: {ex}")
+        raise HTTPException(500, f"Couldn't start the sign-in window ({cli}): {ex.strerror or ex}")
     return _connection()
 
 
@@ -586,8 +616,7 @@ async def connection_renew():
     renewed = await asyncio.get_running_loop().run_in_executor(
         None, lambda: auth.refresh_token(force=True))
     if renewed:
-        _usage_cache["retry_after"] = 0.0
-        _usage_cache["fetched_at"] = 0.0
+        _refetch_quota_now()
     await _get_usage_data()
     return {"renewed": renewed, **_connection()}
 
@@ -626,10 +655,7 @@ async def refresh(force: bool = Query(default=False)):
 
     Also resets the quota fetch backoff so a stuck quota error is retried immediately.
     """
-    # Clear quota backoff so the next poll retries the live API immediately.
-    _usage_cache["retry_after"] = 0.0
-    _usage_cache["fail_count"] = 0
-    _usage_cache["fetched_at"] = 0.0
+    _refetch_quota_now()
 
     if _ingest_status.get("running"):
         return {"message": "Ingest already running"}

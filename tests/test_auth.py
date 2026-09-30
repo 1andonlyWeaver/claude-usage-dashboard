@@ -1,4 +1,5 @@
 import json
+import threading
 import time
 from datetime import datetime
 
@@ -134,6 +135,16 @@ def test_refresh_failure_logs_never_include_a_token(isolated_credentials, monkey
     assert "SECRET" not in out
 
 
+def test_a_transient_renewal_failure_is_forgotten_by_the_next_attempt(isolated_credentials,
+                                                                      monkeypatch):
+    write_credentials(isolated_credentials)
+    urlopen, _ = fake_urlopen([RuntimeError("connection reset")])
+    monkeypatch.setattr(auth.urllib.request, "urlopen", urlopen)
+    assert auth.refresh_token(force=True) is False and auth.last_refresh_transient()
+    write_credentials(isolated_credentials, refresh="")
+    assert auth.refresh_token(force=True) is False and not auth.last_refresh_transient()
+
+
 def test_forced_refresh_skips_the_throttle_and_the_refused_flag(isolated_credentials, monkeypatch):
     write_credentials(isolated_credentials, expires_in=-60)
     auth.mark_rejected(auth.credentials_signature())
@@ -214,6 +225,33 @@ def test_sign_in_opens_one_console_at_a_time(monkeypatch):
     assert auth.launch_login("C:/claude.exe") is False
     assert FakePopen.launched == [["C:/claude.exe", "auth", "login", "--claudeai"]]
     assert auth.login_running()
+
+
+def test_two_sign_in_clicks_at_once_open_one_console(monkeypatch):
+    """The login endpoint runs in a thread pool, so two quick POSTs can overlap."""
+    starting, release = threading.Event(), threading.Event()
+    launched = []
+
+    class SlowPopen(FakePopen):
+        def __init__(self, args, **kwargs):  # a console window takes a moment to appear
+            launched.append(args)
+            starting.set()
+            release.wait(5)
+            self.returncode = None
+    monkeypatch.setattr(auth.subprocess, "Popen", SlowPopen)
+
+    results = []
+    first = threading.Thread(target=lambda: results.append(auth.launch_login("C:/claude.exe")))
+    second = threading.Thread(target=lambda: results.append(auth.launch_login("C:/claude.exe")))
+    first.start()
+    assert starting.wait(5)
+    second.start()
+    second.join(0.5)  # without a lock, the second click reaches Popen well within this
+    release.set()
+    first.join(5)
+    second.join(5)
+    assert len(launched) == 1
+    assert sorted(results) == [False, True]
 
 
 def test_sign_in_can_be_retried_after_the_console_closes(monkeypatch):
