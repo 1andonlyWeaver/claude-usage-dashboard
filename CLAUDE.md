@@ -22,18 +22,22 @@ Manual ingest only (without starting the server):
 conda activate claude-usage-dashboard && python ingest.py
 ```
 
-Run the tests. Each test gets its own temp DB, and an autouse guard fails any test that would spawn the real `claude` CLI:
+Run the tests. Each test gets its own temp DB, settings file and credentials file, and an autouse guard fails any test that would spawn a real process (the `claude` CLI would spend quota or open a sign-in window):
 ```bash
 conda activate claude-usage-dashboard && python -m pytest
 ```
+`httpx` is a pip test dependency in `environment.yml` (starlette's `TestClient` needs it). `pytest.ini` filters the anyio `BlockingPortal` deprecation warning that `TestClient` raises.
 
 ## Architecture
 
 ```
-app.py       FastAPI server — 16 API endpoints, background ingest and person-hours threads, serves templates/
+app.py       FastAPI server — 20 API endpoints, local-only request guard, background ingest and person-hours threads, serves templates/
 db.py        SQLite query layer — pricing constants, token aggregations, cost calculations, person-hours figures
 ingest.py    ETL pipeline — scans ~/.claude/projects/**/*.jsonl, deduplicates, writes to SQLite
 person_hours.py  Person-hours judge — one-day transcript summaries, `claude -p` (Sonnet) calls, queue, worker gating, CLI
+auth.py      Claude Code OAuth token — reads ~/.claude/.credentials.json, renews it on request, connection status, sign-in launcher
+paths.py     Where bundled files, data and logs live (repo when run from source, %LOCALAPPDATA% when frozen; CUD_DATA_DIR overrides data)
+settings.py  User settings in data/settings.json: judge opt-in, automatic token renewal
 tests/       pytest suite
 templates/   Jinja2 HTML (single index.html)
 static/      dashboard.js (Chart.js, quota polling), style.css (glassmorphism dark theme)
@@ -51,7 +55,14 @@ logs/        dashboard.log — server output when run via Task Scheduler; not co
 
 **Ingest behavior**: On startup, a background thread runs ingest automatically if the DB is missing or empty. The `/api/refresh` endpoint triggers a full re-ingest. File metadata (`ingest_meta` table) is used to skip unchanged files.
 
-**Quota source**: Fetched from the Anthropic OAuth usage API (`https://api.anthropic.com/api/oauth/usage`) using the token in `~/.claude/.credentials.json`. Response is cached 360s in-memory and on disk at `data/quota_cache.json`. Frontend polls `/api/quota` every 5 seconds.
+**Quota source**: Fetched from the Anthropic OAuth usage API (`https://api.anthropic.com/api/oauth/usage`) using the token in `~/.claude/.credentials.json`. Response is cached 360s in-memory and on disk at `data/quota_cache.json`. Frontend polls `/api/quota` every 5 seconds. The dashboard only *reads* the token by default. An expired token is reported as `token-expired` and never sent (the usage API answers expired tokens with 429, which used to look like rate limiting). The token is written back only when the user clicks **Renew now** or turns on automatic renewal in Settings (`auth.refresh_token`).
+
+- **Connection state**: `auth.connection_status()` turns the credentials file, the CLI lookup and the last fetch into one of six states: `not-installed`, `signed-out`, `login-required`, `token-expired`, `unavailable`, `connected`. `/api/quota` responses carry it as `connection`, and the dashboard draws the banner from it. Screen-reader announcements go through `#authLive`; the settings panel's copy result goes through `#settingsLive`.
+- **Backoff**: each quota poll stats the credentials file, and a change lifts any sign-in backoff at once, so a re-login shows up within about 5 s.
+- **Refused credentials**: a 401 from the usage API marks the credentials refused (`auth.mark_rejected`), and the state becomes `login-required`.
+  - In read-only mode the first 401 marks it. With automatic renewal on, `_fetch_usage_sync` renews once and retries, and only a 401 that survives the retry marks it. If the renewal fails for another reason, the error stays `http-401`. A refresh token the OAuth endpoint rejects (`invalid_grant` or 401) marks it too.
+  - The refusal is keyed to the credentials file's `(mtime, size)` signature, taken before the token was read. A file change clears it, whether from a re-login or from Claude Code renewing its own token.
+- **Fetch errors**: `_fetch_usage_sync` returns `rate-limited`, `http-<status>`, `network-error` or an auth status. `network-error` is a fixed code for any non-HTTP exception, because some exception messages quote the request headers. The detail goes to the log through `auth.redact()`, which masks `sk-ant-…` text. Never put a raw exception message into a response or the diagnostics.
 
 ## Key Paths (Runtime)
 
@@ -59,8 +70,9 @@ logs/        dashboard.log — server output when run via Task Scheduler; not co
 |------|---------|
 | `~/.claude/projects/` | Claude session JSONL files, including `<session-id>/subagents/` transcripts (read-only) |
 | `data/usage.db` | SQLite database (auto-created) |
-| `~/.claude/.credentials.json` | OAuth token for quota API (read-only) |
+| `~/.claude/.credentials.json` | OAuth token for the quota API. Read-only unless automatic renewal is on or Renew now is clicked |
 | `data/quota_cache.json` | Disk cache of last known quota data (auto-created) |
+| `data/settings.json` | User settings (auto-created on first change) |
 | `claude` CLI (`PATH` or `~/.local/bin/claude.exe`) | Run headless by the person-hours judge |
 
 ## Database Schema
@@ -96,7 +108,7 @@ When updating pricing, change it in **both** `db.py` and `ingest.py`.
 
 ## Server Restart
 
-Changes to `app.py`, `db.py`, or `ingest.py` require a server restart to take effect (FastAPI loads these once at startup). After making any such change, automatically flag that a restart is needed and offer to restart the server.
+Changes to `app.py`, `auth.py`, `db.py`, `ingest.py`, `paths.py` or `settings.py` require a server restart to take effect (FastAPI loads these once at startup). Template, JS and CSS edits don't. After making any such change, automatically flag that a restart is needed and offer to restart the server.
 
 **When running under Task Scheduler (normal):**
 ```powershell
@@ -120,19 +132,22 @@ The server runs on port 8080; the process can be identified via `netstat -ano | 
 The cost card's `$ | h` toggle shows estimated person-hours: how long a competent professional would need, without AI, to do each Claude Code session-day's work. Design: `docs/superpowers/specs/2026-09-23-person-hours-view-design.md`.
 
 - **Worker** (`app._hours_tick`, every 5 min, first run 60 s after start): queues session-days that have been idle ≥ 30 min and still have a transcript, then judges up to 10 per tick, 2 at a time and ≤ 20 calls per rolling hour, with `claude -p --safe-mode --model sonnet --no-session-persistence --tools ""`. Results go to `person_hour_estimates`.
+  - It judges only after the user turns on **Estimate person-hours** in Settings (off by default). While it's off, ticks still queue session-days, so scheduled runs are recognized, but make no calls.
+  - Turning it on runs a pass at once instead of waiting for the next tick. Turning it off doesn't stop a batch already in flight (at most 10 calls); the next tick is the first to skip.
 - **It pauses** when:
+  - the judge is off in Settings (reason `disabled`, the default)
   - the CLI is missing
   - auth is dead (it notices a re-login by itself)
   - a full ingest is running
   - the 5-hour quota is ≥ 80%. It uses the last known reading, which can be stale when no browser tab is open.
-  - the OAuth token has less than ~35 min left. It first asks `_refresh_oauth_token()` to refresh early, so the CLI never has to.
+  - the OAuth token has less than ~35 min left. With automatic renewal on, it first asks `auth.refresh_token()` to renew early, so the CLI never has to; otherwise it waits for Claude Code to renew the token.
 - **Breaker**: after 3 failed calls in a row, the rest of that batch is left unclaimed; those rows wait an hour without losing an attempt. The worker then judges at most one session-day an hour (reason `failing`, shown as paused) until a call succeeds.
 - **Provisional figures**: unjudged session-days show active hours × the median judged leverage. The default of 5× applies until a group (interactive or scheduled) has 10 judged days with ≥ 0.1 active hours in the last 90 days. `db._leverage` caches the median until judged estimates change.
 - **Scheduled runs** (sessions whose first prompt starts with `<scheduled-task`) get their own line, not the headline. Until the worker queues a run, it counts as interactive.
 - **Quota**: judge calls use subscription quota, roughly 0.1–0.2% of the weekly quota once the backfill is done. They write no transcript, so `detect_other_pct()` counts an interval with a judge call as local activity.
-- **Settings** are constants at the top of `person_hours.py`; the leverage constants are in `db.py`. `PERSON_HOURS_WORKER=off` disables the worker, e.g. for a test server.
+- **Settings** are constants at the top of `person_hours.py`; the leverage constants are in `db.py`. `PERSON_HOURS_WORKER=off` stops the worker entirely (no queueing either), e.g. for a test server. The user-facing toggles (`judge_enabled`, `auto_refresh_token`) live in `data/settings.json`.
 - **Manual backfill**: `python person_hours.py --backfill 90 [--limit N] [--dry-run] [--retry-failed]`.
-  - Keeps the hourly cap but skips the other gates (quota, auth, token, ingest).
+  - Keeps the hourly cap but skips the other gates (quota, auth, token, ingest) and ignores the Settings toggle, since a person ran it.
   - Stops (exit 1) after 3 failed calls in a row.
   - Safe to run while the server's worker is on, because rows are claimed before they're judged.
   - `--dry-run` still queues rows.
@@ -149,7 +164,10 @@ The cost card's `$ | h` toggle shows estimated person-hours: how long a competen
 
 ## Gotchas
 
-- **Tests never touch `data/usage.db`.** An autouse fixture in `tests/conftest.py` points `db.DB_PATH` and `ingest.DB_PATH` at a per-test temp file.
+- **Tests never touch `data/usage.db`.** An autouse fixture in `tests/conftest.py` points `db.DB_PATH` and `ingest.DB_PATH` at a per-test temp file. `tests/conftest.py` also redirects `settings.SETTINGS_PATH` and `auth.CREDENTIALS_FILE` to per-test temp files and forbids `subprocess.run` / `subprocess.Popen`.
+- **Local-only guard.** Requests whose Host isn't `127.0.0.1`, `localhost` or `[::1]` get 403, and so do state-changing requests whose `Origin` isn't the dashboard's own. curl sends no `Origin`, so `curl -X POST http://127.0.0.1:8080/api/refresh` still works.
+- **Credentials writes go through `auth.refresh_token()` only**, and it runs only when automatic renewal is on or the user clicks Renew now. Everything else reads the file.
+- **Settings file.** `settings.load()` reads `data/settings.json` on every call, so a change applies on the next quota poll or judge tick without a restart. One `RLock` guards reads and writes, and `update()` retries the file replace up to 5 times on a Windows `PermissionError` (antivirus or an indexer holding the file). A missing or unreadable file, or a stored value of the wrong type, gives the default.
 - **Force re-ingest required** after schema migrations or `extract_project_name` changes — unchanged files are skipped otherwise. Use `POST /api/refresh?force=true` or delete `ingest_meta` rows manually.
 - **Subagent messages keep the parent's `session_id`.** Subagent transcript lines carry the parent session's `sessionId` (with `isSidechain: true`), and ingest stores them as-is. Session lists and drill-down therefore include subagent tokens, and every `COUNT(DISTINCT session_id)` metric counts a session once no matter how many agents it spawned. Nothing records which rows are sidechain; add a column if you ever need to split them out. Dedup is by `msg_id` (the API message id), and subagent ids don't overlap with the parent's (verified 2026-09-23: 0 shared ids across ~18.6k subagent messages, and no top-level file contains inlined `isSidechain` messages). Before this was added, subagent usage was missing entirely, which undercounted 30-day output tokens by about half and made `detect_other_pct` attribute subagent quota use to "other".
 - **Forked/resumed sessions share msg_ids.** A fork copies earlier messages into a new top-level file under a new `sessionId`, and `INSERT OR REPLACE` gives each shared `msg_id` to whichever file was ingested last. A force re-ingest can therefore move rows between the two sessions. Token totals are unaffected.
@@ -159,9 +177,11 @@ The cost card's `$ | h` toggle shows estimated person-hours: how long a competen
 
 ## API Endpoints
 
-`/api/quota`, `/api/ingest-status`, `/api/refresh` (POST), `/api/daily`, `/api/projects`, `/api/models`, `/api/heatmap`, `/api/sessions`, `/api/session/{id}`, `/api/session/{id}/hours`, `/api/rate`, `/api/cost`, `/api/hours`, `/api/sources`, `/api/stats`, `/api/window`
+`/api/quota`, `/api/connection`, `/api/connection/login` (POST), `/api/connection/renew` (POST), `/api/settings` (GET/POST), `/api/ingest-status`, `/api/refresh` (POST), `/api/daily`, `/api/projects`, `/api/models`, `/api/heatmap`, `/api/sessions`, `/api/session/{id}`, `/api/session/{id}/hours`, `/api/rate`, `/api/cost`, `/api/hours`, `/api/sources`, `/api/stats`, `/api/window`
 
 `/api/hours?days=30` returns person-hours for the cost card's `h` view: interactive hours (judged + provisional), scheduled runs, active hours, leverage, hours by project, the judge model, and the `worker` state. `/api/session/{id}/hours` returns per-day person-hours for the drill-down panel. `/api/sessions` rows carry `person_hours` and `hours_status` (`done` / `provisional` / `partial`; null for Desktop sessions).
+
+`/api/connection` returns the connection state with `title`, `detail`, `actions` (`install` / `sign-in` / `renew`), `login_running` and a token-free `diagnostics` text. `/api/connection/login` opens `claude auth login --claudeai` in a console window (409 without the CLI). `/api/connection/renew` makes one forced token renewal. `/api/settings` reads or changes `judge_enabled` and `auto_refresh_token` (400 on unknown keys or non-boolean values).
 
 `/api/window?type=5h|7d&group_by=none|token_type|project|model` — token buckets within the current quota window (5-min or 60-min buckets).
 
