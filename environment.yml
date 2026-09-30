@@ -11,4 +11,4 @@ dependencies:
     - uvicorn[standard]
     - jinja2
     - orjson
-    - httpx
+    - httpx2

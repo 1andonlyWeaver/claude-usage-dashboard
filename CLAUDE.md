@@ -26,8 +26,7 @@ Run the tests. Each test gets its own temp DB, settings file and credentials fil
 ```bash
 conda activate claude-usage-dashboard && python -m pytest
 ```
-`httpx` is a pip test dependency in `environment.yml` (starlette's `TestClient` needs it). `pytest.ini` filters the anyio `BlockingPortal` deprecation warning that `TestClient` raises.
-An existing env created before `httpx` was added needs `pip install httpx` (inside the activated env) to run the tests.
+`httpx2` is a pip test dependency in `environment.yml`. Starlette's `TestClient` needs it; with plain `httpx` it still works but warns. An env created before `httpx2` was added needs `pip install httpx2` (inside the activated env). The suite finishes with no warnings; treat a new one as something to fix, not filter.
 
 ## Architecture
 

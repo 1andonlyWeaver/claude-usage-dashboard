@@ -9,7 +9,7 @@ import time
 import traceback
 import urllib.request
 import urllib.error
-from contextlib import closing
+from contextlib import asynccontextmanager, closing
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
@@ -42,7 +42,15 @@ QUOTA_CACHE_MAX_STALE = 600  # seconds: accept disk-cached data up to 10 min old
 FIVE_HOUR_WINDOW = 5 * 3600
 SEVEN_DAY_WINDOW = 7 * 24 * 3600
 
-app = FastAPI(title="Claude Usage Dashboard")
+@asynccontextmanager
+async def _lifespan(_app):
+    """Run startup() once as the server starts. Nothing needs undoing at shutdown: the
+    background threads are daemons."""
+    await startup()  # defined further down, found by name when the server starts
+    yield
+
+
+app = FastAPI(title="Claude Usage Dashboard", lifespan=_lifespan)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
@@ -528,7 +536,6 @@ def _hours_tick():
         t.start()
 
 
-@app.on_event("startup")
 async def startup():
     """Kick off ingest if DB is missing or stale, then schedule periodic ingest and judging."""
     paths.DATA_DIR.mkdir(parents=True, exist_ok=True)  # the quota cache write assumes it exists
