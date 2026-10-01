@@ -1,0 +1,4 @@
+# Build tools for the release (packaging/ClaudeUsageDashboard.spec). Running or testing the app
+# doesn't need them. Install with: pip install -r packaging/requirements-build.txt
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.8

@@ -28,3 +28,7 @@ Thumbs.db
 
 # Local dashboard screenshots
 dashboard-*.png
+
+# Release builds (PyInstaller and Inno Setup output)
+build/
+dist/
