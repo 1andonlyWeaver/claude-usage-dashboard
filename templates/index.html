@@ -65,6 +65,19 @@
     <!-- Always in the page, so screen readers announce changes to it (the banner itself comes and goes) -->
     <div id="authLive" class="sr-only" role="status"></div>
 
+    <!-- A newer release (hidden until /api/update says there's one the person hasn't dismissed) -->
+    <div class="auth-banner update-banner" id="updateBanner" hidden>
+      <span class="auth-banner-icon" aria-hidden="true">&#8593;</span>
+      <div class="auth-banner-text">
+        <strong id="updateTitle"></strong>
+        <span>Download the installer and run it over this one. Your data and settings stay.</span>
+      </div>
+      <div class="auth-banner-actions">
+        <a class="btn-refresh" id="updateLink" href="#" target="_blank" rel="noopener">Download</a>
+        <button class="btn-refresh" type="button" onclick="dismissUpdate()">Dismiss</button>
+      </div>
+    </div>
+
     <!-- Ingest progress bar (hidden when done) -->
     <div class="ingest-banner" id="ingestBanner" style="display:none">
       <div class="ingest-progress-wrap">
@@ -333,6 +346,20 @@
           <div><button class="btn-refresh" type="button" onclick="copyDiagnostics()">Copy diagnostics</button></div>
           <p id="settingsLive" class="sr-only" role="status"></p>
           <p class="setting-help" id="copyResult" aria-hidden="true"></p>
+        </section>
+
+        <section class="settings-section" aria-labelledby="updatesHeading">
+          <h3 class="settings-heading" id="updatesHeading">Updates</h3>
+          <label class="setting-row">
+            <input type="checkbox" role="switch" id="setUpdates" aria-labelledby="setUpdatesName"
+                   aria-describedby="setUpdatesHelp" onchange="saveSetting('update_check', this)">
+            <span>
+              <span class="setting-name" id="setUpdatesName">Check for updates</span>
+              <span class="setting-help" id="setUpdatesHelp">Once a day, asks GitHub for the number of the latest release. Nothing about you or your usage goes with it.</span>
+            </span>
+          </label>
+          <p class="setting-help" id="updateStatus" role="status"></p>
+          <div><button class="btn-refresh" type="button" id="btnCheckUpdate" onclick="checkForUpdates()">Check now</button></div>
         </section>
         <p class="setting-help">Claude Usage Dashboard {{ version }}</p>
       </div>

@@ -63,6 +63,8 @@ window.addEventListener('DOMContentLoaded', () => {
   initAll();
   startQuotaPolling();
   checkIngestStatus();
+  loadUpdate();
+  setInterval(loadUpdate, UPDATE_POLL_MS);
 });
 
 async function initAll() {
@@ -1460,7 +1462,7 @@ let _settingsReturnFocus = null;
 
 // While the modal is open, keep keyboard focus out of the page behind it.
 function setBackgroundInert(on) {
-  for (const el of document.querySelectorAll('.header, .main, #authBanner, #authLive, #ingestBanner, #sessionPanel')) {
+  for (const el of document.querySelectorAll('.header, .main, #authBanner, #authLive, #updateBanner, #ingestBanner, #sessionPanel')) {
     el.inert = on;
   }
 }
@@ -1479,6 +1481,8 @@ async function openSettings() {
     const [s, c] = await Promise.all([apiFetch('/api/settings'), apiFetch('/api/connection')]);
     document.getElementById('setJudge').checked = s.judge_enabled;
     document.getElementById('setRenew').checked = s.auto_refresh_token;
+    document.getElementById('setUpdates').checked = s.update_check;
+    loadUpdate();
     showDiagnostics(c);
   } catch (e) {
     document.getElementById('settingsError').textContent = "Couldn't load settings.";
@@ -1549,6 +1553,88 @@ async function copyDiagnostics() {
     sel.addRange(range);
     setCopyResult('Copying is blocked. The text is selected, so press Ctrl+C.');
   }
+}
+
+// ─── Updates ─────────────────────────────────────────────────
+// The server asks GitHub at most once a day (updates.py); the page only shows the answer.
+const UPDATE_POLL_MS = 30 * 60 * 1000;
+let updateInfo = null;
+
+async function loadUpdate() {
+  try {
+    renderUpdate(await apiFetch('/api/update'));
+  } catch (e) { /* keep showing what we had */ }
+}
+
+function renderUpdate(u) {
+  updateInfo = u;
+  const banner = document.getElementById('updateBanner');
+  if (u.notify) {
+    document.getElementById('updateTitle').textContent = `Version ${u.latest} is available. You have ${u.current}.`;
+    document.getElementById('updateLink').href = u.url;
+  } else if (banner.contains(document.activeElement)) {
+    document.getElementById('lastUpdated').focus();
+  }
+  banner.hidden = !u.notify;
+  showUpdateStatus(u);
+}
+
+// The line under Check now. It's a status region, so rewrite it only when the answer changed.
+function showUpdateStatus(u) {
+  const el = document.getElementById('updateStatus');
+  const key = JSON.stringify([u.available, u.latest, u.error, u.checked_at, u.current]);
+  if (el.dataset.key === key) return;
+  el.dataset.key = key;
+  const when = u.checked_at
+    ? new Date(u.checked_at * 1000).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
+    : '';
+  el.textContent = '';
+  if (u.available) {
+    el.append(`Version ${u.latest} is available. `);
+    const link = document.createElement('a');
+    link.href = u.url;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.textContent = 'Download it';
+    el.append(link);
+  } else if (u.error) {
+    el.textContent = when ? `Couldn't reach GitHub at ${when}. You have ${u.current}.`
+                          : `Couldn't reach GitHub. You have ${u.current}.`;
+  } else if (u.latest) {
+    el.textContent = `You have the latest version, ${u.current}. Checked ${when}.`;
+  } else {
+    el.textContent = `Not checked yet. You have ${u.current}.`;
+  }
+}
+
+async function checkForUpdates() {
+  const btn = document.getElementById('btnCheckUpdate');
+  if (btn.getAttribute('aria-disabled') === 'true') return;
+  btn.setAttribute('aria-disabled', 'true');
+  btn.textContent = 'Checking…';
+  try {
+    renderUpdate(await apiFetch('/api/update/check', { method: 'POST' }));
+  } catch (e) {
+    const el = document.getElementById('updateStatus');
+    el.dataset.key = '';
+    el.textContent = "Couldn't check for updates.";
+  } finally {
+    btn.removeAttribute('aria-disabled');
+    btn.textContent = 'Check now';
+  }
+}
+
+async function dismissUpdate() {
+  if (!updateInfo || !updateInfo.latest) return;
+  document.getElementById('lastUpdated').focus();
+  document.getElementById('updateBanner').hidden = true;
+  try {
+    await apiFetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dismissed_version: updateInfo.latest }),
+    });
+  } catch (e) { /* hidden for now; it comes back at the next poll */ }
 }
 
 // ─── Cost ────────────────────────────────────────────────────
