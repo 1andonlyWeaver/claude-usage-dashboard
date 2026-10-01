@@ -1,6 +1,6 @@
 """
-The desktop app's tray icon: its menu, its attention badge, and one Windows notification
-when the Claude sign-in needs the person.
+The desktop app's tray icon: its menu (Open, Start at login, Check for updates, Quit), its
+attention badge, and one Windows notification when the Claude sign-in needs the person.
 
 Every 30 s it reads /api/connection from the app's own server. That call also runs the
 usual quota fetch, so the figures stay fresh while no window is polling.
@@ -85,6 +85,7 @@ class Tray:
             pystray.MenuItem("Open in browser", lambda: webbrowser.open(self.url)),
             pystray.MenuItem("Start at login", self.toggle_autostart,
                              checked=lambda item: autostart.is_enabled()),
+            pystray.MenuItem("Check for updates", self.check_for_updates),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", self.shell.quit),
         )
@@ -141,3 +142,23 @@ class Tray:
         except OSError as ex:
             self.icon.notify(f"Couldn't change Start at login: {ex.strerror or ex}", TITLE)
         self.icon.update_menu()
+
+    def check_for_updates(self) -> None:
+        """Ask the server to check GitHub now. On a thread of its own: the check can take
+        seconds, and menu actions run on the icon's thread."""
+        threading.Thread(target=self._report_update_check, name="update-check", daemon=True).start()
+
+    def _report_update_check(self) -> None:
+        try:
+            status = json.loads(instance.call(self.port, "/api/update/check", method="POST", timeout=30))
+        except (OSError, ValueError):
+            status = None
+        if not isinstance(status, dict):
+            self.icon.notify("Couldn't check for updates. Try again in a minute.", TITLE)
+        elif status.get("available"):
+            self.icon.notify(f"Version {status.get('latest')} is available. Opening the download page.", TITLE)
+            webbrowser.open(status["url"])
+        elif status.get("error"):
+            self.icon.notify("Couldn't reach GitHub to check for updates. Try again later.", TITLE)
+        else:
+            self.icon.notify(f"You have the latest version, {status.get('current')}.", TITLE)
