@@ -31,12 +31,22 @@ Without conda, `pip install -r requirements.txt` followed by `python app.py --po
 
 Then open http://127.0.0.1:8080/. The first start reads every log you have, so give it a minute or two if you've used Claude Code a lot.
 
+### As a desktop app
+
+`python desktop.py` runs the same dashboard in its own window, with an icon in the tray. Closing the window only hides it. The tray icon's menu brings it back, opens the dashboard in your browser instead, turns **Start at login** on or off, and quits. It listens on port 8765, or on any free port if something else has 8765. Starting it a second time just brings the first window forward.
+
+The window needs Microsoft's WebView2 runtime. Windows 11 has it, and so do most Windows 10 PCs with a current Edge. Without it, the dashboard opens in your browser and the tray icon works as usual.
+
+Don't run `desktop.py` and `app.py` from the same folder at the same time. They'd share one database, and with automatic renewal on they'd race to renew your token.
+
 ## When your sign-in needs attention
 
 If the dashboard can't read your quota, a banner at the top says why and offers a fix.
 
 - Not signed in, or the sign-in expired: click **Sign in**. A console window opens with `claude auth login`. Once you finish there, the dashboard picks up the new sign-in within a few seconds.
 - The token expired: this is normal after a night away. It renews the next time you use Claude Code, or you can click **Renew now**.
+
+The desktop app also puts an amber dot on its tray icon and shows one Windows notification when you need to sign in or install Claude Code.
 
 Settings (the gear icon) can renew the token automatically. That's off by default: if the dashboard and Claude Code renew at the same moment, one of them loses, and you'd have to sign in again.
 
@@ -48,7 +58,7 @@ That costs quota from your plan: about 1–2% of a week's quota to catch up on t
 
 ## Where your data lives
 
-Running from source, it all stays in the repo folder. `data\` holds the database, a quota cache and your settings. The server prints its log to the console you started it from; started without a console (with `pythonw`), it writes to `logs\dashboard.log` instead. The installed app will keep the same files under `%LOCALAPPDATA%\ClaudeUsageDashboard`.
+Running from source, it all stays in the repo folder. `data\` holds the database, a quota cache and your settings. The server prints its log to the console you started it from; started without a console (with `pythonw`), it writes to `logs\dashboard.log` instead. `desktop.py` logs the same way. The desktop app also keeps `data\runtime.json`, which tells a second launch which port the first one is on, and `data\webview`, the window's own browser storage. The installed app will keep the same files under `%LOCALAPPDATA%\ClaudeUsageDashboard`.
 
 Think twice before deleting `data\usage.db`. The dashboard rebuilds it from your logs on the next start, but Claude Code deletes logs older than 30 days by default, so anything older is gone for good, person-hours estimates included.
 

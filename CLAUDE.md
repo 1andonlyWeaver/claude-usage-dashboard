@@ -17,7 +17,15 @@ conda activate claude-usage-dashboard && python app.py --port 8080
 # Serves at http://127.0.0.1:8080/
 ```
 
-`environment.yml` installs `requirements.txt` (the pinned runtime packages) plus the test tools. When you upgrade a runtime package, change its pin in `requirements.txt`.
+Run the desktop app (window + tray, one copy per Windows session):
+```bash
+conda activate claude-usage-dashboard && python desktop.py               # window + tray on port 8765, or a free port
+conda activate claude-usage-dashboard && python desktop.py --background  # tray only: what Start at login runs
+conda activate claude-usage-dashboard && python desktop.py --smoke       # free port, checks / and /api/connection, exits 0/1
+```
+Don't run it from the main checkout while the scheduled :8080 server runs: both would use `data/usage.db`, and with automatic renewal on they'd race on the refresh token. Try it from a worktree with `USERPROFILE` and `CUD_DATA_DIR` pointed at a scratch home.
+
+`environment.yml` installs `requirements.txt` (the pinned runtime packages) plus the test tools. When you upgrade a runtime package, change its pin in `requirements.txt`. An env created before the desktop packages (pywebview, pystray, Pillow) were pinned needs `pip install -r requirements.txt` inside the activated env.
 
 Manual ingest only (without starting the server):
 ```bash
@@ -33,13 +41,17 @@ conda activate claude-usage-dashboard && python -m pytest
 ## Architecture
 
 ```
-app.py       FastAPI server — 20 API endpoints, local-only request guard, background ingest and person-hours threads, serves templates/
+app.py       FastAPI server — 22 API endpoints, local-only request guard, background ingest and person-hours threads, serves templates/
 db.py        SQLite query layer — pricing constants, token aggregations, cost calculations, person-hours figures
 ingest.py    ETL pipeline — scans ~/.claude/projects/**/*.jsonl, deduplicates, writes to SQLite
 person_hours.py  Person-hours judge — one-day transcript summaries, `claude -p` (Sonnet) calls, queue, worker gating, CLI
 auth.py      Claude Code OAuth token — reads ~/.claude/.credentials.json, renews it on request, connection status, sign-in launcher
 paths.py     Where bundled files, data and logs live (repo when run from source, %LOCALAPPDATA% when frozen; CUD_DATA_DIR overrides data)
-settings.py  User settings in data/settings.json: judge opt-in, automatic token renewal
+settings.py  User settings in data/settings.json: judge opt-in, automatic token renewal, the desktop app's preferred_port (8765)
+autostart.py  Start at login for the desktop app: the HKCU Run value, and Task Manager's StartupApproved switch for it
+instance.py  One desktop app per Windows session: the Local\ClaudeUsageDashboard mutex, data/runtime.json (port, pid), proxy-free calls to the app's own server
+tray.py      The desktop app's tray icon (pystray): menu, amber attention dot, one notification when the sign-in needs the person; polls /api/connection every 30 s
+desktop.py   Desktop entry point: pywebview window (close hides to tray), uvicorn thread on preferred_port or a free one, tray, second-launch handoff, --background, --smoke
 applog.py    The log file: opens logs/dashboard.log as UTF-8, rotates it at 5 MB, makes print() safe on any stdout
 version.py   __version__, a bare release number (2.0.0) shown in Settings and the diagnostics
 requirements.txt  Pinned runtime packages for the release build; environment.yml installs it too
@@ -83,6 +95,9 @@ logs/        dashboard.log — server output under Task Scheduler or pythonw, UT
 | `~/.claude/.credentials.json` | OAuth token for the quota API. Read-only unless automatic renewal is on or Renew now is clicked |
 | `data/quota_cache.json` | Disk cache of last known quota data (auto-created) |
 | `data/settings.json` | User settings (auto-created on first change) |
+| `data/runtime.json` | The running desktop app's port and pid, for a second launch; removed at Quit |
+| `data/webview/` | The desktop window's WebView2 profile, so `localStorage` survives restarts |
+| `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\ClaudeUsageDashboard` | Start at login (desktop app, tray menu). Task Manager's switch is under `...\Explorer\StartupApproved\Run` |
 | `claude` CLI (`PATH` or `~/.local/bin/claude.exe`) | Run headless by the person-hours judge |
 
 ## Database Schema
@@ -119,6 +134,8 @@ When updating pricing, change it in **both** `db.py` and `ingest.py`.
 ## Server Restart
 
 Changes to `app.py`, `applog.py`, `auth.py`, `db.py`, `ingest.py`, `paths.py`, `person_hours.py`, `settings.py` or `version.py` require a server restart to take effect (FastAPI loads these once at startup). Template, JS and CSS edits don't. After making any such change, automatically flag that a restart is needed and offer to restart the server.
+
+The desktop app (`python desktop.py`) loads the same modules plus `desktop.py`, `tray.py`, `instance.py` and `autostart.py`. After changing any of them, Quit it from the tray and start it again.
 
 **When running under Task Scheduler (normal):**
 ```powershell
@@ -173,8 +190,9 @@ The cost card's `$ | h` toggle shows estimated person-hours: how long a competen
 
 ## Gotchas
 
-- **Tests never touch `data/usage.db`.** An autouse fixture in `tests/conftest.py` points `db.DB_PATH` and `ingest.DB_PATH` at a per-test temp file. `tests/conftest.py` also redirects `settings.SETTINGS_PATH` and `auth.CREDENTIALS_FILE` to per-test temp files and forbids `subprocess.run` / `subprocess.Popen`.
+- **Tests never touch `data/usage.db`.** An autouse fixture in `tests/conftest.py` points `db.DB_PATH` and `ingest.DB_PATH` at a per-test temp file. `tests/conftest.py` also redirects `settings.SETTINGS_PATH` and `auth.CREDENTIALS_FILE` to per-test temp files and forbids `subprocess.run` / `subprocess.Popen`. Every test also gets an in-memory `winreg` in `autostart` (`tests/fake_winreg.py`), so none can touch the real registry. `instance.RUNTIME_FILE` points at a per-test file too.
 - **Local-only guard.** Requests whose Host isn't `127.0.0.1`, `localhost` or `[::1]` get 403, and so do state-changing requests whose `Origin` isn't the dashboard's own. curl sends no `Origin`, so `curl -X POST http://127.0.0.1:8080/api/refresh` still works.
+- **Desktop app threads.** pywebview owns the main thread. uvicorn runs in a thread, so it installs no signal handlers. pystray runs its icon in another thread, and its setup callback is the 30-second connection poll. The close button hides the window only when WinForms reports `CloseReason.UserClosing` and Quit wasn't chosen, so Windows sign-out is never held up. Calls to the app's own server go through `instance.call()`, which ignores proxies.
 - **Credentials writes go through `auth.refresh_token()` only**, and it runs only when automatic renewal is on or the user clicks Renew now. Everything else reads the file.
 - **Settings file.** `settings.load()` reads `data/settings.json` on every call, so a change applies on the next quota poll or judge tick without a restart. One `RLock` guards reads and writes, and `update()` tries the file replace up to 10 times over about a second on a Windows `PermissionError` (antivirus or an indexer holding the file). A missing or unreadable file, or a stored value of the wrong type, gives the default.
 - **Force re-ingest required** after schema migrations or `extract_project_name` changes — unchanged files are skipped otherwise. Use `POST /api/refresh?force=true` or delete `ingest_meta` rows manually.
@@ -187,11 +205,13 @@ The cost card's `$ | h` toggle shows estimated person-hours: how long a competen
 
 ## API Endpoints
 
-`/api/quota`, `/api/connection`, `/api/connection/login` (POST), `/api/connection/renew` (POST), `/api/settings` (GET/POST), `/api/ingest-status`, `/api/refresh` (POST), `/api/daily`, `/api/projects`, `/api/models`, `/api/heatmap`, `/api/sessions`, `/api/session/{id}`, `/api/session/{id}/hours`, `/api/rate`, `/api/cost`, `/api/hours`, `/api/sources`, `/api/stats`, `/api/window`
+`/api/quota`, `/api/connection`, `/api/connection/login` (POST), `/api/connection/renew` (POST), `/api/settings` (GET/POST), `/api/ingest-status`, `/api/refresh` (POST), `/api/daily`, `/api/projects`, `/api/models`, `/api/heatmap`, `/api/sessions`, `/api/session/{id}`, `/api/session/{id}/hours`, `/api/rate`, `/api/cost`, `/api/hours`, `/api/sources`, `/api/stats`, `/api/window`, `/api/app/info`, `/api/app/show` (POST)
 
 `/api/hours?days=30` returns person-hours for the cost card's `h` view: interactive hours (judged + provisional), scheduled runs, active hours, leverage, hours by project, the judge model, and the `worker` state. `/api/session/{id}/hours` returns per-day person-hours for the drill-down panel. `/api/sessions` rows carry `person_hours` and `hours_status` (`done` / `provisional` / `partial`; null for Desktop sessions).
 
-`/api/connection` returns the connection state with `title`, `detail`, `actions` (`install` / `sign-in` / `renew`), `login_running` and a token-free `diagnostics` text. `/api/connection/login` opens `claude auth login --claudeai` in a console window, one at a time (409 without the CLI, 500 with the reason if Windows won't start it). `/api/connection/renew` makes one forced token renewal. `/api/settings` reads or changes `judge_enabled` and `auto_refresh_token` (400 on unknown keys or non-boolean values).
+`/api/connection` returns the connection state with `title`, `detail`, `actions` (`install` / `sign-in` / `renew`), `login_running` and a token-free `diagnostics` text. `/api/connection/login` opens `claude auth login --claudeai` in a console window, one at a time (409 without the CLI, 500 with the reason if Windows won't start it). `/api/connection/renew` makes one forced token renewal. `/api/settings` reads or changes `judge_enabled`, `auto_refresh_token` and `preferred_port` (400 on unknown keys or values of the wrong type). `preferred_port` is an int with no UI; the desktop app reads it at start.
+
+`/api/app/info` names the program on the port (`name`, `version`, `desktop`, `pid`, `data_dir`, `log_dir`). `/api/app/show` brings the desktop window forward; a second launch of the desktop app calls it. It answers 409 when `app.py` runs on its own, with no window attached.
 
 `/api/window?type=5h|7d&group_by=none|token_type|project|model` — token buckets within the current quota window (5-min or 60-min buckets).
 

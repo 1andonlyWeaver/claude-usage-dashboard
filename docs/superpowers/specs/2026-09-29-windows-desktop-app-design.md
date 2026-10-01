@@ -38,12 +38,12 @@ Rejected alternatives: a Tauri shell with the Python server as a sidecar (a seco
 
 One process, `ClaudeUsageDashboard.exe`, built from a new `desktop.py`:
 
-- **Main thread: pywebview's GUI loop.** It owns one window, created hidden when launched with `--background` (autostart). The window's `closing` handler hides it and returns `False` to cancel the close. The window uses `private_mode=False` and `storage_path=<data>/webview`; pywebview's default private mode would wipe the `localStorage` that `dashboard.js` uses.
-- **Server thread.** A `uvicorn.Server` running the `app` object on `127.0.0.1`. Passing the object avoids the `"app:app"` import string, which breaks when frozen. It tries port 8765 first and falls back to a free port from the OS. The port in use goes into `<data>/runtime.json`.
-- **Tray thread (pystray).** Menu: Open dashboard (default action), Open in browser, Start at login (checkbox), Check for updates, Quit. The icon has a "needs attention" variant, driven by connection status, which the tray polls in-process every 30 s.
-- **Single instance.** A named mutex, `Local\ClaudeUsageDashboard`, created through ctypes. A second launch reads `runtime.json`, POSTs `/api/app/show` to the running instance, and exits. Inno Setup's `AppMutex` uses the same name, so the installer asks the user to close a running copy.
+- **Main thread: pywebview's GUI loop.** It owns one window, created hidden when launched with `--background` (autostart). Closing the window hides it. A handler on the WinForms form cancels the close and hides the form when `CloseReason` is `UserClosing` and the person hasn't chosen Quit. pywebview's own `closing` event can't tell the close button from Windows signing out, and cancelling a sign-out would hold it up. The window uses `private_mode=False` and `storage_path=<data>/webview`; pywebview's default private mode would wipe the `localStorage` that `dashboard.js` uses.
+- **Server thread.** A `uvicorn.Server` running the `app` object on `127.0.0.1`. Passing the object avoids the `"app:app"` import string, which breaks when frozen. It tries `preferred_port` (a setting, default 8765, used when it's between 1024 and 65535) and falls back to a free port from the OS for that run. A port Windows reserves fails with `PermissionError` and falls back the same way. The port in use goes into `<data>/runtime.json`.
+- **Tray thread (pystray).** Menu: Open dashboard (default action), Open in browser, Start at login (checkbox), Quit. Check for updates joins it in Phase 4, with `updates.py`. The icon has a "needs attention" variant, driven by connection status. Every 30 s the tray reads its own server's `/api/connection` over 127.0.0.1, which also keeps the quota figures fresh while no window is polling. Calls to the app's own server bypass any HTTP proxy.
+- **Single instance.** A named mutex, `Local\ClaudeUsageDashboard`, created through ctypes. A second launch reads `runtime.json`, POSTs `/api/app/show` to the running instance, and exits. `runtime.json` holds `{port, pid}`. The first copy deletes a stale one at start and its own at Quit. A second launch keeps trying for 10 seconds, in case the first copy is still starting, and hands it the foreground with `AllowSetForegroundWindow`. If the first copy has quit by then, the second launch takes over. Inno Setup's `AppMutex` uses the same name, so the installer asks the user to close a running copy.
 - **Quit** sets `server.should_exit`, destroys the window and stops the tray. The existing ingest and judge threads are daemons and die with the process.
-- **No WebView2:** the app opens the dashboard in the default browser instead, and the tray works as usual.
+- **No WebView2:** pywebview would fall back to the old MSHTML engine, which can't run the dashboard. The app stops there and opens the dashboard in the default browser instead (not at a `--background` start), and the tray works as usual.
 
 Running from source doesn't change: `python app.py --port 8080` and the Task Scheduler setup keep working for development. `scripts/launcher.py` and its Job Object stay for that setup; the desktop app is a single process, so it doesn't need them.
 
@@ -55,14 +55,16 @@ Running from source doesn't change: `python app.py --port 8080` and the Task Sch
 | `settings.py` | JSON settings in `DATA_DIR/settings.json`. Defaults, thread-safe load/save, read live so changes need no restart. Keys: `judge_enabled` (false), `auto_refresh_token` (false), `update_check` (true), `dismissed_version`, `preferred_port`. `PERSON_HOURS_WORKER=off` still forces the judge off. |
 | `auth.py` | The OAuth code moved out of `app.py` (`_read_credentials`, `_write_credentials_atomic`, `_credentials_signature`, `_refresh_oauth_token`, `_read_oauth_token`, `_token_seconds_left`, now at `app.py:177-336` and `563-568`), plus the new `connection_status()`. |
 | `desktop.py` | The desktop entry point described above. Flags: `--background`, `--smoke`. |
-| `autostart.py` | Reads, writes and removes the HKCU `Run` value through `winreg`. |
+| `autostart.py` | Reads, writes and removes the HKCU `Run` value through `winreg`. Task Manager's Startup switch (`Explorer\StartupApproved\Run`) counts: an entry switched off there reads as off, and turning it on from the tray clears the switch. |
+| `instance.py` | The single-instance mutex, `runtime.json`, and calls to the app's own server that never go through a proxy. |
+| `tray.py` | The pystray icon, its menu, the attention variant and the sign-in notification. |
 | `updates.py` | Fetches `releases/latest` from the GitHub API at most once a day and compares its tag with `__version__`. |
 | `version.py` | `__version__` |
 
 ### Changes to existing code
 
 - **`app.py`**
-  - New endpoints: `/api/connection`, `/api/connection/login` (POST), `/api/connection/renew` (POST), `/api/settings` (GET, POST), `/api/app/info`, `/api/app/show` (POST).
+  - New endpoints: `/api/connection`, `/api/connection/login` (POST), `/api/connection/renew` (POST), `/api/settings` (GET, POST), `/api/app/info`, `/api/app/show` (POST). `/api/app/show` answers 409 when no desktop window is attached (`app.py` run on its own).
   - Local-API guard middleware (below).
   - `_hours_tick` is always scheduled and checks `settings.judge_enabled` on each tick. It pre-refreshes the token only when `auto_refresh_token` is on.
   - The deprecated `@app.on_event("startup")` becomes a lifespan handler.
@@ -100,7 +102,7 @@ Behavior that fixes today's confusing symptoms:
 - **Recover in seconds.** The frontend polls `/api/quota` every 5 s. On each poll, stat the credentials file. If its `(mtime, size)` signature changed, clear the backoff and fetch right away. No 30-second wait, no pressing R.
 - **Sign in** runs `claude auth login` in its own console window (`CREATE_NEW_CONSOLE`). The button stays disabled while that process runs. Success is detected from the credentials file changing.
 - **Renew now** calls the existing `_refresh_oauth_token` once. On `invalid_grant` the state becomes `login-required`.
-- **Tray alerts.** The icon switches to its attention variant. One Windows notification fires on entering `signed-out`, `login-required` or `not-installed`. `token-expired` gets no notification: with automatic refresh off it happens most nights and needs no action.
+- **Tray alerts.** The icon switches to its attention variant. One Windows notification fires on entering `signed-out`, `login-required` or `not-installed`, including when the app starts in one of them. `token-expired` gets no notification: with automatic refresh off it happens most nights and needs no action.
 - **Connection panel** shows the state, token expiry, last successful fetch, last error, CLI path, credentials path and modified time, and the app version. "Copy diagnostics" puts the same information on the clipboard for a user to send along. It never includes a token.
 
 ### Local-API guard
@@ -188,3 +190,4 @@ Manual checks:
 - **Read-only mode lets the quota gauge go stale.** It stays stale from the token's expiry until the user next runs Claude Code or clicks Renew now. Usage in claude.ai during that time isn't shown until then.
 - **The installer is unsigned**, so SmartScreen warns on first run. PyInstaller builds are also sometimes flagged by antivirus.
 - **The usage API and the refresh endpoint are undocumented.** If Anthropic changes them, the quota gauge stops working and the app falls back to `unavailable` or `login-required`. The token-based charts keep working.
+- **Another Windows user signed in at the same time** (fast user switching) can open the first user's dashboard at `127.0.0.1`: the local-only guard checks the host, not the user. The second user's own copy falls back to another port.

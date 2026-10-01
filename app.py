@@ -109,6 +109,9 @@ _fetch_lock = asyncio.Lock()  # prevents concurrent API calls when cache is stal
 HOURS_WORKER_ENABLED = os.environ.get("PERSON_HOURS_WORKER", "on").lower() not in ("0", "off", "false")
 _hours_lock = threading.Lock()
 
+# desktop.py sets this to its window's show(); it stays None when app.py runs on its own.
+desktop_show = None
+
 # Seed in-memory cache from disk on startup so restarts don't lose last known quota
 try:
     _saved = json.loads(QUOTA_CACHE_FILE.read_text())
@@ -648,6 +651,23 @@ def post_settings(changes: dict = Body(...)):
     if after["auto_refresh_token"] != before["auto_refresh_token"]:
         _usage_cache["retry_after"] = 0.0  # re-check the token under the new rule
     return after
+
+
+@app.get("/api/app/info")
+def app_info():
+    """Which program answers on this port, and where it keeps its files."""
+    return {"name": paths.APP_NAME, "version": version.__version__,
+            "desktop": desktop_show is not None, "pid": os.getpid(),
+            "data_dir": str(paths.DATA_DIR), "log_dir": str(paths.LOG_DIR)}
+
+
+@app.post("/api/app/show")
+def app_show():
+    """Bring the desktop window forward. A second launch of the app asks this of the first."""
+    if desktop_show is None:
+        raise HTTPException(409, "No desktop window: this server was started on its own")
+    desktop_show()
+    return {"shown": True}
 
 
 @app.get("/api/ingest-status")
