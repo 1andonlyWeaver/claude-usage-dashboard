@@ -1,4 +1,5 @@
 """The update check: release numbers, the GitHub call, the daily schedule, and what the notice shows."""
+import http.client
 import json
 import urllib.error
 
@@ -83,6 +84,7 @@ def test_a_successful_check_is_saved_and_shown(monkeypatch, isolated_updates):
     (http_error(403), "http-403"),  # GitHub's hourly limit for unauthenticated calls
     (urllib.error.URLError("offline"), "network-error"),
     (TimeoutError("timed out"), "network-error"),
+    (http.client.IncompleteRead(b""), "network-error"),
     (FakeResponse(raw=b"<html>"), "bad-answer"),
 ])
 def test_a_failed_check_keeps_what_was_known_and_records_why(monkeypatch, isolated_updates, failure, code):

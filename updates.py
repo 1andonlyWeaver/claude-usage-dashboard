@@ -7,6 +7,7 @@ Settings and Check for updates in the tray ask at once. Releases are tagged with
 again. The request is a plain GET with the app's name and version as its User-Agent, which
 GitHub requires; nothing about the PC or its usage goes with it.
 """
+import http.client
 import json
 import re
 import threading
@@ -113,7 +114,7 @@ def check(now: float | None = None) -> dict:
         except urllib.error.HTTPError as ex:  # 404 before the first release, 403 at the hourly limit
             latest, error = previous["latest"], f"http-{ex.code}"
             log(f"check failed: HTTP {ex.code}")
-        except OSError as ex:
+        except (OSError, http.client.HTTPException) as ex:
             latest, error = previous["latest"], "network-error"
             log(f"check failed - {type(ex).__name__}: {ex}")
         except ValueError as ex:
