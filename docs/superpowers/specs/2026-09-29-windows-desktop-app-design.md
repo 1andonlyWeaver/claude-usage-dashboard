@@ -1,7 +1,7 @@
 # Windows Desktop App — Design Spec
 
 Date: 2026-09-29
-Status: approved design, not yet implemented. Built in four phases (see "Phases"), one PR each.
+Status: Phases 1–4 are built (PRs #7, #8 and #9, then the packaging PR). Phase 5, moving Jonathan's own setup over, is manual.
 
 ## Goal
 
@@ -38,9 +38,9 @@ Rejected alternatives: a Tauri shell with the Python server as a sidecar (a seco
 
 One process, `ClaudeUsageDashboard.exe`, built from a new `desktop.py`:
 
-- **Main thread: pywebview's GUI loop.** It owns one window, created hidden when launched with `--background` (autostart). Closing the window hides it. A handler on the WinForms form cancels the close and hides the form when `CloseReason` is `UserClosing` and the person hasn't chosen Quit. pywebview's own `closing` event can't tell the close button from Windows signing out, and cancelling a sign-out would hold it up. The window uses `private_mode=False` and `storage_path=<data>/webview`; pywebview's default private mode would wipe the `localStorage` that `dashboard.js` uses.
+- **Main thread: pywebview's GUI loop.** It owns one window, created hidden when launched with `--background` (autostart). Closing the window hides it. A handler on the WinForms form cancels the close and hides the form when `CloseReason` is `UserClosing` and the person hasn't chosen Quit. pywebview's own `closing` event can't tell the close button from Windows signing out, and cancelling a sign-out would hold it up. The window uses `private_mode=False` and `storage_path=<data>/webview`; pywebview's default private mode would wipe the `localStorage` that `dashboard.js` uses. WebView2's browser shortcut keys are switched back on after pywebview's setup, so Ctrl+0, Ctrl+plus and Ctrl+minus zoom (F5, Ctrl+F and Ctrl+P come with them; DevTools stay off).
 - **Server thread.** A `uvicorn.Server` running the `app` object on `127.0.0.1`. Passing the object avoids the `"app:app"` import string, which breaks when frozen. It tries `preferred_port` (a setting, default 8765, used when it's between 1024 and 65535) and falls back to a free port from the OS for that run. A port Windows reserves fails with `PermissionError` and falls back the same way. The port in use goes into `<data>/runtime.json`.
-- **Tray thread (pystray).** Menu: Open dashboard (default action), Open in browser, Start at login (checkbox), Quit. Check for updates joins it in Phase 4, with `updates.py`. The icon has a "needs attention" variant, driven by connection status. Every 30 s the tray reads its own server's `/api/connection` over 127.0.0.1, which also keeps the quota figures fresh while no window is polling. Calls to the app's own server bypass any HTTP proxy.
+- **Tray thread (pystray).** Menu: Open dashboard (default action), Open in browser, Start at login (checkbox), Check for updates, Quit. Check for updates asks the app's own server to check GitHub now, opens the release page when there's a newer version, and otherwise says in a notification that it's up to date or couldn't reach GitHub. The icon has a "needs attention" variant, driven by connection status. Every 30 s the tray reads its own server's `/api/connection` over 127.0.0.1, which also keeps the quota figures fresh while no window is polling. Calls to the app's own server bypass any HTTP proxy.
 - **Single instance.** A named mutex, `Local\ClaudeUsageDashboard`, created through ctypes. A second launch reads `runtime.json`, POSTs `/api/app/show` to the running instance, and exits. `runtime.json` holds `{port, pid}`. The first copy deletes a stale one at start and its own at Quit. A second launch keeps trying for 10 seconds, in case the first copy is still starting, and hands it the foreground with `AllowSetForegroundWindow`. If the first copy has quit by then, the second launch takes over. Inno Setup's `AppMutex` uses the same name, so the installer asks the user to close a running copy.
 - **Quit** sets `server.should_exit`, destroys the window and stops the tray. The existing ingest and judge threads are daemons and die with the process.
 - **No WebView2:** pywebview would fall back to the old MSHTML engine, which can't run the dashboard. The app stops there and opens the dashboard in the default browser instead (not at a `--background` start), and the tray works as usual.
@@ -58,7 +58,7 @@ Running from source doesn't change: `python app.py --port 8080` and the Task Sch
 | `autostart.py` | Reads, writes and removes the HKCU `Run` value through `winreg`. Task Manager's Startup switch (`Explorer\StartupApproved\Run`) counts: an entry switched off there reads as off, and turning it on from the tray clears the switch. |
 | `instance.py` | The single-instance mutex, `runtime.json`, and calls to the app's own server that never go through a proxy. |
 | `tray.py` | The pystray icon, its menu, the attention variant and the sign-in notification. |
-| `updates.py` | Fetches `releases/latest` from the GitHub API at most once a day and compares its tag with `__version__`. |
+| `updates.py` | Asks GitHub's `releases/latest` at most once a day (an hour after a failed check), from an hourly tick in `app.py`, and keeps the answer in `<data>/update.json`. Compares its bare-number tag with `__version__`; any other tag is ignored. `/api/update` reports the answer, and `/api/update/check` (POST) asks at once. The release-page link is built from the validated tag. |
 | `version.py` | `__version__` |
 
 ### Changes to existing code
@@ -74,7 +74,7 @@ Running from source doesn't change: `python app.py --port 8080` and the Task Sch
 - **Frontend**
   - Chart.js is vendored into `static/vendor/` (MIT) and the fonts into `static/fonts/` (OFL).
   - The connection banner is rebuilt from `/api/connection`.
-  - A settings panel, opened from a gear icon, holds the judge toggle, the automatic refresh toggle, connection diagnostics, and the version/update notice.
+  - A settings panel, opened from a gear icon, holds the judge toggle, the automatic refresh toggle, connection diagnostics, and an Updates section (the daily check's switch, its last answer, Check now). A notice under the header offers a newer release with Download and Dismiss; Dismiss stores `dismissed_version`, and the notice stays hidden while the check is off.
 
 ## Connection status
 
@@ -117,22 +117,21 @@ This replaces the per-launch `X-App-Token` header first planned, which would hav
 ## Packaging and release
 
 - **`requirements.txt`**, pinned, used for the build: fastapi, `uvicorn` (plain, without `[standard]`, for a smaller bundle with fewer native wheels), jinja2, orjson, pywebview, pystray, Pillow. The new packages also go into `environment.yml`.
-- **`packaging/ClaudeUsageDashboard.spec`** (PyInstaller): onedir, windowed, `.ico` icon, bundles `static/` and `templates/`, uvicorn hidden imports. pywebview ships its own PyInstaller hooks.
+- **`packaging/ClaudeUsageDashboard.spec`** (PyInstaller): onedir, windowed, `.ico` icon, bundles `static/` and `templates/`, uvicorn hidden imports. pywebview ships its own PyInstaller hooks. `packaging/build_assets.py` draws the icon from `tray.icon_image` at each size and writes the exe's version resource from `version.py`. Its FileDescription is what Windows shows on notifications, the taskbar and Task Manager instead of "Python". No AppUserModelID is set; it would split a pinned shortcut from the running window unless every shortcut carried it.
 - **`packaging/installer.iss`** (Inno Setup)
   - Installs per user with `PrivilegesRequired=lowest`, into `{localappdata}\Programs\Claude Usage Dashboard`.
   - Adds a Start menu shortcut and an optional desktop icon.
-  - A "Start at login" task, checked by default, writes the `Run` value with `--background`.
+  - A "Start at login" task, checked by default, writes the `Run` value as `"<exe>" --background`, exactly as `autostart.command()` does. It's offered on a first install only, where the box decides: unticked removes the value, and ticked also clears Task Manager's switch. An upgrade leaves the value as the tray left it. Setup clears `{app}\_internal` before copying, and installs `LICENSE.txt`.
   - Uses `AppMutex`, and offers "Launch now" on the finish page.
-  - The uninstaller removes the `Run` value and asks before deleting `%LOCALAPPDATA%\ClaudeUsageDashboard`. The default is to keep it.
-- **`.github/workflows/release.yml`**, triggered by pushing a bare-number tag (`2.0.0`) and running on `windows-latest`:
-  1. Install deps.
-  2. Run pytest.
-  3. Fail if the tag doesn't match `version.__version__`.
-  4. Build with PyInstaller.
-  5. Compile the installer with Inno Setup, installing it with choco if it's missing.
-  6. Smoke-test the frozen exe with `--smoke`.
-  7. `gh release create` with `ClaudeUsageDashboard-Setup-<ver>.exe` attached.
-- **`--smoke`** starts the server on a free port, GETs `/` and `/api/connection`, and exits 0 or 1.
+  - The uninstaller removes the `Run` and `StartupApproved` values, whoever wrote them, and asks before deleting `%LOCALAPPDATA%\ClaudeUsageDashboard`. The default is to keep it; a silent uninstall keeps it.
+- **`.github/workflows/release.yml`**, running on `windows-latest`. A pushed bare-number tag (`2.0.0`) runs every step; a pull request touching the build runs all but the first and last:
+  1. Fail if the tag doesn't match `version.__version__`.
+  2. Install deps, and run pytest.
+  3. Build with PyInstaller, and smoke-test the frozen exe with `--smoke`.
+  4. Compile the installer with Inno Setup (preinstalled on the runner; choco 6.7.3 if it's missing).
+  5. Install it silently with Start at login and check the `Run` value. Turn the value off, run Setup again as an upgrade, and check it stays off. Then run `--smoke` on the installed exe and uninstall silently.
+  6. `gh release create --draft` with `ClaudeUsageDashboard-Setup-<ver>.exe` attached. Publishing the draft, after trying the installer, is the manual step; installed copies can't see a draft.
+- **`--smoke`** starts the server on a free port, GETs `/`, `/api/connection` and `/static/vendor/chart.umd.js`, and in a frozen build imports pywebview's WinForms backend, so a build missing pythonnet or the WebView2 DLLs fails instead of quietly opening the browser. It exits 0 or 1.
 - **Logging**: UTF-8 `LOG_DIR/dashboard.log`, rotated to `.1` at startup once it passes 5 MB (`applog.py`). This applies to the frozen app and to source runs under the launcher or `pythonw`. Opening the log as UTF-8 avoids the cp1252 encoding failures the launcher used to have.
 - **Docs**
   - `LICENSE` (MIT).
@@ -181,8 +180,8 @@ Manual checks:
   - The "Start at login" toggle adds and removes the `Run` value.
   - Quit frees the port.
 - **Phase 4**
-  - The release job passes on a test tag. Delete that release and tag afterwards.
-  - Install the build in Windows Sandbox, a clean machine without Claude Code. It should show `not-installed`, render with no network access to the CDN or fonts, and uninstall cleanly.
+  - The workflow passes on the pull request. The release tag's run leaves a draft: download its installer, try it, then publish.
+  - Install the build in Windows Sandbox where it can be turned on: a clean machine without Claude Code. It should show `not-installed`, render with no network access to the CDN or fonts, and uninstall cleanly. Where Sandbox is off (as on Jonathan's PC), check the bundle for DLLs that a stock Windows lacks, and give the first release to one person before the rest.
   - Install over the migrated DB on this machine and check the figures match the source instance.
 
 ## Known limitations
