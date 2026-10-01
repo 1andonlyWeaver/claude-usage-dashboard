@@ -78,7 +78,7 @@ def test_a_failing_tick_still_reschedules(timers, monkeypatch, capsys):
 
 def test_the_page_carries_the_update_notice_and_its_settings(client):
     page = client.get("/").text
-    for marker in ('id="updateBanner"', 'id="updateTitle"', 'id="updateLink"',
+    for marker in ('id="updateBanner"', 'id="updateLive"', 'id="updateTitle"', 'id="updateLink"',
                    'onclick="dismissUpdate()"', 'id="setUpdates"',
                    "saveSetting('update_check', this)", 'id="updateStatus"',
                    'onclick="checkForUpdates()"'):

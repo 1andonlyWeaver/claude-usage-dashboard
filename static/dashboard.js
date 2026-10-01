@@ -1462,7 +1462,7 @@ let _settingsReturnFocus = null;
 
 // While the modal is open, keep keyboard focus out of the page behind it.
 function setBackgroundInert(on) {
-  for (const el of document.querySelectorAll('.header, .main, #authBanner, #authLive, #updateBanner, #ingestBanner, #sessionPanel')) {
+  for (const el of document.querySelectorAll('.header, .main, #authBanner, #authLive, #updateBanner, #updateLive, #ingestBanner, #sessionPanel')) {
     el.inert = on;
   }
 }
@@ -1520,6 +1520,7 @@ async function saveSetting(key, input) {
     input.checked = s[key];
     if (key === 'judge_enabled' && costUnit === 'hours') loadHours();
     if (key === 'auto_refresh_token') fetchQuota();
+    if (key === 'update_check') loadUpdate();
   } catch (e) {
     input.checked = !input.checked;
     err.textContent = "Couldn't save that setting.";
@@ -1576,6 +1577,9 @@ function renderUpdate(u) {
     document.getElementById('lastUpdated').focus();
   }
   banner.hidden = !u.notify;
+  const live = document.getElementById('updateLive');
+  const said = u.notify ? document.getElementById('updateTitle').textContent : '';
+  if (live.textContent !== said) live.textContent = said;
   showUpdateStatus(u);
 }
 

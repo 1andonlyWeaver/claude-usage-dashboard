@@ -77,6 +77,8 @@
         <button class="btn-refresh" type="button" onclick="dismissUpdate()">Dismiss</button>
       </div>
     </div>
+    <!-- Always in the page, so screen readers hear about a new release (the notice itself comes and goes) -->
+    <div id="updateLive" class="sr-only" role="status"></div>
 
     <!-- Ingest progress bar (hidden when done) -->
     <div class="ingest-banner" id="ingestBanner" style="display:none">
