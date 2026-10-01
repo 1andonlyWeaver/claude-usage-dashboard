@@ -39,12 +39,18 @@ def test_only_a_tag_push_checks_the_tag_and_releases():
     assert "gh release create" in release and "--draft" in release
 
 
-def test_the_install_round_trip_checks_that_an_upgrade_keeps_start_at_login_off():
+def test_the_install_round_trip_checks_that_an_upgrade_keeps_start_at_login_as_it_was():
     round_trip = step("Install, smoke-test and uninstall")
     assert "Remove-ItemProperty $runKey -Name ClaudeUsageDashboard" in round_trip
+    assert "The upgrade changed Start at login" in round_trip
     assert "The upgrade turned Start at login back on" in round_trip
     upgrade = round_trip.index("Remove-ItemProperty")
-    assert round_trip.index("/TASKS=startatlogin") < upgrade < round_trip.index("unins000.exe")
+    assert round_trip.index("/TASKS=startatlogin") < round_trip.index("The upgrade changed Start at login") < upgrade
+    assert upgrade < round_trip.index("The upgrade turned Start at login back on") < round_trip.index("unins000.exe")
+
+
+def test_the_job_has_a_time_limit():
+    assert "    timeout-minutes: 30\n" in WORKFLOW
 
 
 def test_it_builds_with_the_files_in_packaging():

@@ -23,6 +23,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 30
     env:
       TAG: ${{ github.ref_name }}
     steps:
@@ -89,7 +90,12 @@ jobs:
           $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
           $run = (Get-ItemProperty $runKey -ErrorAction SilentlyContinue).ClaudeUsageDashboard
           if ($run -ne "`"$exe`" --background") { Write-Error "The Run value is [$run]"; exit 1 }
-          # An upgrade leaves Start at login as the tray left it: turn it off, install again, and it stays off
+          # An upgrade leaves Start at login as it was. While it's on, install again: it's unchanged
+          $p = Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Write-Error "The upgrade exited with $($p.ExitCode)"; exit 1 }
+          $run = (Get-ItemProperty $runKey -ErrorAction SilentlyContinue).ClaudeUsageDashboard
+          if ($run -ne "`"$exe`" --background") { Write-Error "The upgrade changed Start at login to [$run]"; exit 1 }
+          # Turned off (as the tray does), install again: it stays off
           Remove-ItemProperty $runKey -Name ClaudeUsageDashboard
           $p = Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
           if ($p.ExitCode -ne 0) { Write-Error "The upgrade exited with $($p.ExitCode)"; exit 1 }

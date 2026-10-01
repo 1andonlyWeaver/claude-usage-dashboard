@@ -4,7 +4,7 @@ The desktop app: the dashboard in its own window, and a tray icon that keeps it 
 `python desktop.py` (or the frozen ClaudeUsageDashboard.exe) runs everything in one process:
 - the main thread runs the pywebview window (WebView2); closing it hides it to the tray;
 - a thread runs the uvicorn server on 127.0.0.1, on settings' preferred_port when it's free;
-- tray.py's icon polls the connection and offers Open, Start at login and Quit.
+- tray.py's icon polls the connection and offers Open, Start at login, Check for updates and Quit.
 One copy runs per Windows session; launching another brings the first one's window forward.
 Without WebView2 the dashboard opens in the default browser and the tray works as usual.
 

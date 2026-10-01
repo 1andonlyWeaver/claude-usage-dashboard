@@ -120,6 +120,9 @@ begin
                'Keep them and a later install carries on where this one left off. ' +
                'Claude Code''s own logs and sign-in aren''t touched either way.',
                mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES) then
-      DelTree(DataDir, True, True, True);
+      if not DelTree(DataDir, True, True, True) then
+        MsgBox('Some of the dashboard''s files were still in use, so ' + DataDir +
+               ' wasn''t fully deleted. Delete it yourself after restarting Windows.',
+               mbInformation, MB_OK);
   end;
 end;

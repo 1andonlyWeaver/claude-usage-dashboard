@@ -82,6 +82,7 @@ def test_the_uninstaller_asks_before_deleting_the_apps_data(monkeypatch):
     assert str(paths._app_home()) == "C:\\Local\\" + paths.APP_NAME  # the folder the app writes to
     assert "MB_YESNO or MB_DEFBUTTON2" in ISS  # No is the default answer
     assert "not UninstallSilent" in ISS
+    assert "if not DelTree(DataDir, True, True, True) then" in ISS  # and says so when files were in use
 
 
 def test_the_installer_packs_the_build_the_spec_makes():

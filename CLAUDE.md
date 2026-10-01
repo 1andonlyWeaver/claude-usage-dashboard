@@ -21,7 +21,7 @@ Run the desktop app (window + tray, one copy per Windows session):
 ```bash
 conda activate claude-usage-dashboard && python desktop.py               # window + tray on port 8765, or a free port
 conda activate claude-usage-dashboard && python desktop.py --background  # tray only: what Start at login runs
-conda activate claude-usage-dashboard && python desktop.py --smoke       # free port, checks / and /api/connection, exits 0/1
+conda activate claude-usage-dashboard && python desktop.py --smoke       # free port, checks /, /api/connection and a vendored file (frozen: the window's libraries too), exits 0/1
 ```
 Don't run it from the main checkout while the scheduled :8080 server runs: both would use `data/usage.db`, and with automatic renewal on they'd race on the refresh token. Try it from a worktree with `USERPROFILE` and `CUD_DATA_DIR` pointed at a scratch home. A test instance also asks GitHub for the latest release a minute after it starts (`PERSON_HOURS_WORKER=off` doesn't stop that); set `"update_check": false` in its `settings.json` to keep it offline.
 

@@ -72,6 +72,7 @@
    - With `update_check` off, the notice stays hidden too.
 6. **The app's name comes from the exe's version resource, not an AppUserModelID.** Setting an AUMID would split the taskbar button from a pinned shortcut unless every shortcut carried it too.
 7. **The installer's tasks page decides Start at login on every install.**
+   - **Superseded during Task 5's review:** the box is offered on a first install only, and an upgrade leaves Start at login as the tray left it. The spec has the current rule.
    - Unticked removes the `Run` value; ticked also clears Task Manager's switch, as the tray does.
    - The uninstaller removes the `Run` and `StartupApproved` values whoever wrote them.
    - It clears `{app}\_internal` before copying, so no stale library from an older build lingers.

@@ -42,7 +42,7 @@ When there's a newer release, a notice at the top of the dashboard links to it. 
 
 ## Uninstalling
 
-Uninstall it from **Installed apps** in Windows Settings. The uninstaller turns off Start at login and asks whether to delete your data too. Say no and a later install picks up where you left off.
+Uninstall it from **Installed apps** in Windows Settings (**Apps & features** on Windows 10). The uninstaller turns off Start at login and asks whether to delete your data too. Say no and a later install picks up where you left off.
 
 ## When your sign-in needs attention
 
@@ -85,7 +85,7 @@ python desktop.py
 
 From source, the data stays in the repo's `data` folder. The server prints its log to the console you started it from, or to `logs\dashboard.log` when started without one (with `pythonw`). Quit the installed app before running `desktop.py`: only one copy runs per Windows session. And don't run two copies with automatic renewal on, installed or not, or they'll race to renew your token.
 
-To build the installer yourself, install the build tools with `pip install -r packaging/requirements-build.txt` and get [Inno Setup 6](https://jrsoftware.org/isdl.php). Then, from the repo folder, with the number from `version.py`:
+To build the installer yourself, install the build tools with `pip install -r packaging/requirements-build.txt` and get [Inno Setup 6](https://jrsoftware.org/isdl.php). Then, from the repo folder, with the number from `version.py` (`ISCC.exe` is in Inno Setup's install folder, which isn't on `PATH`):
 
 ```
 python -m PyInstaller --noconfirm --clean packaging/ClaudeUsageDashboard.spec
