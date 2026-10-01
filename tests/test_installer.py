@@ -58,12 +58,17 @@ def test_the_installer_writes_the_run_value_the_app_reads_back(monkeypatch):
     assert written == autostart.command()
 
 
-def test_the_tasks_page_decides_start_at_login_and_the_uninstaller_clears_it():
+def test_a_first_install_decides_start_at_login_and_the_uninstaller_clears_it():
+    task = next(l for l in ISS.splitlines() if l.startswith('Name: "startatlogin"'))
+    assert task.endswith("Check: FirstInstall")
     code = ISS.split("[Code]", 1)[1]
+    assert "function InitializeSetup: Boolean;" in code
+    assert 'Uninstall\\{#SetupSetting("AppId")}_is1' in code
     assert f"RunKey = '{autostart.RUN_KEY}';" in code
     assert f"ApprovedKey = '{autostart.APPROVED_KEY}';" in code
     assert f"RunValue = '{autostart.VALUE_NAME}';" in code
     install, uninstall = code.split("procedure CurUninstallStepChanged", 1)
+    assert "(CurStep = ssPostInstall) and not Upgrading" in install
     assert "WizardIsTaskSelected('startatlogin')" in install
     assert "RegDeleteValue(HKEY_CURRENT_USER, ApprovedKey, RunValue)" in install
     assert "RegDeleteValue(HKEY_CURRENT_USER, RunKey, RunValue)" in install

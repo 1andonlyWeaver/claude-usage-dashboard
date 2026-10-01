@@ -8,6 +8,7 @@
 ; - AppMutex is instance.MUTEX_NAME, so Setup asks the person to quit a running copy first.
 ; - The Run value is what autostart.command() writes when frozen: "<exe>" --background.
 ;   With any other text the tray's Start at login checkbox would read off.
+;   Start at login is offered on a first install only; upgrades leave it as the tray left it.
 ; - AppId must never change: it's how Setup finds an earlier install to upgrade.
 
 #ifndef AppVersion
@@ -42,7 +43,7 @@ Compression=lzma2
 SolidCompression=yes
 
 [Tasks]
-Name: "startatlogin"; Description: "Start {#AppName} in the tray when I sign in to Windows"
+Name: "startatlogin"; Description: "Start {#AppName} in the tray when I sign in to Windows"; Check: FirstInstall
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [InstallDelete]
@@ -70,10 +71,27 @@ const
   ApprovedKey = 'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run';
   RunValue = 'ClaudeUsageDashboard';
 
-{ The Start at login box on the tasks page decides, on every install and upgrade. }
+var
+  Upgrading: Boolean;
+
+{ An earlier install of this AppId is still registered: read once, before Setup writes its own entry }
+function InitializeSetup: Boolean;
+begin
+  Upgrading := RegKeyExists(HKEY_CURRENT_USER,
+    ExpandConstant('Software\Microsoft\Windows\CurrentVersion\Uninstall\{#SetupSetting("AppId")}_is1'));
+  Result := True;
+end;
+
+{ Start at login is offered on a first install only. An upgrade leaves it as the tray left it. }
+function FirstInstall: Boolean;
+begin
+  Result := not Upgrading;
+end;
+
+{ On a first install the Start at login box decides. An upgrade leaves the Run value as it is. }
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  if CurStep = ssPostInstall then
+  if (CurStep = ssPostInstall) and not Upgrading then
   begin
     if WizardIsTaskSelected('startatlogin') then
       { As when the tray turns it on: clear an "off" left by Task Manager's Startup tab }
