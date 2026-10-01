@@ -28,7 +28,8 @@ def threads(monkeypatch):
 
 def test_settings_round_trip(threads):
     assert app.get_settings() == {"judge_enabled": False, "auto_refresh_token": False,
-                                  "preferred_port": 8765}
+                                  "preferred_port": 8765, "update_check": True,
+                                  "dismissed_version": ""}
     assert app.post_settings({"auto_refresh_token": True})["auto_refresh_token"] is True
     assert app.get_settings()["auto_refresh_token"] is True
 

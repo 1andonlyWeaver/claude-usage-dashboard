@@ -10,7 +10,8 @@ import settings
 
 def test_defaults_when_there_is_no_file():
     assert settings.load() == {"judge_enabled": False, "auto_refresh_token": False,
-                               "preferred_port": 8765}
+                               "preferred_port": 8765, "update_check": True,
+                               "dismissed_version": ""}
 
 
 def test_update_persists_and_reads_back(isolated_settings):
@@ -23,12 +24,14 @@ def test_update_keeps_the_other_keys():
     settings.update({"auto_refresh_token": True})
     settings.update({"judge_enabled": True})
     assert settings.load() == {"judge_enabled": True, "auto_refresh_token": True,
-                               "preferred_port": 8765}
+                               "preferred_port": 8765, "update_check": True,
+                               "dismissed_version": ""}
 
 
 @pytest.mark.parametrize("bad", [{"nope": True}, {"judge_enabled": "yes"}, {"judge_enabled": 1},
                                  {"preferred_port": "8765"}, {"preferred_port": True},
-                                 {"preferred_port": 8765.0}])
+                                 {"preferred_port": 8765.0}, {"update_check": "no"},
+                                 {"dismissed_version": 2}])
 def test_update_rejects_unknown_keys_and_wrong_types(bad):
     with pytest.raises(ValueError):
         settings.update(bad)
@@ -41,12 +44,19 @@ def test_unreadable_file_or_wrong_types_fall_back_to_defaults(isolated_settings)
     isolated_settings.write_text(json.dumps({"judge_enabled": "true", "auto_refresh_token": True}),
                                  encoding="utf-8")
     assert settings.load() == {"judge_enabled": False, "auto_refresh_token": True,
-                               "preferred_port": 8765}
+                               "preferred_port": 8765, "update_check": True,
+                               "dismissed_version": ""}
 
 
 def test_the_desktop_port_can_be_changed():
     assert settings.update({"preferred_port": 9123})["preferred_port"] == 9123
     assert settings.get("preferred_port") == 9123
+
+
+def test_the_update_settings_take_a_switch_and_a_release_number():
+    assert settings.update({"update_check": False})["update_check"] is False
+    assert settings.update({"dismissed_version": "2.1.0"})["dismissed_version"] == "2.1.0"
+    assert settings.load()["update_check"] is False
 
 
 def test_concurrent_read_write_stress():
