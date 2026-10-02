@@ -11,7 +11,13 @@ Without WebView2 the dashboard opens in the default browser and the tray works a
 --background starts in the tray only (what Start at login runs). --smoke starts the server
 on a free port, checks /, /api/connection and a vendored file (and, when frozen, that the
 window's libraries load), and exits 0 or 1.
+
+A second launch only hands off and exits, so app, uvicorn, settings, tray and webbrowser are
+imported where they're used, once this copy knows it's the first. Imported at the top, they
+took half or more of a second launch's time.
 """
+from __future__ import annotations
+
 import argparse
 import ctypes
 import json
@@ -20,18 +26,16 @@ import socket
 import sys
 import threading
 import time
-import webbrowser
 from ctypes import wintypes
 from datetime import datetime
+from typing import TYPE_CHECKING
 
-import uvicorn
-
-import app
 import applog
 import instance
 import paths
-import settings
-import tray
+
+if TYPE_CHECKING:
+    import uvicorn
 
 TITLE = "Claude Usage Dashboard"
 SW_RESTORE = 9
@@ -82,6 +86,10 @@ def start_server(sock: socket.socket) -> tuple[uvicorn.Server, threading.Thread]
     uvicorn gets the app object: the "app:app" import string doesn't resolve in a frozen
     build. No access log: the page's 5-second polls would fill dashboard.log.
     """
+    import uvicorn
+
+    import app
+
     config = uvicorn.Config(app.app, lifespan="on", access_log=False, timeout_graceful_shutdown=5)
     server = uvicorn.Server(config)
     thread = threading.Thread(target=_serve, args=(server, sock), name="server", daemon=True)
@@ -104,6 +112,12 @@ def _restore_if_minimized(hwnd) -> None:
         _user32.ShowWindow(hwnd, SW_RESTORE)  # back to its earlier size, maximized or not
 
 
+def _open_in_browser(url: str) -> None:
+    import webbrowser
+
+    webbrowser.open(url)
+
+
 class Shell:
     """What Open dashboard, a second launch, Quit and the window's close button do.
 
@@ -111,7 +125,7 @@ class Shell:
     browser stands in for it.
     """
 
-    def __init__(self, url: str, server, open_browser=webbrowser.open, restore=_restore_if_minimized):
+    def __init__(self, url: str, server, open_browser=_open_in_browser, restore=_restore_if_minimized):
         self.url = url
         self.server = server
         self.window = None
@@ -212,6 +226,8 @@ def _prepare_window(shell: Shell, window) -> None:
 
 def run_window(shell: Shell, background: bool) -> None:
     """Run the window until Quit, or fall back to the browser. Blocks the main thread either way."""
+    import app
+
     renderer = None
     try:
         import webview  # here, not at the top: tests import this module without WinForms
@@ -316,6 +332,9 @@ def main(argv=None) -> int:
         if lock is None:
             log("already running, but it didn't answer")
             return 1
+    import settings  # this copy is the first, so it loads what a second launch never needs
+    import tray
+
     instance.clear_runtime()  # this copy holds the mutex, so any runtime.json is from an earlier run
     sock = bind_socket(settings.get("preferred_port"))
     port = sock.getsockname()[1]
