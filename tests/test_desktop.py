@@ -90,6 +90,43 @@ def test_an_unusable_preferred_port_goes_straight_to_the_os(unusable):
         sock.close()
 
 
+# Work areas are (left, top, right, bottom): a monitor less its taskbar, in the window's pixels.
+# The window's size and minimum come in pixels too, after pywebview has scaled them for the DPI.
+
+
+def test_the_window_opens_centered_above_the_taskbar_on_a_1080p_screen():
+    """2026-10-02: left to Windows, it cascaded to (234,234)-(1514,1094), its bottom under the taskbar."""
+    assert desktop.fit_window((0, 0, 1920, 1032), (1280, 860), (900, 600)) == (320, 86, 1280, 860)
+
+
+@pytest.mark.parametrize("work_area, expected", [
+    ((0, 48, 1920, 1080), (320, 134, 1280, 860)),  # taskbar along the top
+    ((48, 0, 1920, 1080), (344, 110, 1280, 860)),  # taskbar along the left
+    ((-1920, 0, 0, 1040), (-1600, 90, 1280, 860)),  # a monitor to the left of the primary one
+])
+def test_the_window_is_centered_in_its_work_area_wherever_that_sits(work_area, expected):
+    assert desktop.fit_window(work_area, (1280, 860), (900, 600)) == expected
+
+
+@pytest.mark.parametrize("work_area, size, minimum, expected", [
+    # a 1080p laptop at 125%: the window is 1600x1075, too tall
+    ((0, 0, 1920, 1020), (1600, 1075), (1125, 750), (160, 0, 1600, 1020)),
+    # at 150%: 1920x1290, too wide and too tall
+    ((0, 0, 1920, 1008), (1920, 1290), (1350, 900), (0, 0, 1920, 1008)),
+])
+def test_a_window_bigger_than_its_work_area_shrinks_to_fit(work_area, size, minimum, expected):
+    assert desktop.fit_window(work_area, size, minimum) == expected
+
+
+@pytest.mark.parametrize("work_area, expected", [
+    ((0, 0, 1366, 696), (0, 0, 1366, 900)),
+    ((0, 72, 1366, 768), (0, 72, 1366, 900)),  # taskbar along the top
+])
+def test_a_work_area_smaller_than_the_minimum_keeps_the_title_bar_on_screen(work_area, expected):
+    """1366x768 at 150%: the 1350x900 minimum is taller than the screen, so the window hangs off the bottom."""
+    assert desktop.fit_window(work_area, (1920, 1290), (1350, 900)) == expected
+
+
 class FakeWindow:
     def __init__(self):
         self.calls = []
