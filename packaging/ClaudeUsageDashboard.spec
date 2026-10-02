@@ -33,6 +33,10 @@ a = Analysis(
         # pystray chooses its backend with importlib
         "pystray._win32",
     ],
+    # cffi (pythonnet's loader uses it) names setuptools only in code that compiles C, which
+    # never runs here. Bundled, setuptools brings PyInstaller's runtime hook that imports it at
+    # every start, about 0.3 s, a second launch's included.
+    excludes=["setuptools"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)

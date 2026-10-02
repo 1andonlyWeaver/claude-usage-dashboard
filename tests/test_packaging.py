@@ -68,6 +68,7 @@ def test_the_spec_builds_a_windowed_exe_with_the_page_files():
     for module in ("uvicorn.lifespan.on", "uvicorn.protocols.http.h11_impl",
                    "uvicorn.protocols.websockets.auto", "uvicorn.loops.asyncio", "pystray._win32"):
         assert f'"{module}"' in spec, module
+    assert 'excludes=["setuptools"]' in spec  # else its runtime hook imports it at every start
     assert spec.count(f'name="{build_assets.EXE_NAME.removesuffix(".exe")}"') == 2  # EXE and COLLECT
 
 
