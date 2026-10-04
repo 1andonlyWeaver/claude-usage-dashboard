@@ -9,6 +9,7 @@ import ingest
 import instance
 import person_hours
 import settings
+import updates
 from fake_winreg import FakeWinreg
 
 
@@ -81,4 +82,15 @@ def isolated_runtime(tmp_path, monkeypatch):
     """runtime.json goes to a per-test file, so no test can point a real second launch at a test server."""
     path = tmp_path / "runtime.json"
     monkeypatch.setattr(instance, "RUNTIME_FILE", path)
+    return path
+
+
+@pytest.fixture(autouse=True)
+def isolated_updates(tmp_path, monkeypatch):
+    """No test may ask GitHub, and each keeps its update-check state in its own file."""
+    def forbidden(*args, **kwargs):
+        pytest.fail("a test tried to reach GitHub")
+    path = tmp_path / "update.json"
+    monkeypatch.setattr(updates, "_urlopen", forbidden)
+    monkeypatch.setattr(updates, "STATE_FILE", path)
     return path

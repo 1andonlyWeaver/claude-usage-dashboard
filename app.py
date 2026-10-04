@@ -24,6 +24,7 @@ import db
 import paths
 import person_hours
 import settings
+import updates
 import version
 
 BASE_DIR = paths.RESOURCE_DIR  # static/ and templates/
@@ -42,6 +43,7 @@ QUOTA_CACHE_MAX_STALE = 600  # seconds: accept disk-cached data up to 10 min old
 # resets_at is missing or unparseable.
 FIVE_HOUR_WINDOW = 5 * 3600
 SEVEN_DAY_WINDOW = 7 * 24 * 3600
+UPDATE_TICK_SECONDS = 3600  # how often _update_tick asks updates.due(); GitHub itself at most daily
 
 @asynccontextmanager
 async def _lifespan(_app):
@@ -540,6 +542,20 @@ def _hours_tick():
         t.start()
 
 
+def _update_tick():
+    """Run the daily update check if it's due, then reschedule (like _hours_tick, from an outer finally)."""
+    try:
+        if updates.due():
+            updates.check()
+    except Exception as ex:
+        print(f"[updates {datetime.now():%Y-%m-%d %H:%M:%S}] tick failed - "
+              f"{type(ex).__name__}: {ex}")
+    finally:
+        t = threading.Timer(UPDATE_TICK_SECONDS, _update_tick)
+        t.daemon = True
+        t.start()
+
+
 async def startup():
     """Kick off ingest if DB is missing or stale, then schedule periodic ingest and judging."""
     paths.DATA_DIR.mkdir(parents=True, exist_ok=True)  # the quota cache write assumes it exists
@@ -570,6 +586,9 @@ async def startup():
         h = threading.Timer(60, _hours_tick)
         h.daemon = True
         h.start()
+    u = threading.Timer(60, _update_tick)  # the first check a minute in, off the startup path
+    u.daemon = True
+    u.start()
 
 
 def _asset_url(rel_path: str) -> str:
@@ -668,6 +687,18 @@ def app_show():
         raise HTTPException(409, "No desktop window: this server was started on its own")
     desktop_show()
     return {"shown": True}
+
+
+@app.get("/api/update")
+def get_update():
+    """What the last update check found. _update_tick does the asking, at most daily."""
+    return updates.status()
+
+
+@app.post("/api/update/check")
+def check_update():
+    """Ask GitHub now: Check now in Settings, and Check for updates in the tray."""
+    return updates.check()
 
 
 @app.get("/api/ingest-status")

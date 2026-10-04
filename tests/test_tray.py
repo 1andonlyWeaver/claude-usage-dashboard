@@ -1,6 +1,7 @@
 """The tray icon: its image, its menu, and when it badges or notifies."""
 import json
 
+import pytest
 import pystray
 
 import autostart
@@ -16,6 +17,7 @@ SIGNED_OUT = {"state": "signed-out", "title": "Not signed in to Claude Code.",
               "detail": "Sign in to Claude Code to see your quota."}
 LOGIN = {"state": "login-required", "title": "Your Claude sign-in has expired.",
          "detail": "Sign in again to bring back the quota gauges."}
+RELEASE = "https://github.com/1andonlyWeaver/claude-usage-dashboard/releases/tag/2.1.0"
 
 
 class FakeIcon:
@@ -128,7 +130,8 @@ def test_menu_items_and_their_actions(monkeypatch):
     t = make_tray(monkeypatch, [])
     menu = t.menu()
     assert [item.text for item in menu.items] == [
-        "Open dashboard", "Open in browser", "Start at login", pystray.Menu.SEPARATOR.text, "Quit"]
+        "Open dashboard", "Open in browser", "Start at login", "Check for updates",
+        pystray.Menu.SEPARATOR.text, "Quit"]
     assert menu.items[0].default
     items = {item.text: item for item in menu.items}
     opened = []
@@ -178,3 +181,58 @@ def test_start_runs_the_icon_on_its_own_thread_and_join_waits_for_it(monkeypatch
     t.join(timeout=2)
     assert t.icon.ran and t.icon.visible
     assert not t._thread.is_alive()
+
+
+def updating_tray(monkeypatch, answer):
+    """A tray whose POST /api/update/check answers with `answer`: a dict, raw bytes, or an
+    exception to raise. Returns the tray and the list of pages it opened."""
+    def fake_call(port, path, method="GET", timeout=5.0):
+        assert (port, path, method) == (8765, "/api/update/check", "POST")
+        if isinstance(answer, Exception):
+            raise answer
+        return answer if isinstance(answer, bytes) else json.dumps(answer).encode()
+
+    monkeypatch.setattr(tray.instance, "call", fake_call)
+    opened = []
+    monkeypatch.setattr(tray.webbrowser, "open", opened.append)
+    return tray.Tray(FakeShell(), URL, 8765, icon=FakeIcon()), opened
+
+
+def test_check_for_updates_opens_the_download_page_when_a_newer_version_is_out(monkeypatch):
+    t, opened = updating_tray(monkeypatch, {"available": True, "latest": "2.1.0", "current": "2.0.0",
+                                            "url": RELEASE, "error": None})
+    t._report_update_check()
+    assert t.icon.notes == [("Version 2.1.0 is available. Opening the download page.", tray.TITLE)]
+    assert opened == [RELEASE]
+
+
+@pytest.mark.parametrize("answer, note", [
+    ({"available": False, "latest": "2.0.0", "current": "2.0.0", "url": None, "error": None},
+     "You have the latest version, 2.0.0."),
+    ({"available": False, "latest": None, "current": "2.0.0", "url": None, "error": "network-error"},
+     "Couldn't reach GitHub to check for updates. Try again later."),
+    (OSError("connection refused"), "Couldn't check for updates. Try again in a minute."),
+    (b"not json", "Couldn't check for updates. Try again in a minute."),
+    (b"[]", "Couldn't check for updates. Try again in a minute."),
+])
+def test_check_for_updates_reports_without_opening_anything(monkeypatch, answer, note):
+    t, opened = updating_tray(monkeypatch, answer)
+    t._report_update_check()
+    assert t.icon.notes == [(note, tray.TITLE)]
+    assert opened == []
+
+
+def test_check_for_updates_runs_off_the_menu_thread(monkeypatch):
+    started = []
+
+    class FakeThread:
+        def __init__(self, target=None, name=None, daemon=None):
+            started.append((target, daemon))
+
+        def start(self):
+            started.append("started")
+
+    t = make_tray(monkeypatch, [])
+    monkeypatch.setattr(tray.threading, "Thread", FakeThread)
+    {item.text: item for item in t.menu().items}["Check for updates"](t.icon)
+    assert started == [(t._report_update_check, True), "started"]

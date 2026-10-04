@@ -16,6 +16,8 @@ DEFAULTS = {
     "judge_enabled": False,       # the person-hours judge spends subscription quota: opt-in
     "auto_refresh_token": False,  # renewing rewrites ~/.claude/.credentials.json: opt-in
     "preferred_port": 8765,       # the desktop app's first-choice port (desktop.py); no UI
+    "update_check": True,         # ask GitHub once a day whether a newer release is out (updates.py)
+    "dismissed_version": "",      # the release whose notice the person dismissed; "" for none
 }
 
 # A virus scanner or the indexer can hold settings.json open and make the replace fail; wait it out for about 1 s.

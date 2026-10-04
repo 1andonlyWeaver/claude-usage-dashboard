@@ -197,6 +197,13 @@ body {
 .auth-banner-text span { color: var(--text-secondary); }
 .auth-banner-actions { display: flex; gap: 8px; flex-shrink: 0; }
 .auth-banner-actions a { text-decoration: none; }
+/* A newer release: the auth banner's layout, in the connected dot's green, since nothing is wrong */
+.auth-banner.update-banner {
+  background: rgba(123,200,123,0.07);
+  border-color: rgba(123,200,123,0.3);
+}
+.update-banner .auth-banner-icon { color: #7BC87B; }
+#updateStatus a { color: var(--claude-orange); }
 .btn-refresh:disabled,
 .btn-refresh[aria-disabled="true"] { opacity: 0.6; cursor: default; }
 .btn-refresh:focus-visible { outline: 2px solid var(--claude-orange); outline-offset: 2px; }

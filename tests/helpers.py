@@ -132,10 +132,10 @@ def write_credentials(path, token="tok", expires_in=3600, refresh="ref"):
 
 
 class FakeResponse:
-    """What urllib.request.urlopen returns, for a JSON body."""
+    """What urllib.request.urlopen returns: a JSON body, or raw bytes."""
 
-    def __init__(self, payload):
-        self._body = json.dumps(payload).encode("utf-8")
+    def __init__(self, payload=None, raw: bytes | None = None):
+        self._body = raw if raw is not None else json.dumps(payload).encode("utf-8")
         self.headers = {}
 
     def read(self):

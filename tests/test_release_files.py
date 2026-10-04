@@ -39,3 +39,12 @@ def test_the_repo_carries_an_mit_license_and_a_readme():
     assert "Copyright (c) 2026 Jonathan Weaver" in license_text
     readme = (REPO / "README.md").read_text(encoding="utf-8")
     assert readme.startswith("# Claude Usage Dashboard")
+
+
+def test_the_readme_covers_installing_past_smartscreen_updating_and_uninstalling():
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    for text in ("releases/latest", "**More info**", "**Run anyway**", "## Updating",
+                 "## Uninstalling", "apiKeyHelper", "update.json"):
+        assert text in readme, text
+    assert "never bills an API key" not in readme
+    assert "first installer will come" not in readme

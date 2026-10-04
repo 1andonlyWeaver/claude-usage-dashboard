@@ -4,12 +4,13 @@ The desktop app: the dashboard in its own window, and a tray icon that keeps it 
 `python desktop.py` (or the frozen ClaudeUsageDashboard.exe) runs everything in one process:
 - the main thread runs the pywebview window (WebView2); closing it hides it to the tray;
 - a thread runs the uvicorn server on 127.0.0.1, on settings' preferred_port when it's free;
-- tray.py's icon polls the connection and offers Open, Start at login and Quit.
+- tray.py's icon polls the connection and offers Open, Start at login, Check for updates and Quit.
 One copy runs per Windows session; launching another brings the first one's window forward.
 Without WebView2 the dashboard opens in the default browser and the tray works as usual.
 
 --background starts in the tray only (what Start at login runs). --smoke starts the server
-on a free port, checks / and /api/connection, and exits 0 or 1.
+on a free port, checks /, /api/connection and a vendored file (and, when frozen, that the
+window's libraries load), and exits 0 or 1.
 """
 import argparse
 import ctypes
@@ -34,6 +35,7 @@ import tray
 
 TITLE = "Claude Usage Dashboard"
 SW_RESTORE = 9
+SMOKE_FILE = "/static/vendor/chart.umd.js"  # a vendored file: proves a build bundled static/
 
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 _user32.IsIconic.argtypes = (wintypes.HWND,)
@@ -182,6 +184,32 @@ def _close_to_tray(shell: Shell, window) -> None:
     form.FormClosing += on_form_closing
 
 
+def _allow_zoom_keys(window) -> None:
+    """Let Ctrl+0, Ctrl+plus and Ctrl+minus zoom the page, as Ctrl+wheel already does.
+
+    pywebview turns WebView2's browser shortcut keys off outside debug mode, and the zoom keys
+    are among them. Its own setup handler subscribed when the control was created, so this
+    one runs after it and has the last word. The other browser keys come back too: F5
+    reloads, Ctrl+F finds, Ctrl+P prints. DevTools stay off; AreDevToolsEnabled is untouched.
+    """
+    browser = getattr(window.native, "browser", None)
+    control = getattr(browser, "webview", None)
+    if control is None:
+        return  # no WebView2 control (MSHTML), and that window never opens anyway
+
+    def on_ready(sender, args):
+        if args.IsSuccess:
+            sender.CoreWebView2.Settings.AreBrowserAcceleratorKeysEnabled = True
+
+    control.CoreWebView2InitializationCompleted += on_ready
+
+
+def _prepare_window(shell: Shell, window) -> None:
+    """Runs on the GUI thread before the window first shows."""
+    _close_to_tray(shell, window)
+    _allow_zoom_keys(window)
+
+
 def run_window(shell: Shell, background: bool) -> None:
     """Run the window until Quit, or fall back to the browser. Blocks the main thread either way."""
     renderer = None
@@ -198,7 +226,7 @@ def run_window(shell: Shell, background: bool) -> None:
             return name == "edgechromium"  # False stops here: MSHTML can't run the dashboard
 
         window.events.initialized += on_initialized
-        window.events.before_show += lambda: _close_to_tray(shell, window)
+        window.events.before_show += lambda: _prepare_window(shell, window)
         shell.window = window
         app.desktop_show = shell.show
         webview.start(private_mode=False, storage_path=str(paths.DATA_DIR / "webview"))
@@ -213,8 +241,23 @@ def run_window(shell: Shell, background: bool) -> None:
     shell.stopped.wait()
 
 
+def _window_libraries_load() -> bool:
+    """Whether pywebview's WinForms backend loads: pythonnet, .NET WinForms and the WebView2 DLLs.
+
+    A frozen build that left one out would open the browser instead of the window, with only
+    a log line to say why. Importing the backend opens no window.
+    """
+    try:
+        import webview.platforms.winforms  # noqa: F401
+    except Exception as ex:
+        log(f"smoke: the window's libraries didn't load ({type(ex).__name__}: {ex})")
+        return False
+    return True
+
+
 def smoke() -> int:
-    """Start the server on a free port, fetch / and /api/connection, stop. 0 when both answer."""
+    """Start the server on a free port, fetch /, /api/connection and a vendored file, stop.
+    0 when all three answer, and, in a frozen build, the window's libraries load."""
     sock = bind_socket(0)
     port = sock.getsockname()[1]
     server, thread = start_server(sock)
@@ -224,8 +267,12 @@ def smoke() -> int:
             return 1
         page = instance.call(port, "/", timeout=30)
         status = json.loads(instance.call(port, "/api/connection", timeout=30))
-        if TITLE.encode() not in page or not isinstance(status, dict) or "state" not in status:
+        script = instance.call(port, SMOKE_FILE, timeout=30)
+        if (TITLE.encode() not in page or not isinstance(status, dict) or "state" not in status
+                or not script):
             log("smoke: unexpected answer")
+            return 1
+        if getattr(sys, "frozen", False) and not _window_libraries_load():
             return 1
         log(f"smoke: ok on port {port}; connection {status['state']}")
         return 0

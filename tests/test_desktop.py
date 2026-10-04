@@ -1,6 +1,8 @@
 """The desktop entry point: port choice, the server thread, the window's rules, and --smoke."""
 import platform
 import socket
+import sys
+import types
 
 import pytest
 
@@ -273,3 +275,88 @@ def test_smoke_fails_when_the_server_cannot_start(monkeypatch):
 
     monkeypatch.setattr(app, "startup", broken_startup)
     assert desktop.smoke() == 1
+
+
+class FakeEvent:
+    """A .NET event as pythonnet shows it: handlers are added with +=."""
+
+    def __init__(self):
+        self.handlers = []
+
+    def __iadd__(self, handler):
+        self.handlers.append(handler)
+        return self
+
+
+def webview2_window():
+    """A pywebview window whose native form holds a WebView2 control, plus that control's settings."""
+    control = types.SimpleNamespace(CoreWebView2InitializationCompleted=FakeEvent())
+    form = types.SimpleNamespace(browser=types.SimpleNamespace(webview=control))
+    browser_settings = types.SimpleNamespace(AreBrowserAcceleratorKeysEnabled=False,
+                                             AreDevToolsEnabled=False)
+    return types.SimpleNamespace(native=form), control, browser_settings
+
+
+def test_the_zoom_keys_come_back_once_webview2_is_ready():
+    window, control, browser_settings = webview2_window()
+    desktop._allow_zoom_keys(window)
+    (on_ready,) = control.CoreWebView2InitializationCompleted.handlers
+    sender = types.SimpleNamespace(CoreWebView2=types.SimpleNamespace(Settings=browser_settings))
+    on_ready(sender, types.SimpleNamespace(IsSuccess=False))
+    assert browser_settings.AreBrowserAcceleratorKeysEnabled is False
+    on_ready(sender, types.SimpleNamespace(IsSuccess=True))
+    assert browser_settings.AreBrowserAcceleratorKeysEnabled is True
+    assert browser_settings.AreDevToolsEnabled is False
+
+
+def test_the_zoom_keys_leave_a_window_without_webview2_alone():
+    desktop._allow_zoom_keys(types.SimpleNamespace(native=types.SimpleNamespace(browser=None)))
+
+
+def test_before_show_sets_up_close_to_tray_and_the_zoom_keys(monkeypatch):
+    calls = []
+    monkeypatch.setattr(desktop, "_close_to_tray", lambda shell, window: calls.append(("tray", shell, window)))
+    monkeypatch.setattr(desktop, "_allow_zoom_keys", lambda window: calls.append(("zoom", window)))
+    desktop._prepare_window("shell", "window")
+    assert calls == [("tray", "shell", "window"), ("zoom", "window")]
+
+
+def test_smoke_fails_when_a_page_file_is_missing(monkeypatch):
+    async def no_startup():
+        pass
+
+    monkeypatch.setattr(app, "startup", no_startup)
+    real_call = desktop.instance.call
+
+    def call(port, path, method="GET", timeout=5.0):
+        if path == desktop.SMOKE_FILE:
+            raise OSError("HTTP Error 404: Not Found")
+        return real_call(port, path, method, timeout)
+
+    monkeypatch.setattr(desktop.instance, "call", call)
+    assert desktop.smoke() == 1
+
+
+def test_a_frozen_smoke_also_loads_the_window_libraries(monkeypatch):
+    async def no_startup():
+        pass
+
+    monkeypatch.setattr(app, "startup", no_startup)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(desktop, "_window_libraries_load", lambda: False)
+    assert desktop.smoke() == 1
+    monkeypatch.setattr(desktop, "_window_libraries_load", lambda: True)
+    assert desktop.smoke() == 0
+
+
+def test_from_source_smoke_leaves_the_window_libraries_alone(monkeypatch):
+    async def no_startup():
+        pass
+
+    def must_not_load():
+        raise AssertionError("loading .NET into the test process")
+
+    monkeypatch.setattr(app, "startup", no_startup)
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    monkeypatch.setattr(desktop, "_window_libraries_load", must_not_load)
+    assert desktop.smoke() == 0
