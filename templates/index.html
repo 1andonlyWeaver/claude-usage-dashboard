@@ -168,9 +168,9 @@
           <div class="card-header">
             <h2 class="card-title">By Model</h2>
             <div class="day-selector" id="modelDaySelector">
-              <button class="day-btn" onclick="setModelDays(7, this)">7d</button>
+              <button class="day-btn active" onclick="setModelDays(7, this)">7d</button>
               <button class="day-btn" onclick="setModelDays(30, this)">30d</button>
-              <button class="day-btn active" onclick="setModelDays(90, this)">90d</button>
+              <button class="day-btn" onclick="setModelDays(90, this)">90d</button>
             </div>
           </div>
           <div class="chart-wrap chart-wrap-donut">
@@ -183,8 +183,8 @@
       <section class="window-section">
         <div class="window-controls">
           <div class="view-selector">
-            <button class="view-btn active" onclick="setWindowView('rate', this)">Rate</button>
-            <button class="view-btn" onclick="setWindowView('cumulative', this)">Cumulative</button>
+            <button class="view-btn" onclick="setWindowView('rate', this)">Rate</button>
+            <button class="view-btn active" onclick="setWindowView('cumulative', this)">Cumulative</button>
           </div>
           <div class="stack-selector">
             <button class="stack-btn active" onclick="setWindowStack('none', this)">Clean</button>
@@ -223,9 +223,9 @@
           <div class="card-header">
             <h2 class="card-title">By Project</h2>
             <div class="day-selector" id="projectDaySelector">
-              <button class="day-btn" onclick="setProjectDays(7, this)">7d</button>
+              <button class="day-btn active" onclick="setProjectDays(7, this)">7d</button>
               <button class="day-btn" onclick="setProjectDays(30, this)">30d</button>
-              <button class="day-btn active" onclick="setProjectDays(90, this)">90d</button>
+              <button class="day-btn" onclick="setProjectDays(90, this)">90d</button>
             </div>
           </div>
           <div class="chart-wrap chart-wrap-tall">
@@ -268,9 +268,9 @@
           <div class="card-header">
             <h2 class="card-title">Session Heatmap</h2>
             <div class="day-selector" id="heatmapDaySelector">
-              <button class="day-btn" onclick="setHeatmapDays(7, this)">7d</button>
+              <button class="day-btn active" onclick="setHeatmapDays(7, this)">7d</button>
               <button class="day-btn" onclick="setHeatmapDays(30, this)">30d</button>
-              <button class="day-btn active" onclick="setHeatmapDays(90, this)">90d</button>
+              <button class="day-btn" onclick="setHeatmapDays(90, this)">90d</button>
             </div>
           </div>
           <div id="heatmapWrap" class="heatmap-wrap"></div>
