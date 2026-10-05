@@ -380,6 +380,28 @@ def test_before_show_sets_up_close_to_tray_and_the_zoom_keys(monkeypatch):
     assert calls == [("tray", "shell", "window"), ("zoom", "window")]
 
 
+def test_the_window_is_prepared_and_placed_before_it_shows(monkeypatch):
+    """run_window wires two before_show handlers, so a failure in one still lets the other run."""
+    calls = []
+    window = types.SimpleNamespace(events=types.SimpleNamespace(initialized=FakeEvent(), before_show=FakeEvent()))
+
+    def start(**kwargs):  # what pywebview does: initialize, then before_show, then run until Quit
+        assert all(handler("edgechromium") is not False for handler in window.events.initialized.handlers)
+        for handler in window.events.before_show.handlers:
+            handler()
+
+    monkeypatch.setitem(sys.modules, "webview", types.SimpleNamespace(
+        create_window=lambda *args, **kwargs: window, start=start))
+    monkeypatch.setattr(app, "desktop_show", None)
+    monkeypatch.setattr(desktop, "_prepare_window", lambda shell, w: calls.append(("prepare", w)))
+    monkeypatch.setattr(desktop, "_fit_to_screen", lambda w: calls.append(("fit", w)))
+    shell, _, _ = make_shell()
+    desktop.run_window(shell, background=True)
+    assert len(window.events.before_show.handlers) == 2
+    assert calls == [("prepare", window), ("fit", window)]
+    assert app.desktop_show == shell.show
+
+
 def test_smoke_fails_when_a_page_file_is_missing(monkeypatch):
     async def no_startup():
         pass
