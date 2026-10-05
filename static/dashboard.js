@@ -31,15 +31,15 @@ Chart.defaults.font.family = "'DM Sans', sans-serif";
 
 // ─── State ───────────────────────────────────────────────────
 let chart5h = null, chart7d = null, projectChart = null, modelChart = null, sessionDetailChart = null;
-let currentSessionDays = 7;
+let currentProjectDays = 7, currentModelDays = 7, currentHeatmapDays = 7, currentSessionDays = 7;
 let _windowRefreshInterval = null;
-let windowView = 'rate';    // 'rate' | 'cumulative'
+let windowView = 'cumulative';  // 'rate' | 'cumulative'
 let windowStack = 'none';   // 'none' | 'token_type' | 'project' | 'model'
 let chartFullscreen = null;
 let fsTab = '5h';            // '5h' | '7d'
 let exceedanceState = { '5h': null, '7d': null };
 let paceState = { '5h': null, '7d': null };
-let fsView = 'rate';
+let fsView = 'cumulative';
 let fsStack = 'none';
 
 // Extended palette for project/model stacking
@@ -70,9 +70,9 @@ window.addEventListener('DOMContentLoaded', () => {
 async function initAll() {
   await Promise.all([
     loadWindowCharts(),
-    loadProjects(),
-    loadModels(),
-    loadHeatmap(),
+    loadProjects(currentProjectDays),
+    loadModels(currentModelDays),
+    loadHeatmap(currentHeatmapDays),
     loadSessions(currentSessionDays),
     loadCost(),
   ]);
@@ -1080,12 +1080,13 @@ function buildWindowChart(data, canvasId, maHalf) {
 
 // ─── Projects chart ──────────────────────────────────────────
 function setProjectDays(days, btn) {
+  currentProjectDays = days;
   document.querySelectorAll('#projectDaySelector .day-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   loadProjects(days);
 }
 
-async function loadProjects(days = 90) {
+async function loadProjects(days) {
   const data = await apiFetch('/api/projects?days=' + days);
   if (projectChart) projectChart.destroy();
   const ctx = document.getElementById('projectChart').getContext('2d');
@@ -1125,12 +1126,13 @@ async function loadProjects(days = 90) {
 
 // ─── Models chart ────────────────────────────────────────────
 function setModelDays(days, btn) {
+  currentModelDays = days;
   document.querySelectorAll('#modelDaySelector .day-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   loadModels(days);
 }
 
-async function loadModels(days = 90) {
+async function loadModels(days) {
   const data = await apiFetch('/api/models?days=' + days);
   if (modelChart) modelChart.destroy();
   const ctx = document.getElementById('modelChart').getContext('2d');
@@ -1234,12 +1236,13 @@ function aggregateByLabel(rows, valueKey) {
 
 // ─── Heatmap ─────────────────────────────────────────────────
 function setHeatmapDays(days, btn) {
+  currentHeatmapDays = days;
   document.querySelectorAll('#heatmapDaySelector .day-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   loadHeatmap(days);
 }
 
-async function loadHeatmap(days = 90) {
+async function loadHeatmap(days) {
   const data = await apiFetch('/api/heatmap?days=' + days);
 
   // Build lookup: dow -> hour -> tokens
