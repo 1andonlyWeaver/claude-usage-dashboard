@@ -40,12 +40,25 @@ if TYPE_CHECKING:
 TITLE = "Claude Usage Dashboard"
 SW_RESTORE = 9
 SMOKE_FILE = "/static/vendor/chart.umd.js"  # a vendored file: proves a build bundled static/
+MONITOR_DEFAULTTONEAREST = 2
+
+
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
 
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 _user32.IsIconic.argtypes = (wintypes.HWND,)
 _user32.IsIconic.restype = wintypes.BOOL
 _user32.ShowWindow.argtypes = (wintypes.HWND, ctypes.c_int)
 _user32.ShowWindow.restype = wintypes.BOOL
+_user32.GetCursorPos.argtypes = (ctypes.POINTER(wintypes.POINT),)
+_user32.GetCursorPos.restype = wintypes.BOOL
+_user32.MonitorFromPoint.argtypes = (wintypes.POINT, wintypes.DWORD)
+_user32.MonitorFromPoint.restype = wintypes.HMONITOR
+_user32.GetMonitorInfoW.argtypes = (wintypes.HMONITOR, ctypes.POINTER(MONITORINFO))
+_user32.GetMonitorInfoW.restype = wintypes.BOOL
 
 
 def log(message: str) -> None:
@@ -172,6 +185,60 @@ class Shell:
         self.stopped.set()
 
 
+def fit_window(work_area, size, minimum) -> tuple[int, int, int, int]:
+    """(x, y, width, height) for a window of `size`, centered in `work_area` and shrunk to fit it.
+
+    `work_area` is (left, top, right, bottom). The window never goes below `minimum`. Where the
+    minimum is bigger than the work area, the window starts at the work area's top or left
+    edge, so the title bar stays on screen and the rest hangs off the bottom or right.
+    """
+    left, top, right, bottom = work_area
+    width = max(min(size[0], right - left), minimum[0])
+    height = max(min(size[1], bottom - top), minimum[1])
+    x = left + max((right - left - width) // 2, 0)
+    y = top + max((bottom - top - height) // 2, 0)
+    return x, y, width, height
+
+
+def work_area() -> tuple[int, int, int, int]:
+    """The work area (the screen less the taskbar) of the monitor under the cursor.
+
+    That's usually the monitor the person launched the app from. When the cursor can't be read
+    (the desktop is locked), it's the primary monitor, which holds (0, 0).
+    """
+    point = wintypes.POINT()
+    if not _user32.GetCursorPos(ctypes.byref(point)):
+        point = wintypes.POINT(0, 0)
+    info = MONITORINFO(cbSize=ctypes.sizeof(MONITORINFO))
+    if not _user32.GetMonitorInfoW(_user32.MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST),
+                                   ctypes.byref(info)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    work = info.rcWork
+    return work.left, work.top, work.right, work.bottom
+
+
+def _fit_to_screen(window) -> None:
+    """Center the window in the work area, shrunk to fit. Runs on the GUI thread before it first shows.
+
+    pywebview asks for CenterScreen after the form's handle exists, and WinForms applies a start
+    position only when it creates the handle, so Windows cascades the window down from the top
+    left instead: on a 1080p screen a 1280x860 window ends up under the taskbar. By now
+    pywebview has scaled the form's size and minimum for the DPI, so they're in the same
+    pixels as the work area.
+    """
+    from System.Windows.Forms import FormStartPosition  # pythonnet; pywebview has loaded WinForms
+
+    form = window.native
+    try:
+        x, y, width, height = fit_window(work_area(), (form.Width, form.Height),
+                                         (form.MinimumSize.Width, form.MinimumSize.Height))
+    except OSError as ex:
+        log(f"couldn't read the screen's work area ({ex}); Windows places the window")
+        return
+    form.StartPosition = FormStartPosition.Manual  # so a recreated handle keeps these bounds
+    form.SetBounds(x, y, width, height)
+
+
 def _close_to_tray(shell: Shell, window) -> None:
     """Make the close button hide the window. Runs on the GUI thread before the window first shows.
 
@@ -242,7 +309,9 @@ def run_window(shell: Shell, background: bool) -> None:
             return name == "edgechromium"  # False stops here: MSHTML can't run the dashboard
 
         window.events.initialized += on_initialized
+        # Two handlers: pywebview logs one that fails and still runs the next.
         window.events.before_show += lambda: _prepare_window(shell, window)
+        window.events.before_show += lambda: _fit_to_screen(window)
         shell.window = window
         app.desktop_show = shell.show
         webview.start(private_mode=False, storage_path=str(paths.DATA_DIR / "webview"))
