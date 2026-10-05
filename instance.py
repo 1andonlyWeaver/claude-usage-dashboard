@@ -10,7 +10,6 @@ import http.client
 import json
 import os
 import time
-import urllib.request
 from ctypes import wintypes
 
 import paths
@@ -27,10 +26,6 @@ _kernel32.CloseHandle.restype = wintypes.BOOL
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 _user32.AllowSetForegroundWindow.argtypes = (wintypes.DWORD,)
 _user32.AllowSetForegroundWindow.restype = wintypes.BOOL
-
-# Calls to the app's own server never use a proxy. urllib would otherwise send 127.0.0.1
-# through HTTP_PROXY, or through a system proxy whose bypass list doesn't name it.
-_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def acquire(name: str = MUTEX_NAME):
@@ -89,14 +84,23 @@ def call(port: int, path: str, method: str = "GET", timeout: float = 5.0) -> byt
 
     OSError on any failure, a non-2xx status, or an answer that isn't HTTP (another
     program on a stale port).
+
+    http.client, not urllib: it never uses a proxy, where urllib would send 127.0.0.1 through
+    HTTP_PROXY or a system proxy whose bypass list doesn't name it. And urllib's opener loads
+    the Windows certificate store for HTTPS, which a second launch paid for at import.
     """
-    request = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method,
-                                     data=b"" if method == "POST" else None)
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
-        with _opener.open(request, timeout=timeout) as response:
-            return response.read()
+        connection.request(method, path)  # a POST goes with Content-Length: 0
+        response = connection.getresponse()
+        body = response.read()
     except http.client.HTTPException as ex:
         raise OSError(f"not an HTTP answer: {ex!r}") from ex
+    finally:
+        connection.close()
+    if not 200 <= response.status < 300:
+        raise OSError(f"HTTP {response.status} {response.reason} from {path}")
+    return body
 
 
 def show_running(timeout: float = 10.0, *, sleep=time.sleep, clock=time.monotonic) -> bool:

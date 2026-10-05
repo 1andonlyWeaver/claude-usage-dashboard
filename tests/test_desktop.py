@@ -1,4 +1,6 @@
 """The desktop entry point: port choice, the server thread, the window's rules, and --smoke."""
+import builtins
+import importlib
 import platform
 import socket
 import sys
@@ -8,6 +10,7 @@ import pytest
 
 import app
 import desktop
+import tray
 
 URL = "http://127.0.0.1:8765/"
 
@@ -192,6 +195,25 @@ def test_a_second_launch_asks_the_first_to_show_and_exits(monkeypatch, quiet_mai
     assert asked == [True]
 
 
+def test_a_second_launch_leaves_the_server_and_the_tray_unloaded(monkeypatch):
+    """It only hands off and exits; importing them took half or more of its time."""
+    imported = []
+    real_import = builtins.__import__
+
+    def recording_import(name, *args, **kwargs):
+        imported.append(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.delitem(sys.modules, "desktop")  # so its own imports run again
+    monkeypatch.setattr(builtins, "__import__", recording_import)
+    fresh = importlib.import_module("desktop")
+    monkeypatch.setattr(fresh, "setup_logging", lambda: None)
+    monkeypatch.setattr(fresh.instance, "acquire", lambda: None)
+    monkeypatch.setattr(fresh.instance, "show_running", lambda: True)
+    assert fresh.main([]) == 0
+    assert {"app", "settings", "tray", "uvicorn", "webbrowser"}.isdisjoint(imported)
+
+
 def test_a_second_launch_takes_over_when_the_first_copy_has_gone(monkeypatch, quiet_main):
     handles = iter([None, 1234])
     monkeypatch.setattr(desktop.instance, "acquire", lambda: next(handles))
@@ -245,7 +267,7 @@ def test_startup_survives_a_runtime_file_it_cannot_write_and_quit_cleans_up(monk
     monkeypatch.setattr(desktop.instance, "release", lambda handle: calls.append(f"released {handle}"))
     monkeypatch.setattr(desktop.instance, "write_runtime", locked)
     monkeypatch.setattr(desktop, "start_server", lambda sock: (Server(), Thread()))
-    monkeypatch.setattr(desktop.tray, "Tray", Tray)
+    monkeypatch.setattr(tray, "Tray", Tray)  # main imports tray once it holds the mutex
     monkeypatch.setattr(desktop, "run_window", lambda shell, background: calls.append("window ran"))
     assert desktop.main([]) == 0
     assert calls == ["tray started", "window ran", "tray stopped", "tray joined", "server joined", "released 99"]
