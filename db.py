@@ -1,7 +1,6 @@
 """
 Query helpers for the usage SQLite database.
 """
-import math
 import re
 import sqlite3
 import statistics
@@ -49,15 +48,6 @@ _MODEL_ID_RE = re.compile(
 )
 
 
-def _parse_model(model: str):
-    """(family, (major, minor)) parsed from a model ID; either part is None if absent."""
-    m = _MODEL_ID_RE.search((model or "").lower())
-    if not m:
-        return None, None
-    version = (int(m['major']), int(m['minor'] or 0)) if m['major'] else None
-    return m['family'], version
-
-
 def price_for_model(model: str):
     """Return (input, output, cache_read_mult) for a model.
 
@@ -67,10 +57,11 @@ def price_for_model(model: str):
     """
     if model in MODEL_PRICING:
         return MODEL_PRICING[model]
-    family, version = _parse_model(model)
-    if family is None:
+    m = _MODEL_ID_RE.search((model or "").lower())
+    if not m:
         return DEFAULT_PRICING
-    tiers = FAMILY_PRICING[family]
+    tiers = FAMILY_PRICING[m['family']]
+    version = (int(m['major']), int(m['minor'] or 0)) if m['major'] else None
     for min_version, pricing in tiers:
         if version is None or version >= min_version:
             return pricing
@@ -275,140 +266,6 @@ def estimate_cost(days: int = 30) -> dict:
         'breakdown': sorted(breakdown, key=lambda x: -x['cost']),
         'days': days,
     }
-
-
-# ─── Energy, water and CO2e estimates ───────────────────────
-# Anthropic publishes no energy, water or emissions figures for Claude, so these are token
-# counts times per-token factors from third-party research: order-of-magnitude estimates.
-# Sources and reasoning: docs/superpowers/specs/2026-10-13-footprint-design.md.
-# Every factor is (low, central, high).
-
-# Wh per 1,000 tokens for a Sonnet-class model, whole data center (accelerators, host,
-# idle capacity, cooling). A cache write is the same prefill as fresh input; the 1-hour
-# price premium pays for storage, not compute. Cache reads skip the prefill, and since
-# they are most of Claude Code's tokens, their factor is the least certain number here.
-FOOTPRINT_WH_PER_1K = {
-    'input':       (0.04,  0.2,  0.6),
-    'cache_write': (0.04,  0.2,  0.6),
-    'cache_read':  (0.001, 0.02, 0.1),
-    'output':      (0.2,   1.0,  3.0),
-}
-# Model size relative to Sonnet, from current output-price ratios (Fable 5.1 $50, Opus 5.5
-# $20, Sonnet 5 $10, Haiku 4.5 $5): an assumption, as Anthropic publishes no model sizes.
-# A model whose family can't be parsed counts as Sonnet, as DEFAULT_PRICING does.
-FAMILY_ENERGY_MULT = {'haiku': 0.5, 'sonnet': 1.0, 'opus': 2.0, 'fable': 5.0}
-
-WATER_COOLING_L_PER_KWH = (0.12, 0.5, 1.1)     # evaporated by the data center's cooling
-WATER_GENERATION_L_PER_KWH = (1.0, 3.1, 4.5)   # consumed by the power plants supplying it
-CO2E_KG_PER_KWH = (0.12, 0.35, 0.6)            # location-based grid mix
-
-# Everyday comparisons.
-HOME_KWH_PER_DAY = 28.4     # EIA: average US residential customer, 865 kWh a month (2024)
-SHOWER_L = 60.0             # Home Water Works: an average US shower uses 15.8 gal (60 L)
-SHOWER_MINUTES = 7.8        # and lasts 7.8 minutes
-CAR_G_CO2_PER_MILE = 400.0  # EPA: typical US gasoline passenger car
-
-
-def _energy_mult(model: str) -> float:
-    return FAMILY_ENERGY_MULT.get(_parse_model(model)[0], 1.0)
-
-
-def _group_tokens(row) -> dict:
-    """Token counts by FOOTPRINT_WH_PER_1K key for a row selected with _COST_COLUMNS."""
-    return {
-        'input': row['input_tokens'] or 0,
-        'cache_write': (row['cache_5m_tokens'] or 0) + (row['cache_1h_tokens'] or 0),
-        'cache_read': row['cache_read_tokens'] or 0,
-        'output': row['output_tokens'] or 0,
-    }
-
-
-def _group_energy(model: str, row) -> tuple:
-    """(low, central, high) Wh for a row selected with _COST_COLUMNS.
-
-    All token types take the same end of their range together: they run on the same
-    hardware, so a more efficient fleet makes every one of them cheaper.
-    """
-    mult = _energy_mult(model)
-    tokens = _group_tokens(row)
-    return tuple(mult * sum(n * FOOTPRINT_WH_PER_1K[kind][i] for kind, n in tokens.items()) / 1000
-                 for i in range(3))
-
-
-def _combine(*factors) -> tuple:
-    """(low, central, high) of a product of independent (low, central, high) factors.
-
-    Each spread is read as a like-for-like interval of a lognormal, so they add in
-    quadrature in log space. Multiplying the extremes instead would assume every factor
-    is at its worst at once, and give a band far wider than the evidence supports.
-    """
-    central = math.prod(c for _, c, _ in factors)
-    if central <= 0:
-        return (0.0, 0.0, 0.0)
-    down = math.sqrt(sum(math.log(c / lo) ** 2 for lo, c, _ in factors))
-    up = math.sqrt(sum(math.log(hi / c) ** 2 for _, c, hi in factors))
-    return (central * math.exp(-down), central, central * math.exp(up))
-
-
-def _range(values) -> dict:
-    low, central, high = values
-    return {'low': low, 'central': central, 'high': high}
-
-
-def _footprint(rows) -> dict:
-    """Energy (Wh), water (L) and CO2e (g) for rows of model plus _COST_COLUMNS."""
-    energy = (0.0, 0.0, 0.0)
-    cache_read_wh = 0.0
-    breakdown = []
-    for row in rows:
-        wh = _group_energy(row['model'], row)
-        energy = tuple(a + b for a, b in zip(energy, wh))
-        cache_read_wh += (_energy_mult(row['model']) * _group_tokens(row)['cache_read']
-                          * FOOTPRINT_WH_PER_1K['cache_read'][1] / 1000)
-        breakdown.append({'model': row['model'], 'energy_wh': wh[1]})
-
-    kwh = tuple(e / 1000 for e in energy)
-    water_per_kwh = tuple(c + g for c, g in zip(WATER_COOLING_L_PER_KWH, WATER_GENERATION_L_PER_KWH))
-    water = _combine(kwh, water_per_kwh)
-    co2e_g = tuple(1000 * x for x in _combine(kwh, CO2E_KG_PER_KWH))
-    showers = water[1] / SHOWER_L
-    return {
-        'energy_wh': _range(energy),
-        'water_l': _range(water),
-        'water_cooling_l': kwh[1] * WATER_COOLING_L_PER_KWH[1],
-        'water_generation_l': kwh[1] * WATER_GENERATION_L_PER_KWH[1],
-        'co2e_g': _range(co2e_g),
-        'cache_read_share': cache_read_wh / energy[1] if energy[1] else 0.0,
-        'breakdown': sorted(breakdown, key=lambda x: -x['energy_wh']),
-        'comparisons': {
-            'home_days': kwh[1] / HOME_KWH_PER_DAY,
-            'showers': showers,
-            'shower_minutes': showers * SHOWER_MINUTES,
-            'car_miles': co2e_g[1] / CAR_G_CO2_PER_MILE,
-        },
-    }
-
-
-def estimate_footprint(days: int = 30) -> dict:
-    """Estimated energy, water and CO2e of the tokens used in the last `days` days."""
-    rows = _query(f"""
-        SELECT model, {_COST_COLUMNS}
-        FROM messages
-        WHERE date >= ?
-        GROUP BY model
-    """, (_since_date(days),))
-    return {**_footprint(rows), 'days': days}
-
-
-def session_footprint(session_id: str) -> dict | None:
-    """Estimated energy, water and CO2e of one session, or None if it has no messages."""
-    rows = _query(f"""
-        SELECT model, {_COST_COLUMNS}
-        FROM messages
-        WHERE session_id = ?
-        GROUP BY model
-    """, (session_id,))
-    return _footprint(rows) if rows else None
 
 
 def window_tokens(window_start: str, window_end: str, bucket_minutes: int,

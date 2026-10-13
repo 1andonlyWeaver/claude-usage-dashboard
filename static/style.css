@@ -526,33 +526,8 @@ body {
   line-height: 1.5;
 }
 /* New hours figures meet 4.5:1; the older --text-muted rows in the $ view are unchanged. */
-#hoursBreakdown .cost-model-val,
-#footprintBreakdown .cost-model-val {
+#hoursBreakdown .cost-model-val {
   color: var(--text-secondary);
-}
-.footprint-line {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  font-size: 0.8rem;
-  color: var(--text-primary);
-}
-.footprint-val {
-  font-family: var(--font-mono);
-  color: var(--claude-amber);
-}
-.footprint-detail {
-  font-size: 0.7rem;
-  color: var(--text-secondary);
-  line-height: 1.5;
-  margin: 2px 0 10px;
-}
-.footprint-head {
-  font-size: 0.7rem;
-  color: var(--text-secondary);
-  border-top: 1px solid var(--border-subtle);
-  padding-top: 8px;
-  margin-bottom: 6px;
 }
 
 /* ─── Chart cards ─── */
@@ -884,13 +859,6 @@ body {
   color: var(--text-muted);
   font-family: var(--font-mono);
 }
-.panel-footprint {
-  font-family: var(--font-mono);
-  font-size: 0.75rem;
-  color: var(--text-secondary);
-  margin-bottom: 16px;
-}
-.panel-footprint:empty { display: none; }
 .panel-hours {
   display: flex;
   flex-direction: column;

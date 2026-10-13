@@ -65,24 +65,14 @@ def queued(local_ts, prompt, mode="prompt"):
                            "origin": {"kind": "human"}}}
 
 
-def add_message(conn, session_id, local_ts, *, project="proj", source="claude-code",
-                model="claude-sonnet-5", input_tokens=1, output_tokens=1, cache_read_tokens=0,
-                cache_5m_tokens=0, cache_1h_tokens=0, cache_creation_tokens=None):
-    """Insert an assistant-message row the way ingest.py does (local timestamp and date).
-
-    cache_creation_tokens defaults to the 5m + 1h split, as ingest stores it; pass it alone
-    for a row ingested before Claude Code logged the split.
-    """
-    if cache_creation_tokens is None:
-        cache_creation_tokens = cache_5m_tokens + cache_1h_tokens
+def add_message(conn, session_id, local_ts, *, project="proj", source="claude-code"):
+    """Insert an assistant-message row the way ingest.py does (local timestamp and date)."""
     dt = datetime.fromisoformat(local_ts)
     conn.execute(
         "INSERT INTO messages (msg_id, timestamp, date, hour, day_of_week, session_id, project, model,"
-        " input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cache_5m_tokens,"
-        " cache_1h_tokens, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " input_tokens, output_tokens, source) VALUES (?, ?, ?, ?, ?, ?, ?, 'claude-sonnet-5', 1, 1, ?)",
         (f"{session_id}@{local_ts}", local_ts, dt.strftime("%Y-%m-%d"), dt.hour, dt.weekday(),
-         session_id, project, model, input_tokens, output_tokens, cache_read_tokens,
-         cache_creation_tokens, cache_5m_tokens, cache_1h_tokens, source))
+         session_id, project, source))
     conn.commit()
 
 

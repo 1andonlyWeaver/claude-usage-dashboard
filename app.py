@@ -763,15 +763,6 @@ def session_hours(session_id: str):
     return db.session_hours(session_id)
 
 
-@app.get("/api/session/{session_id}/footprint")
-def session_footprint(session_id: str):
-    """Estimated energy, water and CO2e of one session, for the drill-down panel."""
-    data = db.session_footprint(session_id)
-    if data is None:
-        raise HTTPException(404, "Session not found")
-    return data
-
-
 @app.get("/api/hours")
 def hours(days: int = 30):
     """Person-hours for the cost card's hours view, plus the judge worker's state."""
@@ -793,12 +784,6 @@ async def rate(hours: int = 3):
 @app.get("/api/cost")
 async def cost(days: int = 30):
     return db.estimate_cost(days)
-
-
-@app.get("/api/footprint")
-def footprint(days: int = 30):
-    """Estimated energy, water and CO2e for the cost card's footprint view."""
-    return db.estimate_footprint(days)
 
 
 @app.get("/api/sources")

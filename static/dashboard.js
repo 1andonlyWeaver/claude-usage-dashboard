@@ -76,12 +76,12 @@ async function initAll() {
     loadSessions(currentSessionDays),
     loadCost(),
   ]);
-  COST_UNITS[costUnit].load?.();  // e.g. after a manual refresh or when ingest finishes
+  if (costUnit === 'hours') loadHours();  // e.g. after a manual refresh or when ingest finishes
   // Auto-refresh window charts every 60s (clear any prior interval to avoid stacking)
   if (_windowRefreshInterval) clearInterval(_windowRefreshInterval);
   _windowRefreshInterval = setInterval(() => {
     loadWindowCharts();
-    COST_UNITS[costUnit].load?.();
+    if (costUnit === 'hours') loadHours();
   }, 60000);
 }
 
@@ -1382,7 +1382,6 @@ async function openPanel(session) {
   const startDt = new Date(session.start_time);
   document.getElementById('panelMeta').textContent =
     `${startDt.toLocaleString()} · ${session.message_count} messages · ${fmt(session.total_tokens)} tokens · ${shortModelName(session.model)}`;
-  loadPanelFootprint(session.session_id);
   loadPanelHours(session.session_id);
 
   if (sessionDetailChart) sessionDetailChart.destroy();
@@ -1453,25 +1452,6 @@ async function loadPanelHours(sessionId) {
     }
     el.append(item);
   }
-}
-
-let _panelFootprintSeq = 0;
-
-async function loadPanelFootprint(sessionId) {
-  const seq = ++_panelFootprintSeq;
-  const el = document.getElementById('panelFootprint');
-  el.textContent = '';
-  let f;
-  try {
-    f = await apiFetch('/api/session/' + encodeURIComponent(sessionId) + '/footprint');
-  } catch (e) {
-    return;
-  }
-  if (seq !== _panelFootprintSeq) return;  // another session was opened meanwhile
-  el.textContent = `Est. footprint: ~${fmtQty(f.energy_wh.central, ENERGY_UNITS)} `
-    + `(${fmtQtyRange(f.energy_wh, ENERGY_UNITS)}) · ~${fmtQty(f.water_l.central, WATER_UNITS)} water · `
-    + `~${fmtQty(f.co2e_g.central, MASS_UNITS)} CO₂e`;
-  el.title = 'Rough estimate from token counts; see the ⚡ view on the cost card';
 }
 
 function closePanel() {
@@ -1683,39 +1663,31 @@ async function loadCost() {
   }
 }
 
-// ─── Cost card views: $ | h | ⚡ ──────────────────────────────
+// ─── Person-hours view ───────────────────────────────────────
 const COST_UNIT_KEY = 'costCardUnit';
-// `load` refreshes a view while it shows; the $ view is loaded by initAll whatever shows.
-const COST_UNITS = {
-  cost:      { btn: 'unitCost',      view: 'costView',      title: 'Est. API Cost',  icon: '✦' },
-  hours:     { btn: 'unitHours',     view: 'hoursView',     title: 'Person-hours',   icon: '◷', load: () => loadHours() },
-  footprint: { btn: 'unitFootprint', view: 'footprintView', title: 'Est. Footprint', icon: '⚡︎', load: () => loadFootprint() },
-};
-let costUnit = 'cost';   // a key of COST_UNITS
+let costUnit = 'cost';   // 'cost' | 'hours'
 
 function savedCostUnit() {
-  try {
-    const unit = localStorage.getItem(COST_UNIT_KEY);
-    return Object.hasOwn(COST_UNITS, unit) ? unit : 'cost';
-  } catch { return 'cost'; }
+  try { return localStorage.getItem(COST_UNIT_KEY) === 'hours' ? 'hours' : 'cost'; }
+  catch { return 'cost'; }
 }
 
 function setCostUnit(unit) {
   costUnit = unit;
   try { localStorage.setItem(COST_UNIT_KEY, unit); } catch { /* storage blocked: in-page choice still applies */ }
-  for (const [key, u] of Object.entries(COST_UNITS)) {
-    const on = key === unit;
-    const btn = document.getElementById(u.btn);
+  const hours = unit === 'hours';
+  for (const [id, on] of [['unitCost', !hours], ['unitHours', hours]]) {
+    const btn = document.getElementById(id);
     btn.classList.toggle('active', on);
     btn.setAttribute('aria-pressed', String(on));
-    document.getElementById(u.view).hidden = !on;
   }
-  document.getElementById('costTitle').textContent = COST_UNITS[unit].title;
-  document.getElementById('costIcon').textContent = COST_UNITS[unit].icon;
-  COST_UNITS[unit].load?.();
+  document.getElementById('costView').hidden = hours;
+  document.getElementById('hoursView').hidden = !hours;
+  document.getElementById('costTitle').textContent = hours ? 'Person-hours' : 'Est. API Cost';
+  document.getElementById('costIcon').textContent = hours ? '◷' : '✦';
+  if (hours) loadHours();
 }
 
-// ─── Person-hours view ───────────────────────────────────────
 const HOURS_PAUSE_TEXT = {
   quota: 'Paused: 5-hour quota ≥ 80%',
   auth: 'Paused: sign in to Claude Code to resume',
@@ -1786,92 +1758,6 @@ async function loadHours() {
   const statusText = hoursStatusText(data);
   if (status.textContent !== statusText) status.textContent = statusText;  // a live region: only speak changes
   document.getElementById('hoursModel').textContent = data.model ? shortModelName(data.model) : 'Sonnet';
-}
-
-// ─── Footprint view ──────────────────────────────────────────
-// [scale, unit], largest first. The API sends Wh, L and g.
-const ENERGY_UNITS = [[1e6, 'MWh'], [1e3, 'kWh'], [1, 'Wh']];
-const WATER_UNITS  = [[1e3, 'm³'], [1, 'L'], [1e-3, 'mL']];
-const MASS_UNITS   = [[1e6, 't'], [1e3, 'kg'], [1, 'g']];
-
-// Two significant figures: the estimates are no more precise than that.
-function fmtSig(v) {
-  return v.toLocaleString(undefined, { maximumSignificantDigits: 2 });
-}
-
-function pickUnit(v, units) {
-  return units.find(([scale]) => v >= scale) || units[units.length - 1];
-}
-
-function fmtQty(v, units) {
-  if (v == null || isNaN(v)) return '—';
-  const [scale, unit] = pickUnit(v, units);
-  return `${fmtSig(v / scale)} ${unit}`;
-}
-
-// "0.9–16 kWh": both ends in the central value's unit.
-function fmtQtyRange(r, units) {
-  const [scale, unit] = pickUnit(r.central, units);
-  return `${fmtSig(r.low / scale)}–${fmtSig(r.high / scale)} ${unit}`;
-}
-
-function countOf(n, word) {
-  const s = fmtSig(n);
-  return `${s} ${word}${s === '1' ? '' : 's'}`;
-}
-
-function homeText(days) {
-  const what = "of an average US home's electricity";
-  if (days >= 1) return `≈ ${countOf(days, 'day')} ${what}`;
-  if (days * 24 >= 1) return `≈ ${countOf(days * 24, 'hour')} ${what}`;
-  return `≈ ${countOf(days * 24 * 60, 'minute')} ${what}`;
-}
-
-function showerText(c) {
-  return c.showers >= 1 ? `≈ ${countOf(c.showers, 'shower')}`
-                        : `≈ ${countOf(c.shower_minutes, 'minute')} of a shower`;
-}
-
-async function loadFootprint() {
-  const status = document.getElementById('footprintStatus');
-  let data;
-  try {
-    data = await apiFetch('/api/footprint?days=30');
-  } catch (e) {
-    status.textContent = "Couldn't load the footprint estimate.";
-    return;
-  }
-  const c = data.comparisons;
-  document.getElementById('footprintAmount').textContent = '~' + fmtQty(data.energy_wh.central, ENERGY_UNITS);
-  document.getElementById('footprintSub').textContent =
-    `range ${fmtQtyRange(data.energy_wh, ENERGY_UNITS)} · ${homeText(c.home_days)}`;
-  document.getElementById('footprintWater').textContent = '~' + fmtQty(data.water_l.central, WATER_UNITS);
-  document.getElementById('footprintWaterDetail').textContent =
-    `${fmtQtyRange(data.water_l, WATER_UNITS)} · ${showerText(c)} · `
-    + `cooling ${fmtQty(data.water_cooling_l, WATER_UNITS)}, power plants ${fmtQty(data.water_generation_l, WATER_UNITS)}`;
-  document.getElementById('footprintCo2').textContent = '~' + fmtQty(data.co2e_g.central, MASS_UNITS);
-  document.getElementById('footprintCo2Detail').textContent =
-    `${fmtQtyRange(data.co2e_g, MASS_UNITS)} · ≈ ${countOf(c.car_miles, 'mile')} in a gas car`;
-
-  const list = document.getElementById('footprintBreakdown');
-  list.innerHTML = '';
-  for (const r of aggregateByLabel(data.breakdown, 'energy_wh')) {
-    const row = document.createElement('div');
-    row.className = 'cost-row';
-    const name = document.createElement('span');
-    name.className = 'cost-model';
-    name.textContent = r.label;
-    const val = document.createElement('span');
-    val.className = 'cost-model-val';
-    val.textContent = fmtQty(r.value, ENERGY_UNITS);
-    row.append(name, val);
-    list.appendChild(row);
-  }
-
-  const share = Math.round(data.cache_read_share * 100);
-  const statusText = data.energy_wh.central > 0
-    ? `${share}% of the energy is cache reads, the least certain factor` : '';
-  if (status.textContent !== statusText) status.textContent = statusText;  // a live region: only speak changes
 }
 
 // ─── Utilities ───────────────────────────────────────────────
