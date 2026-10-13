@@ -61,6 +61,19 @@ The cost card can show roughly how long your work would have taken a person with
 
 That costs quota from your plan: about 1–2% of a week's quota to catch up on the last 90 days, then about 0.1–0.2% a week. The dashboard runs Claude Code without `ANTHROPIC_API_KEY` and the other variables that would send the bill to an API account or a cloud provider. It can't see a key that Claude Code gets from its own settings, though: an `apiKeyHelper`, or an `env` block in `%USERPROFILE%\.claude\settings.json`. If you've set one of those up, the estimates are billed to that key. Claude's short summary of each day's work is stored with its estimate.
 
+## Energy, water and CO₂e estimates
+
+The cost card's ⚡ view shows roughly how much electricity, water and CO₂e the data centers spent serving your last 30 days of Claude tokens. Each figure comes with a range and an everyday comparison. Opening a session shows the same estimate for that session alone.
+
+These are estimates, not measurements. Anthropic publishes no energy, water or emissions figures for Claude. The dashboard therefore multiplies your token counts by per-token figures from published research on other models and from Anthropic's price ratios. Read the result as an order of magnitude: the true figure could plausibly be several times lower or higher than the headline.
+
+- **Most of your tokens are cache reads.** Claude Code re-reads its conversation from a cache on every step, and those reads are usually over 90% of its tokens. Each one costs far less than a fresh token, but how much less is the least certain number in the estimate. The view says how much of the total comes from them.
+- **Water counts two things:** the water the data center's cooling evaporates, and the water power plants consume making its electricity. The second is usually several times the first.
+- **CO₂e uses the US average grid mix.** It doesn't count any renewable energy certificates the provider buys.
+- **Not included:** training the models, building the hardware, the network, and your own PC.
+
+Everything is worked out on your PC from token counts the dashboard already has, so nothing new leaves your PC. The method and its sources are in `docs/superpowers/specs/2026-10-13-footprint-design.md`.
+
 ## Where your data lives
 
 Everything the dashboard keeps is in `%LOCALAPPDATA%\ClaudeUsageDashboard`. Its `data` folder holds the database, a quota cache, your settings, the last update check (`update.json`), the port of the running copy (`runtime.json`) and the window's own browser storage (`webview`). Its `logs` folder holds `dashboard.log`.

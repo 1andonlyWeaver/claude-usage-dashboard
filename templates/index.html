@@ -239,13 +239,16 @@
             <span class="cost-icon" id="costIcon" aria-hidden="true">✦</span>
             <span class="cost-title" id="costTitle">Est. API Cost</span>
             <span class="cost-period" id="costPeriod">30 days</span>
-            <div class="day-selector" role="group" aria-label="Show API cost or person-hours">
+            <div class="day-selector" role="group" aria-label="Show API cost, person-hours or footprint">
               <button type="button" class="day-btn unit-btn active" id="unitCost" aria-pressed="true"
                       aria-label="$ (estimated API cost)"
                       onclick="setCostUnit('cost')" title="Estimated API cost">$</button>
               <button type="button" class="day-btn unit-btn" id="unitHours" aria-pressed="false"
                       aria-label="h (person-hours)"
                       onclick="setCostUnit('hours')" title="Person-hours">h</button>
+              <button type="button" class="day-btn unit-btn" id="unitFootprint" aria-pressed="false"
+                      aria-label="⚡ (estimated energy, water and CO₂e)"
+                      onclick="setCostUnit('footprint')" title="Estimated energy, water and CO₂e">&#x26A1;&#xFE0E;</button>
             </div>
           </div>
           <div class="cost-view" id="costView">
@@ -260,6 +263,22 @@
             <div class="hours-scheduled" id="hoursScheduled"></div>
             <p class="hours-status" id="hoursStatus" aria-live="polite"></p>
             <p class="hours-note">Estimated by Claude <span id="hoursModel">Sonnet</span>: time a competent professional would need without AI. Claude Code sessions only. Rough, ±2×.</p>
+          </div>
+          <div class="cost-view" id="footprintView" hidden>
+            <div class="cost-amount" id="footprintAmount">—</div>
+            <div class="hours-sub" id="footprintSub"></div>
+            <div class="footprint-line">
+              <span>Water</span><span class="footprint-val" id="footprintWater">—</span>
+            </div>
+            <p class="footprint-detail" id="footprintWaterDetail"></p>
+            <div class="footprint-line">
+              <span>CO₂e</span><span class="footprint-val" id="footprintCo2">—</span>
+            </div>
+            <p class="footprint-detail" id="footprintCo2Detail"></p>
+            <p class="footprint-head">Energy by model</p>
+            <div class="cost-breakdown" id="footprintBreakdown"></div>
+            <p class="hours-status" id="footprintStatus" aria-live="polite"></p>
+            <p class="hours-note">Rough estimate: token counts × published per-token factors. Anthropic publishes no energy or water figures for Claude, so read it as an order of magnitude. Inference only: excludes training, hardware and your PC.</p>
           </div>
         </div>
 
@@ -306,6 +325,7 @@
           </div>
           <button class="panel-close" onclick="closePanel()">✕</button>
         </div>
+        <p class="panel-footprint" id="panelFootprint"></p>
         <div class="panel-hours" id="panelHours"></div>
         <div class="chart-wrap">
           <canvas id="sessionDetailChart"></canvas>

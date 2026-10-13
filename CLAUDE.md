@@ -50,8 +50,8 @@ conda activate claude-usage-dashboard && python -m pytest
 ## Architecture
 
 ```
-app.py       FastAPI server — 24 API endpoints, local-only request guard, background ingest and person-hours threads, serves templates/
-db.py        SQLite query layer — pricing constants, token aggregations, cost calculations, person-hours figures
+app.py       FastAPI server — 26 API endpoints, local-only request guard, background ingest and person-hours threads, serves templates/
+db.py        SQLite query layer — pricing constants, token aggregations, cost calculations, person-hours figures, energy/water/CO2e footprint estimates
 ingest.py    ETL pipeline — scans ~/.claude/projects/**/*.jsonl, deduplicates, writes to SQLite
 person_hours.py  Person-hours judge — one-day transcript summaries, `claude -p` (Sonnet) calls, queue, worker gating, CLI
 auth.py      Claude Code OAuth token — reads ~/.claude/.credentials.json, renews it on request, connection status, sign-in launcher
@@ -213,6 +213,15 @@ The cost card's `$ | h` toggle shows estimated person-hours: how long a competen
   - A timed-out judge call doesn't kill child processes the CLI started.
   - The spec's "Known limitations" section has the full list.
 
+## Footprint (energy, water, CO₂e)
+
+The cost card's `⚡` view and a line in the session drill-down panel show estimated data-center energy, water and CO₂e. Design and sources: `docs/superpowers/specs/2026-10-13-footprint-design.md`.
+
+- **It's an estimate.** Anthropic publishes no per-token figures, so `db._footprint` multiplies token counts by `FOOTPRINT_WH_PER_1K` (per token type) and `FAMILY_ENERGY_MULT` (per family, from price ratios), then by the water and CO₂e factors per kWh. Every factor is `(low, central, high)`.
+- **Ranges.** Energy takes all-low or all-high per-token factors together. Water and CO₂e combine that range with their own factor's range in quadrature in log space (`db._combine`).
+- **Cache reads.** These are most of Claude Code's tokens, so their factor drives the total. The view reports `cache_read_share`.
+- **Where the constants live.** Next to pricing in `db.py`; `_parse_model` is shared with `price_for_model`. When you change a factor, update the spec's table and sources too.
+
 ## Gotchas
 
 - **Tests never touch `data/usage.db`.** An autouse fixture in `tests/conftest.py` points `db.DB_PATH` and `ingest.DB_PATH` at a per-test temp file. `tests/conftest.py` also redirects `settings.SETTINGS_PATH` and `auth.CREDENTIALS_FILE` to per-test temp files and forbids `subprocess.run` / `subprocess.Popen`. Every test also gets an in-memory `winreg` in `autostart` (`tests/fake_winreg.py`), so none can touch the real registry. `instance.RUNTIME_FILE` points at a per-test file too. `updates._urlopen` fails any test that would reach GitHub, and `updates.STATE_FILE` points at a per-test file.
@@ -230,9 +239,11 @@ The cost card's `$ | h` toggle shows estimated person-hours: how long a competen
 
 ## API Endpoints
 
-`/api/quota`, `/api/connection`, `/api/connection/login` (POST), `/api/connection/renew` (POST), `/api/settings` (GET/POST), `/api/ingest-status`, `/api/refresh` (POST), `/api/daily`, `/api/projects`, `/api/models`, `/api/heatmap`, `/api/sessions`, `/api/session/{id}`, `/api/session/{id}/hours`, `/api/rate`, `/api/cost`, `/api/hours`, `/api/sources`, `/api/stats`, `/api/window`, `/api/app/info`, `/api/app/show` (POST), `/api/update`, `/api/update/check` (POST)
+`/api/quota`, `/api/connection`, `/api/connection/login` (POST), `/api/connection/renew` (POST), `/api/settings` (GET/POST), `/api/ingest-status`, `/api/refresh` (POST), `/api/daily`, `/api/projects`, `/api/models`, `/api/heatmap`, `/api/sessions`, `/api/session/{id}`, `/api/session/{id}/hours`, `/api/session/{id}/footprint`, `/api/rate`, `/api/cost`, `/api/footprint`, `/api/hours`, `/api/sources`, `/api/stats`, `/api/window`, `/api/app/info`, `/api/app/show` (POST), `/api/update`, `/api/update/check` (POST)
 
 `/api/hours?days=30` returns person-hours for the cost card's `h` view: interactive hours (judged + provisional), scheduled runs, active hours, leverage, hours by project, the judge model, and the `worker` state. `/api/session/{id}/hours` returns per-day person-hours for the drill-down panel. `/api/sessions` rows carry `person_hours` and `hours_status` (`done` / `provisional` / `partial`; null for Desktop sessions).
+
+`/api/footprint?days=30` returns the estimated energy (Wh), water (L, cooling plus power generation) and CO₂e (g) for the cost card's ⚡ view, each as `{low, central, high}`, plus energy by model, `cache_read_share` and `comparisons` (`home_days`, `showers`, `shower_minutes`, `car_miles`). `/api/session/{id}/footprint` returns the same for one session (404 if it has no messages).
 
 `/api/connection` returns the connection state with `title`, `detail`, `actions` (`install` / `sign-in` / `renew`), `login_running` and a token-free `diagnostics` text. `/api/connection/login` opens `claude auth login --claudeai` in a console window, one at a time (409 without the CLI, 500 with the reason if Windows won't start it). `/api/connection/renew` makes one forced token renewal. `/api/settings` reads or changes `judge_enabled`, `auto_refresh_token`, `preferred_port`, `update_check` and `dismissed_version` (400 on unknown keys or values of the wrong type). `preferred_port` is an int with no UI; the desktop app reads it at start.
 
