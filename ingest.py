@@ -131,29 +131,6 @@ def get_project_dirs() -> list:
 
 DB_PATH = paths.DATA_DIR / "usage.db"
 
-# API pricing per 1M tokens (input, output).
-# NOTE: currently unused — cost is computed at query time in db.py via price_for_model(),
-# which picks a tier by model family + version. Kept in sync with db.py for documentation
-# parity only. Cache: 5m writes 1.25x input, 1h writes 2x, reads 0.1x (0.025x Fable 5.1,
-# 0.05x Opus 5.5).
-MODEL_PRICING = {
-    "claude-fable-5-1": (10.00, 50.00),
-    "claude-fable-5": (10.00, 50.00),
-    "claude-opus-5-5": (4.00, 20.00),
-    "claude-opus-5": (5.00, 25.00),
-    "claude-opus-4-8": (5.00, 25.00),
-    "claude-opus-4-7": (5.00, 25.00),
-    "claude-opus-4-6": (5.00, 25.00),
-    "claude-opus-4-5": (5.00, 25.00),
-    "claude-opus-4-1": (15.00, 75.00),
-    "claude-opus-4-0": (15.00, 75.00),
-    "claude-sonnet-5": (2.00, 10.00),
-    "claude-sonnet-4-6": (3.00, 15.00),
-    "claude-sonnet-4-5": (3.00, 15.00),
-    "claude-haiku-4-5": (1.00, 5.00),
-}
-DEFAULT_PRICING = (2.00, 10.00)  # fallback to Sonnet 5 pricing
-
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)

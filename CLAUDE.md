@@ -137,14 +137,29 @@ person_hour_estimates (session_id, date,            -- PRIMARY KEY (session_id, 
 
 `timestamp` stores **local time** (no timezone). All window/range queries use local-time boundaries to match.
 
-## Model Pricing (hardcoded in db.py and ingest.py)
+## Model Pricing (db.py)
 
-- Opus: $15/$75 per 1M input/output tokens
-- Sonnet: $3/$15 per 1M input/output tokens
-- Haiku: $0.25/$1.25 per 1M input/output tokens
-- Cache: 1.25× create, 0.10× read
+Cost is worked out at query time in `db.py`, which holds the only copy of the prices; ingest stores tokens, not dollars. The rates are first-party API prices per 1M tokens from https://platform.claude.com/docs/en/about-claude/pricing, and the comment above the constants says when they were last checked. Each `*_PRICING` constant is `(input, output, cache_read_mult)`:
 
-When updating pricing, change it in **both** `db.py` and `ingest.py`.
+| Tier | Input / output | Cache reads |
+|------|----------------|-------------|
+| Fable 5.1 and later | $10 / $50 | 0.025× |
+| Fable 5 | $10 / $50 | 0.1× |
+| Opus 5.5 and later | $4 / $20 | 0.05× |
+| Opus 4.5 to 5 | $5 / $25 | 0.1× |
+| Opus 4 / 4.1 | $15 / $75 | 0.1× |
+| Sonnet 5 and later | $2 / $10 | 0.1× |
+| Sonnet 4 to 4.6 | $3 / $15 | 0.1× |
+| Haiku 4.5 and later | $1 / $5 | 0.1× |
+
+Cache writes cost the same multiple of input on every model: 1.25× for 5-minute writes (`CACHE_5M_WRITE_MULT`) and 2× for 1-hour writes (`CACHE_1H_WRITE_MULT`). Rows ingested before Claude Code logged the 5m/1h split are charged the 5-minute rate for all their cache writes.
+
+`price_for_model()` picks the rate in this order:
+1. An exact model ID in `MODEL_PRICING`. It's empty; add an entry only for a model whose price breaks from its family's tiers.
+2. The family and version parsed from the ID (`claude-opus-4-5-20251101` is Opus 4.5; `claude-opus-4-20250514` is Opus 4.0, since a snapshot date isn't read as a version). `FAMILY_PRICING` lists each family's `(min_version, pricing)` tiers newest first, and a model gets the first tier its version reaches, so an unreleased newer version inherits the newest known rate. An ID with no parseable version gets the family's newest tier; that includes old-style IDs like `claude-3-5-haiku-20241022`, where the version comes before the family. A version below every tier gets the oldest tier.
+3. `DEFAULT_PRICING` (Sonnet 5) for an ID with no known family.
+
+To change a price, edit its constant, or add a tier to `FAMILY_PRICING` when a new version changes the rate, and update the checked date in the comment.
 
 ## Server Restart
 
