@@ -1,6 +1,6 @@
 """
 Build inputs drawn from the app itself, so the exe can't drift from it:
-- icon.ico: tray.py's ring, drawn at each size Windows asks for. The exe, its window, the
+- icon.ico: tray.py's gauge tile, drawn at each size Windows asks for. The exe, its window, the
   taskbar and the installer all use it.
 - version_info.txt: the exe's Windows version resource. Its FileDescription is the name
   Windows puts on the app's notifications, its taskbar button and Task Manager (from source
@@ -27,7 +27,7 @@ def file_version(number: str) -> tuple[int, int, int, int]:
 
 
 def write_icon(path: Path) -> Path:
-    """Each size drawn on its own rather than scaled down from 256, so the ring stays crisp at 16 px."""
+    """Each size drawn on its own rather than scaled down from 256, so the gauge stays crisp at 16 px."""
     images = [tray.icon_image(False, size) for size in ICON_SIZES]
     images[-1].save(path, format="ICO", sizes=[(s, s) for s in ICON_SIZES], append_images=images[:-1])
     return path

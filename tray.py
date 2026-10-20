@@ -6,6 +6,7 @@ Every 30 s it reads /api/connection from the app's own server. That call also ru
 usual quota fetch, so the figures stay fresh while no window is polling.
 """
 import json
+import math
 import threading
 import webbrowser
 from datetime import datetime
@@ -23,26 +24,47 @@ POLL_SECONDS = 30
 # it happens most nights and clears the next time they use Claude Code.
 ALERT_STATES = frozenset({"not-installed", "signed-out", "login-required"})
 
-RING = (224, 122, 95, 255)        # #E07A5F, the favicon's ring
+TILE = (224, 122, 95, 255)        # #E07A5F, the favicon's tile
+DIAL = (250, 240, 230, 255)       # #FAF0E6, the gauge's filled arc
+TRACK = (250, 240, 230, 89)       # the same cream at 35%: the arc's empty part
+NEEDLE = (20, 20, 19, 255)        # #141413
 BADGE = (242, 177, 52, 255)       # amber: something needs the person
-BADGE_EDGE = (17, 16, 16, 255)    # the page background, #111010, to set the dot off the ring
+BADGE_EDGE = (17, 16, 16, 255)    # the page background, #111010, to set the dot off the tile
+SUPERSAMPLE = 4                   # drawn larger, then scaled down, for smooth edges
+
+
+def _arc(draw, scale, start, end, colour):
+    """A round-capped arc of the gauge (centre 32,42, radius 18, 7 wide in the 64-unit design)."""
+    cx, cy, r, w = 32 * scale, 42 * scale, 18 * scale, 7 * scale
+    draw.arc((cx - r - w / 2, cy - r - w / 2, cx + r + w / 2, cy + r + w / 2),
+             start=start, end=end, fill=colour, width=round(w))
+    for angle in (start, end):
+        x, y = cx + r * math.cos(math.radians(angle)), cy + r * math.sin(math.radians(angle))
+        draw.ellipse((x - w / 2, y - w / 2, x + w / 2, y + w / 2), fill=colour)
 
 
 def icon_image(attention: bool, size: int = 64) -> Image.Image:
-    """The favicon's open ring, plus an amber dot when the sign-in needs attention."""
-    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    """The gauge tile (the favicon), plus an amber dot when the sign-in needs attention."""
+    big = size * SUPERSAMPLE
+    s = big / 64
+    image = Image.new("RGBA", (big, big), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
-    width = max(2, size // 8)
-    inset = width // 2 + 1
-    # The favicon's dash covers 60 of the circle's 88 units from the top: about 245 degrees.
-    draw.arc((inset, inset, size - 1 - inset, size - 1 - inset), start=-90, end=155,
-             fill=RING, width=width)
-    if attention:
-        radius = size * 0.22
-        centre = size - 1 - radius
-        draw.ellipse((centre - radius, centre - radius, centre + radius, centre + radius),
-                     fill=BADGE, outline=BADGE_EDGE, width=max(1, size // 32))
-    return image
+    draw.rounded_rectangle((2 * s, 2 * s, 62 * s, 62 * s), radius=16 * s, fill=TILE)
+    track = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    _arc(ImageDraw.Draw(track), s, 180, 360, TRACK)
+    image.alpha_composite(track)
+    _arc(draw, s, 180, 307, DIAL)  # the filled 70%
+    draw.line((32 * s, 42 * s, 39.6 * s, 31.5 * s), fill=NEEDLE, width=round(6 * s))
+    for x, y, r in ((32, 42, 5), (39.6, 31.5, 3)):
+        draw.ellipse(((x - r) * s, (y - r) * s, (x + r) * s, (y + r) * s), fill=NEEDLE)
+    if attention:  # top right, clear of the needle
+        radius, edge = 15 * s, max(SUPERSAMPLE, big // 24)
+        centre_x, centre_y = big - radius - 1, radius + 1
+        draw.ellipse((centre_x - radius, centre_y - radius, centre_x + radius, centre_y + radius),
+                     fill=BADGE_EDGE)
+        inner = radius - edge
+        draw.ellipse((centre_x - inner, centre_y - inner, centre_x + inner, centre_y + inner), fill=BADGE)
+    return image.resize((size, size), Image.LANCZOS)
 
 
 class Alerts:

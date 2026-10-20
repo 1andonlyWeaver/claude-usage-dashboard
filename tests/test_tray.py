@@ -76,7 +76,7 @@ def test_the_badge_is_the_only_difference_between_the_two_images():
     plain, badged = tray.icon_image(False), tray.icon_image(True)
     assert plain.size == badged.size == (64, 64)
     assert plain.mode == badged.mode == "RGBA"
-    assert tray.RING in plain.get_flattened_data()
+    assert tray.TILE in plain.get_flattened_data()
     assert tray.BADGE not in plain.get_flattened_data()
     assert tray.BADGE in badged.get_flattened_data()
 
