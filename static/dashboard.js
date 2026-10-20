@@ -68,6 +68,7 @@ window.addEventListener('DOMContentLoaded', () => {
 });
 
 async function initAll() {
+  await loadModelPalette();
   await Promise.all([
     loadWindowCharts(),
     loadProjects(currentProjectDays),
@@ -725,9 +726,10 @@ function buildWindowChart(data, canvasId, maHalf) {
   // Collect unique groups preserving order
   const groupOrder = [];
   const seen = new Set();
+  const rawGroup = {};  // label -> a raw group (model ID) behind it, for modelColor()
   for (const b of buckets) {
     const g = groupLabel(b.group);
-    if (!seen.has(g)) { groupOrder.push(g); seen.add(g); }
+    if (!seen.has(g)) { groupOrder.push(g); seen.add(g); rawGroup[g] = b.group; }
   }
   if (groupOrder.length === 0) groupOrder.push('total');
 
@@ -769,6 +771,7 @@ function buildWindowChart(data, canvasId, maHalf) {
   function groupColor(g, i) {
     if (g === 'Other') return 'rgba(150,150,150,0.7)';
     if (windowStack === 'token_type' || windowStack === 'none') return tokenTypeColors[g] || STACK_PALETTE[i % STACK_PALETTE.length];
+    if (windowStack === 'model') return modelColor(rawGroup[g]);
     return STACK_PALETTE[i % STACK_PALETTE.length];
   }
 
@@ -1140,7 +1143,7 @@ async function loadModels(days) {
   const agg = aggregateByLabel(data, 'total_tokens');
   const labels = agg.map(r => r.label);
   const values = agg.map(r => r.value);
-  const colors = modelColors(agg);
+  const colors = agg.map(r => modelColor(r.model));
 
   modelChart = new Chart(ctx, {
     type: 'doughnut',
@@ -1195,15 +1198,33 @@ function versionCode(model) {
   return maj ? parseInt(maj[1], 10) * 10 : null;
 }
 
-// Color each row's model by version recency: within each family, the newest
-// version (highest major.minor present) gets the darkest shade and older versions
-// step lighter. Ranking is relative to the versions actually present, so the
-// ordering is correct in every time-window filter without a hardcoded "newest".
-function modelColors(rows) {
+// One color per model version, shared by every view (By Model doughnut, the 5h/7d
+// model stacks, the session list). Within each family the newest version gets the
+// darkest shade and older versions step lighter. Versions are ranked against every
+// model used in the last MODEL_PALETTE_DAYS (the widest range any view shows), not
+// against the models in the view being drawn, so a model keeps its color across
+// charts and day filters.
+const MODEL_PALETTE_DAYS = 90;
+const paletteModels = new Map();  // version label -> a raw model ID of that version
+let modelPalette = new Map();     // version label -> color
+
+async function loadModelPalette() {
+  try {
+    const rows = await apiFetch('/api/models?days=' + MODEL_PALETTE_DAYS);
+    paletteModels.clear();
+    for (const r of rows) paletteModels.set(shortModelName(r.model), r.model);
+    rebuildModelPalette();
+  } catch (e) {
+    // Colors still work: modelColor() adds each model as it's first drawn.
+    console.warn('Model palette load failed:', e);
+  }
+}
+
+function rebuildModelPalette() {
   const codesByFam = {};
-  for (const r of rows) {
-    const fam = shortModelName(r.model).split(' ')[0];
-    const code = versionCode(r.model);
+  for (const model of paletteModels.values()) {
+    const fam = shortModelName(model).split(' ')[0];
+    const code = versionCode(model);
     if (code === null) continue;
     (codesByFam[fam] ||= new Set()).add(code);
   }
@@ -1212,13 +1233,24 @@ function modelColors(rows) {
     const desc = [...codesByFam[fam]].sort((a, b) => b - a); // newest first
     rankByFam[fam] = new Map(desc.map((c, i) => [c, i]));
   }
-  return rows.map(r => {
-    const fam = shortModelName(r.model).split(' ')[0];
-    const shades = FAMILY_SHADES[fam];
-    if (!shades) return CLAUDE_CREAM;
-    const rank = rankByFam[fam]?.get(versionCode(r.model)) ?? 0;
-    return shades[Math.min(rank, shades.length - 1)];
-  });
+  modelPalette = new Map();
+  for (const [label, model] of paletteModels) {
+    const shades = FAMILY_SHADES[label.split(' ')[0]];
+    const rank = rankByFam[label.split(' ')[0]]?.get(versionCode(model)) ?? 0;
+    modelPalette.set(label, shades ? shades[Math.min(rank, shades.length - 1)] : CLAUDE_CREAM);
+  }
+}
+
+// Color for a raw model ID. A version the palette hasn't seen (e.g. first used since
+// the page loaded) is added and the palette re-ranked; the next redraw of the other
+// charts picks up any shift.
+function modelColor(model) {
+  const label = shortModelName(model);
+  if (!modelPalette.has(label)) {
+    paletteModels.set(label, model);
+    rebuildModelPalette();
+  }
+  return modelPalette.get(label);
 }
 
 // Group rows by their version label, summing valueKey. Returns one entry per version
@@ -1328,8 +1360,9 @@ async function loadSessions(days) {
     row.className = 'session-row';
     row.onclick = () => openPanel(s);
 
-    const modelClass = s.model.includes('fable') ? 'fable' : s.model.includes('opus') ? 'opus' : s.model.includes('haiku') ? 'haiku' : '';
-    const dot = `<div class="session-dot ${modelClass}"></div>`;
+    const modelClass = s.model.includes('fable') ? 'fable' : s.model.includes('opus') ? 'opus'
+                     : s.model.includes('haiku') ? 'haiku' : s.model.includes('sonnet') ? 'sonnet' : '';
+    const dot = `<div class="session-dot" style="background:${modelColor(s.model)}"></div>`;
 
     const startDt = new Date(s.start_time);
     const endDt = new Date(s.end_time);
