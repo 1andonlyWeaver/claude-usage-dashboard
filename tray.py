@@ -1,13 +1,16 @@
 """
-The desktop app's tray icon: its menu (Open, Start at login, Check for updates, Quit), its
-attention badge, and one Windows notification when the Claude sign-in needs the person.
+The desktop app's tray icon: its menu (Open, Start at login, Check for updates, Install update,
+Quit), its attention badge, and one Windows notification when the Claude sign-in needs the
+person or a new version is out.
 
 Every 30 s it reads /api/connection from the app's own server. That call also runs the
-usual quota fetch, so the figures stay fresh while no window is polling.
+usual quota fetch, so the figures stay fresh while no window is polling. It reads /api/update
+too, which only reads the last daily check; GitHub is asked by the server, at most daily.
 """
 import json
 import math
 import threading
+import time
 import webbrowser
 from datetime import datetime
 
@@ -23,6 +26,14 @@ POLL_SECONDS = 30
 # The states the person has to act on. token-expired isn't one: without automatic renewal
 # it happens most nights and clears the next time they use Claude Code.
 ALERT_STATES = frozenset({"not-installed", "signed-out", "login-required"})
+# Why an install from the menu stopped (updates.UpdateError codes); the page says the same.
+INSTALL_ERRORS = {
+    "download-failed": "Couldn't download the update. Try again later.",
+    "bad-signature": "The update wasn't installed: its signature didn't check out.",
+    "launch-failed": "Windows wouldn't start the update's installer.",
+}
+INSTALL_POLL_SECONDS = 2
+INSTALL_GIVE_UP_SECONDS = 15 * 60  # a download still going after this is left to the page
 
 TILE = (224, 122, 95, 255)        # #E07A5F, the favicon's tile
 DIAL = (250, 240, 230, 255)       # #FAF0E6, the gauge's filled arc
@@ -96,6 +107,9 @@ class Tray:
         self.url = url
         self.port = port
         self.alerts = Alerts()
+        self.update = {}            # the last /api/update answer
+        self._told_update = None    # the release this run already sent a notification about
+        self._connection_title = None
         self._badge_shown = False
         self._stop = threading.Event()
         self._thread = None
@@ -108,6 +122,8 @@ class Tray:
             pystray.MenuItem("Start at login", self.toggle_autostart,
                              checked=lambda item: autostart.is_enabled()),
             pystray.MenuItem("Check for updates", self.check_for_updates),
+            pystray.MenuItem(lambda item: f"Install update {self.update.get('latest')}", self.install_update,
+                             visible=lambda item: bool(self.update.get("can_install"))),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", self.shell.quit),
         )
@@ -133,6 +149,7 @@ class Tray:
         while not self._stop.is_set():
             try:
                 self.poll_once()
+                self.poll_update()
             except Exception as ex:  # keep polling: one bad round mustn't freeze the badge
                 print(f"[tray {datetime.now():%Y-%m-%d %H:%M:%S}] poll failed - "
                       f"{type(ex).__name__}: {ex}")
@@ -145,15 +162,51 @@ class Tray:
             return  # the server is starting or stopping; the next poll tries again
         if not isinstance(status, dict):
             return
+        self._connection_title = status.get("title")
         message = self.alerts.observe(status)
-        if self.alerts.attention != self._badge_shown:
-            self._badge_shown = self.alerts.attention
-            self.icon.icon = icon_image(self._badge_shown)
-        title = f"{TITLE}: {status.get('title')}" if self._badge_shown else TITLE
-        if self.icon.title != title[:127]:
-            self.icon.title = title[:127]  # Windows cuts tray tooltips at 127 characters
+        self._show_badge()
         if message:
             self.icon.notify(message[:255], TITLE)  # Windows' limit for notification text
+
+    def _show_badge(self) -> None:
+        """The amber dot and the tooltip: the sign-in first, then a new version."""
+        update = self.update.get("latest") if self.update.get("notify") else None
+        attention = self.alerts.attention or update is not None
+        if attention != self._badge_shown:
+            self._badge_shown = attention
+            self.icon.icon = icon_image(attention)
+        if self.alerts.attention:
+            title = f"{TITLE}: {self._connection_title}"
+        elif update:
+            title = f"{TITLE}: version {update} is available"
+        else:
+            title = TITLE
+        if self.icon.title != title[:127]:
+            self.icon.title = title[:127]  # Windows cuts tray tooltips at 127 characters
+
+    def poll_update(self) -> None:
+        try:
+            status = json.loads(instance.call(self.port, "/api/update", timeout=20))
+        except (OSError, ValueError):
+            return
+        if isinstance(status, dict):
+            self.observe_update(status)
+
+    def observe_update(self, status: dict) -> None:
+        """Record an /api/update answer: the menu, the badge, and one notification per release
+        per run, so someone who lives in the tray still hears about it."""
+        menu_changed = (status.get("can_install"), status.get("latest")) != \
+            (self.update.get("can_install"), self.update.get("latest"))
+        self.update = status
+        if menu_changed:
+            self.icon.update_menu()
+        self._show_badge()
+        latest = status.get("latest")
+        if status.get("notify") and latest != self._told_update:
+            self._told_update = latest
+            how = ("Choose Install update in this icon's menu." if status.get("can_install")
+                   else "Open the dashboard to download it.")
+            self.icon.notify(f"Version {latest} is available. {how}", TITLE)
 
     def toggle_autostart(self) -> None:
         try:
@@ -177,6 +230,12 @@ class Tray:
             status = None
         if not isinstance(status, dict):
             self.icon.notify("Couldn't check for updates. Try again in a minute.", TITLE)
+            return
+        self._told_update = status.get("latest")  # this note says it; the next poll needn't
+        self.observe_update(status)
+        if status.get("available") and status.get("can_install"):
+            self.icon.notify(f"Version {status.get('latest')} is available. "
+                             "Choose Install update in this icon's menu.", TITLE)
         elif status.get("available"):
             self.icon.notify(f"Version {status.get('latest')} is available. Opening the download page.", TITLE)
             webbrowser.open(status["url"])
@@ -184,3 +243,30 @@ class Tray:
             self.icon.notify("Couldn't reach GitHub to check for updates. Try again later.", TITLE)
         else:
             self.icon.notify(f"You have the latest version, {status.get('current')}.", TITLE)
+
+    def install_update(self) -> None:
+        """Download, check and start the new version's Setup; the app quits once it has.
+        On a thread of its own, like the check."""
+        threading.Thread(target=self._run_install, name="update-install-menu", daemon=True).start()
+
+    def _run_install(self, clock=time.monotonic) -> None:
+        latest = self.update.get("latest")
+        try:
+            status = json.loads(instance.call(self.port, "/api/update/install", method="POST", timeout=30))
+        except (OSError, ValueError):
+            status = None
+        if not isinstance(status, dict):
+            self.icon.notify("Couldn't start the update. Open the dashboard to download it instead.", TITLE)
+            return
+        self.icon.notify(f"Downloading version {latest}. The dashboard restarts once it's installed.", TITLE)
+        # Follow it until it fails, or the app quits for Setup (then this thread goes with it)
+        deadline = clock() + INSTALL_GIVE_UP_SECONDS
+        while not self._stop.wait(INSTALL_POLL_SECONDS) and clock() < deadline:
+            try:
+                status = json.loads(instance.call(self.port, "/api/update", timeout=20))
+            except (OSError, ValueError):
+                return  # the server is stopping: Setup has taken over
+            install = status.get("install") if isinstance(status, dict) else None
+            if isinstance(install, dict) and install.get("state") == "failed":
+                self.icon.notify(INSTALL_ERRORS.get(install.get("error"), "The update wasn't installed."), TITLE)
+                return

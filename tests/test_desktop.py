@@ -5,12 +5,14 @@ import platform
 import socket
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
 import app
 import desktop
 import tray
+import updates
 
 URL = "http://127.0.0.1:8765/"
 
@@ -441,3 +443,88 @@ def test_from_source_smoke_leaves_the_window_libraries_alone(monkeypatch):
     monkeypatch.delattr(sys, "frozen", raising=False)
     monkeypatch.setattr(desktop, "_window_libraries_load", must_not_load)
     assert desktop.smoke() == 0
+
+
+def test_a_frozen_smoke_also_checks_the_update_signature_library_loads(monkeypatch):
+    async def no_startup():
+        pass
+
+    monkeypatch.setattr(app, "startup", no_startup)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(desktop, "_window_libraries_load", lambda: True)
+    monkeypatch.setattr(desktop, "_signature_check_loads", lambda: False)
+    assert desktop.smoke() == 1
+
+
+def test_the_signature_check_loads_here():
+    assert desktop._signature_check_loads()
+
+
+@pytest.mark.parametrize("window, hwnd, visible, relaunch", [
+    (FakeWindow(), 77, True, "window"),       # open on screen: it comes back open
+    (FakeWindow(), 77, False, "background"),  # hidden in the tray: it comes back there
+    (None, None, True, "background"),         # no WebView2: no second browser tab
+])
+def test_install_update_starts_setup_then_quits(monkeypatch, window, hwnd, visible, relaunch):
+    launched = []
+    monkeypatch.setattr(updates, "launch", lambda path, how: launched.append((path, how)))
+    shell, _, _ = make_shell()
+    shell._visible = lambda h: visible
+    shell.window, shell.hwnd, shell.tray = window, hwnd, FakeTray()
+    shell.install_update(Path("Setup.exe"))
+    assert launched == [(Path("Setup.exe"), relaunch)]
+    assert shell.server.should_exit and shell.tray.stopped and shell.stopped.is_set()
+
+
+def test_install_update_keeps_running_when_setup_wont_start(monkeypatch):
+    def refuse(path, how):
+        raise OSError(1260, "blocked by group policy")
+
+    monkeypatch.setattr(updates, "launch", refuse)
+    shell, _, _ = make_shell()
+    with pytest.raises(OSError):
+        shell.install_update(Path("Setup.exe"))
+    assert not shell.quitting and not shell.stopped.is_set()
+
+
+@pytest.mark.parametrize("frozen", [True, False])
+def test_only_the_installed_app_offers_to_install_updates(monkeypatch, quiet_main, frozen):
+    class Server:
+        started = True
+        should_exit = False
+
+    class Thread:
+        def is_alive(self):
+            return False
+
+        def join(self, timeout=None):
+            pass
+
+    class Tray:
+        def __init__(self, shell, url, port):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def join(self, timeout):
+            pass
+
+    seen = []
+    monkeypatch.setattr(app, "desktop_update", None)
+    if frozen:
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+    else:
+        monkeypatch.delattr(sys, "frozen", raising=False)
+    monkeypatch.setattr(desktop.instance, "acquire", lambda: 99)
+    monkeypatch.setattr(desktop.instance, "release", lambda handle: None)
+    monkeypatch.setattr(desktop.instance, "write_runtime", lambda port: None)
+    monkeypatch.setattr(desktop, "start_server", lambda sock: (Server(), Thread()))
+    monkeypatch.setattr(tray, "Tray", Tray)
+    monkeypatch.setattr(desktop, "run_window", lambda shell, background: seen.append((shell, app.desktop_update)))
+    assert desktop.main([]) == 0
+    ((shell, hook),) = seen
+    assert hook == (shell.install_update if frozen else None)

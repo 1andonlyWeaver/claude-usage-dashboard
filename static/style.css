@@ -201,6 +201,8 @@ body {
 }
 .update-banner .auth-banner-icon { color: #7BC87B; }
 #updateStatus a { color: var(--claude-orange); }
+.auth-banner-actions [hidden], .update-actions [hidden] { display: none; }
+.update-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .btn-refresh:disabled,
 .btn-refresh[aria-disabled="true"] { opacity: 0.6; cursor: default; }
 .btn-refresh:focus-visible { outline: 2px solid var(--claude-orange); outline-offset: 2px; }

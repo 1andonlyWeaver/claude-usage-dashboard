@@ -83,3 +83,75 @@ def test_the_page_carries_the_update_notice_and_its_settings(client):
                    "saveSetting('update_check', this)", 'id="updateStatus"',
                    'onclick="checkForUpdates()"'):
         assert marker in page, marker
+
+
+def signed_release(path):
+    path.write_text(json.dumps({"checked_at": 1.0, "latest": "2.1.0", "error": None,
+                                "installer_size": 1000, "signed": True}), encoding="utf-8")
+
+
+@pytest.fixture
+def signing_key(monkeypatch):
+    monkeypatch.setattr(updates, "SIGNING_KEY", "a key")  # installable() only asks whether one is set
+
+
+def test_only_the_installed_desktop_app_can_install(client, isolated_updates, signing_key, monkeypatch):
+    signed_release(isolated_updates)
+    body = client.get("/api/update").json()
+    assert body["installable"] and not body["can_install"]  # app.py on its own, or from source
+    monkeypatch.setattr(app, "desktop_update", lambda installer: None)
+    assert client.get("/api/update").json()["can_install"]
+
+
+def test_install_starts_the_download_and_hands_over_to_the_desktop_app(client, isolated_updates,
+                                                                       signing_key, monkeypatch):
+    signed_release(isolated_updates)
+    hook = object()
+    started = []
+    monkeypatch.setattr(app, "desktop_update", hook)
+
+    def fake_install(hand_over):
+        started.append(hand_over)
+        return {**updates.status(), "install": {"state": "downloading", "version": "2.1.0", "error": None}}
+
+    monkeypatch.setattr(updates, "install", fake_install)
+    body = client.post("/api/update/install").json()
+    assert started == [hook]
+    assert body["install"]["state"] == "downloading" and body["can_install"]
+
+
+def test_install_without_a_desktop_app_is_a_conflict(client, isolated_updates, signing_key):
+    signed_release(isolated_updates)
+    r = client.post("/api/update/install")
+    assert r.status_code == 409 and "installed desktop app" in r.json()["detail"]
+
+
+def test_install_with_nothing_to_install_is_a_conflict(client, isolated_updates, monkeypatch):
+    signed_release(isolated_updates)  # but no SIGNING_KEY here
+    monkeypatch.setattr(app, "desktop_update", lambda installer: pytest.fail("handed over"))
+    r = client.post("/api/update/install")
+    assert r.status_code == 409 and "can't be installed" in r.json()["detail"]
+
+
+def test_install_from_another_site_is_refused(client, monkeypatch):
+    monkeypatch.setattr(app, "desktop_update", lambda installer: pytest.fail("handed over"))
+    r = client.post("/api/update/install", headers={"Origin": "https://example.com"})
+    assert r.status_code == 403
+
+
+def test_the_tick_clears_old_downloads_unless_an_install_is_under_way(timers, monkeypatch):
+    cleared = []
+    monkeypatch.setattr(app.updates, "due", lambda: False)
+    monkeypatch.setattr(app.updates, "clear_downloads", lambda: cleared.append(True))
+    app._update_tick()
+    assert cleared == [True]
+    monkeypatch.setattr(updates, "_install", {"state": "downloading", "version": "2.1.0", "error": None})
+    app._update_tick()
+    assert cleared == [True]
+
+
+def test_the_page_carries_the_install_buttons(client):
+    page = client.get("/").text
+    for marker in ('id="updateInstall"', 'id="btnInstallUpdate"', 'onclick="installUpdate()"',
+                   'id="updateDetail"', 'id="updateDismiss"'):
+        assert marker in page, marker

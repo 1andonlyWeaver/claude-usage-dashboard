@@ -113,6 +113,10 @@ _hours_lock = threading.Lock()
 
 # desktop.py sets this to its window's show(); it stays None when app.py runs on its own.
 desktop_show = None
+# The installed desktop app sets this to Shell.install_update(installer), which starts the
+# downloaded Setup and quits. None from source and when app.py runs on its own: no installer
+# to run over.
+desktop_update = None
 
 # Seed in-memory cache from disk on startup so restarts don't lose last known quota
 try:
@@ -545,6 +549,8 @@ def _hours_tick():
 def _update_tick():
     """Run the daily update check if it's due, then reschedule (like _hours_tick, from an outer finally)."""
     try:
+        if updates.install_idle():
+            updates.clear_downloads()  # the Setup that installed this copy is done by now
         if updates.due():
             updates.check()
     except Exception as ex:
@@ -689,16 +695,36 @@ def app_show():
     return {"shown": True}
 
 
+def _update_status(status: dict) -> dict:
+    """updates.status(), plus whether this copy can install the release itself."""
+    return {**status, "can_install": status["installable"] and desktop_update is not None}
+
+
 @app.get("/api/update")
 def get_update():
     """What the last update check found. _update_tick does the asking, at most daily."""
-    return updates.status()
+    return _update_status(updates.status())
 
 
 @app.post("/api/update/check")
 def check_update():
     """Ask GitHub now: Check now in Settings, and Check for updates in the tray."""
-    return updates.check()
+    return _update_status(updates.check())
+
+
+@app.post("/api/update/install")
+def install_update():
+    """Download the latest release, check its signature, then start its Setup and quit.
+
+    Answers at once; `install.state` in /api/update follows the download. 409 when this copy
+    can't install it (run from source, no window attached, no signed installer on the release).
+    """
+    if desktop_update is None:
+        raise HTTPException(409, "Only the installed desktop app can install updates")
+    try:
+        return _update_status(updates.install(desktop_update))
+    except updates.UpdateError:
+        raise HTTPException(409, "The latest release can't be installed from here") from None
 
 
 @app.get("/api/ingest-status")

@@ -90,7 +90,14 @@ def isolated_updates(tmp_path, monkeypatch):
     """No test may ask GitHub, and each keeps its update-check state in its own file."""
     def forbidden(*args, **kwargs):
         pytest.fail("a test tried to reach GitHub")
+    def no_setup(*args, **kwargs):
+        pytest.fail("a test tried to start Setup")
     path = tmp_path / "update.json"
     monkeypatch.setattr(updates, "_urlopen", forbidden)
+    monkeypatch.setattr(updates, "_popen", no_setup)
     monkeypatch.setattr(updates, "STATE_FILE", path)
+    monkeypatch.setattr(updates, "DOWNLOAD_DIR", tmp_path / "updates")
+    monkeypatch.setattr(updates, "SETUP_LOG", tmp_path / "logs" / "update-setup.log")
+    monkeypatch.setattr(updates, "_install", {"state": "idle", "version": None, "error": None})
+    monkeypatch.setattr(updates, "_install_thread", None)
     return path

@@ -92,3 +92,35 @@ def test_the_installer_packs_the_build_the_spec_makes():
     assert setup_value("OutputBaseFilename") == "ClaudeUsageDashboard-Setup-{#AppVersion}"
     assert setup_value("SetupIconFile") == r"..\build\assets\icon.ico"
     assert setup_value("AppId") == "{{2E7A6516-90C1-4991-8014-641D5A440BAF}"
+
+
+def test_install_update_and_setup_agree_on_the_switches(monkeypatch, tmp_path):
+    import updates
+
+    started = []
+    monkeypatch.setattr(updates, "_popen", lambda args, **kw: started.append(args))
+    updates.launch(tmp_path / "Setup.exe", "window")
+    switches = dict(arg.split("=", 1) for arg in started[0][1:] if "=" in arg)
+    code = ISS.split("[Code]", 1)[1]
+    for name in switches.keys() - {"/LOG"}:  # /LOG is Inno Setup's own
+        assert "{param:" + name[1:] + "|" in code, name
+    assert switches["/UPDATE"] == "window"
+    assert "if Mode = 'background' then" in code and "RelaunchArgs := '--background'" in code
+    assert {"/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"} <= set(started[0])
+
+
+def test_an_update_waits_for_the_app_ends_it_if_it_hangs_and_starts_it_again():
+    code = ISS.split("[Code]", 1)[1]
+    init = code.split("function InitializeSetup: Boolean;", 1)[1].split("procedure DeinitializeSetup", 1)[0]
+    # AppMutex is checked after InitializeSetup, so waiting here keeps a silent Setup from giving up
+    assert "WaitForApp(StrToIntDef(ExpandConstant('{param:PID|0}'), 0));" in init
+    assert "'InstallLocation'" in init and "+ '{#AppExe}'" in init
+    wait = code.split("procedure WaitForApp(Pid: Integer);", 1)[1].split("function InitializeSetup", 1)[0]
+    assert "WaitForSingleObject(Process, QuitWaitMs) = WAIT_TIMEOUT" in wait
+    assert "TerminateProcess(Process, 1);" in wait and "CloseHandle(Process);" in wait
+    assert "QuitWaitMs = 30000;" in code
+    relaunch = code.split("procedure DeinitializeSetup;", 1)[1].split("procedure CurStepChanged", 1)[0]
+    assert "Exec(RelaunchExe, RelaunchArgs, '', SW_SHOWNORMAL, ewNoWait, ResultCode)" in relaunch
+    # The wizard's own "Launch" box stays for interactive installs only
+    run = next(l for l in ISS.splitlines() if l.startswith('Filename: "{app}\\{#AppExe}"'))
+    assert "skipifsilent" in run

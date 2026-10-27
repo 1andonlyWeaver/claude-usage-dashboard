@@ -129,7 +129,7 @@ def test_an_unreachable_or_garbled_server_changes_nothing(monkeypatch):
 def test_menu_items_and_their_actions(monkeypatch):
     t = make_tray(monkeypatch, [])
     menu = t.menu()
-    assert [item.text for item in menu.items] == [
+    assert [item.text for item in menu.items if item.visible] == [
         "Open dashboard", "Open in browser", "Start at login", "Check for updates",
         pystray.Menu.SEPARATOR.text, "Quit"]
     assert menu.items[0].default
@@ -236,3 +236,164 @@ def test_check_for_updates_runs_off_the_menu_thread(monkeypatch):
     monkeypatch.setattr(tray.threading, "Thread", FakeThread)
     {item.text: item for item in t.menu().items}["Check for updates"](t.icon)
     assert started == [(t._report_update_check, True), "started"]
+
+
+UPDATE = {"current": "2.0.0", "latest": "2.1.0", "available": True, "notify": True, "url": RELEASE,
+          "error": None, "installable": True, "can_install": True,
+          "install": {"state": "idle", "version": None, "error": None}}
+NO_UPDATE = {**UPDATE, "latest": "2.0.0", "available": False, "notify": False, "url": None,
+             "installable": False, "can_install": False}
+
+
+def test_a_new_version_gets_one_note_the_badge_and_a_menu_item(monkeypatch):
+    t = make_tray(monkeypatch, [])
+    t.observe_update(NO_UPDATE)
+    assert t.icon.notes == [] and t.icon.title == tray.TITLE
+    menu = t.menu()
+    assert [item.text for item in menu.items if item.visible][-3:-2] == ["Check for updates"]
+    t.observe_update(UPDATE)
+    t.observe_update(UPDATE)
+    assert t.icon.notes == [("Version 2.1.0 is available. Choose Install update in this icon's menu.", tray.TITLE)]
+    assert tray.BADGE in t.icon.icon.get_flattened_data()
+    assert t.icon.title == "Claude Usage Dashboard: version 2.1.0 is available"
+    visible = [item.text for item in t.menu().items if item.visible]
+    assert visible[4] == "Install update 2.1.0"
+    assert t.icon.menu_updates == 2  # once for 2.0.0, once for 2.1.0
+
+
+def test_a_copy_that_cannot_install_points_to_the_dashboard(monkeypatch):
+    t = make_tray(monkeypatch, [])
+    t.observe_update({**UPDATE, "can_install": False})
+    assert t.icon.notes == [("Version 2.1.0 is available. Open the dashboard to download it.", tray.TITLE)]
+    assert "Install update 2.1.0" not in [item.text for item in t.menu().items if item.visible]
+
+
+def test_a_dismissed_version_gets_no_note_and_no_badge(monkeypatch):
+    t = make_tray(monkeypatch, [])
+    t.observe_update({**UPDATE, "notify": False})
+    assert t.icon.notes == [] and t.icon.title == tray.TITLE
+    assert "Install update 2.1.0" in [item.text for item in t.menu().items if item.visible]
+
+
+def test_the_sign_in_comes_first_in_the_tooltip(monkeypatch):
+    t = make_tray(monkeypatch, [SIGNED_OUT, CONNECTED])
+    t.observe_update(UPDATE)
+    t.poll_once()
+    assert t.icon.title == "Claude Usage Dashboard: Not signed in to Claude Code."
+    t.poll_once()
+    assert t.icon.title == "Claude Usage Dashboard: version 2.1.0 is available"
+    assert tray.BADGE in t.icon.icon.get_flattened_data()
+
+
+def test_poll_update_reads_the_last_check(monkeypatch):
+    def fake_call(port, path, method="GET", timeout=5.0):
+        assert (port, path, method) == (8765, "/api/update", "GET")
+        return json.dumps(UPDATE).encode()
+
+    monkeypatch.setattr(tray.instance, "call", fake_call)
+    t = tray.Tray(FakeShell(), URL, 8765, icon=FakeIcon())
+    t.poll_update()
+    assert t.update == UPDATE and len(t.icon.notes) == 1
+
+
+@pytest.mark.parametrize("answer", [OSError("refused"), b"<html>", b"[]"])
+def test_poll_update_ignores_a_bad_answer(monkeypatch, answer):
+    def fake_call(port, path, method="GET", timeout=5.0):
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(tray.instance, "call", fake_call)
+    t = tray.Tray(FakeShell(), URL, 8765, icon=FakeIcon())
+    t.poll_update()
+    assert t.update == {} and t.icon.notes == []
+
+
+def test_check_for_updates_points_to_the_menu_when_it_can_install(monkeypatch):
+    t, opened = updating_tray(monkeypatch, UPDATE)
+    t._report_update_check()
+    assert t.icon.notes == [("Version 2.1.0 is available. Choose Install update in this icon's menu.", tray.TITLE)]
+    assert opened == []
+    assert "Install update 2.1.0" in [item.text for item in t.menu().items if item.visible]
+
+
+def install_tray(monkeypatch, answers):
+    """A tray whose install POST and the /api/update polls after it answer in turn from `answers`."""
+    answers = iter(answers)
+    paths = []
+
+    def fake_call(port, path, method="GET", timeout=5.0):
+        paths.append((path, method))
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer if isinstance(answer, bytes) else json.dumps(answer).encode()
+
+    monkeypatch.setattr(tray.instance, "call", fake_call)
+    monkeypatch.setattr(tray, "INSTALL_POLL_SECONDS", 0)
+    t = tray.Tray(FakeShell(), URL, 8765, icon=FakeIcon())
+    t.update = UPDATE
+    return t, paths
+
+
+def downloading(state="downloading", error=None):
+    return {**UPDATE, "install": {"state": state, "version": "2.1.0", "error": error}}
+
+
+def test_install_from_the_menu_follows_the_download_until_the_app_quits(monkeypatch):
+    t, paths = install_tray(monkeypatch, [downloading(), downloading(), downloading("starting"),
+                                          ConnectionRefusedError(10061, "refused")])
+    t._run_install()
+    assert paths == [("/api/update/install", "POST")] + [("/api/update", "GET")] * 3
+    assert t.icon.notes == [("Downloading version 2.1.0. The dashboard restarts once it's installed.", tray.TITLE)]
+
+
+@pytest.mark.parametrize("error, note", [
+    ("bad-signature", "The update wasn't installed: its signature didn't check out."),
+    ("download-failed", "Couldn't download the update. Try again later."),
+    ("launch-failed", "Windows wouldn't start the update's installer."),
+    ("something-new", "The update wasn't installed."),
+])
+def test_a_failed_install_from_the_menu_says_why(monkeypatch, error, note):
+    t, _ = install_tray(monkeypatch, [downloading(), downloading("failed", error)])
+    t._run_install()
+    assert t.icon.notes[-1] == (note, tray.TITLE)
+
+
+@pytest.mark.parametrize("answer", [OSError("HTTP 409 Conflict"), b"[]"])
+def test_an_install_the_server_refuses_points_to_the_download(monkeypatch, answer):
+    t, paths = install_tray(monkeypatch, [answer])
+    t._run_install()
+    assert paths == [("/api/update/install", "POST")]
+    assert t.icon.notes == [("Couldn't start the update. Open the dashboard to download it instead.", tray.TITLE)]
+
+
+def test_install_from_the_menu_gives_up_following_after_a_while(monkeypatch):
+    t, paths = install_tray(monkeypatch, [downloading()] * 3)
+    ticks = iter([0, 0, tray.INSTALL_GIVE_UP_SECONDS + 1])
+    t._run_install(clock=lambda: next(ticks))
+    assert len(paths) == 2
+
+
+def test_quitting_stops_following_the_install(monkeypatch):
+    t, paths = install_tray(monkeypatch, [downloading()])
+    t.stop()
+    t._run_install()
+    assert paths == [("/api/update/install", "POST")]
+
+
+def test_install_update_runs_off_the_menu_thread(monkeypatch):
+    started = []
+
+    class FakeThread:
+        def __init__(self, target=None, name=None, daemon=None):
+            started.append((target, daemon))
+
+        def start(self):
+            started.append("started")
+
+    t = make_tray(monkeypatch, [])
+    t.update = UPDATE
+    monkeypatch.setattr(tray.threading, "Thread", FakeThread)
+    {item.text: item for item in t.menu().items}["Install update 2.1.0"](t.icon)
+    assert started == [(t._run_install, True), "started"]

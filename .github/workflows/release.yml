@@ -4,6 +4,9 @@
 #   draft GitHub release with the installer attached. Try it, then publish the draft by hand:
 #   installed copies don't see a release until it's published.
 # - A pull request that touches the build runs everything except the tag check and the release.
+# - Installed copies install a release themselves only once its .sig is on it: sign the draft's
+#   installer on the maintainer's PC (packaging/sign.py) before publishing. The workflow never
+#   holds the signing key.
 name: Build and release
 
 on:
@@ -16,6 +19,7 @@ on:
       - 'packaging/**'
       - 'requirements.txt'
       - 'desktop.py'
+      - 'updates.py'
 
 permissions:
   contents: write
@@ -46,6 +50,11 @@ jobs:
         run: |
           if ($env:TAG -ne $env:VERSION) {
             Write-Error "Tag $env:TAG doesn't match version.py ($env:VERSION). Fix one, then tag again."
+            exit 1
+          }
+          $key = python -c "import updates; print(updates.SIGNING_KEY)"
+          if (-not $key) {
+            Write-Error "updates.SIGNING_KEY is empty, so this release couldn't update itself later. Run python packaging/sign.py new-key, commit, then tag again."
             exit 1
           }
 
@@ -105,6 +114,30 @@ jobs:
           Set-ItemProperty $runKey -Name ClaudeUsageDashboard -Value "`"$exe`" --background"  # back on, so the uninstall check below means something
           $p = Start-Process $exe -ArgumentList '--smoke' -Wait -PassThru
           if ($p.ExitCode -ne 0) { Write-Error "The installed app's --smoke exited with $($p.ExitCode)"; exit 1 }
+          # Install update: the app starts Setup with /UPDATE and its pid, then quits. Here it
+          # doesn't quit, so Setup must wait, end it after 30 s, upgrade, and start it again in the tray
+          $runtime = Join-Path $env:LOCALAPPDATA 'ClaudeUsageDashboard\data\runtime.json'
+          $setupLog = Join-Path $env:RUNNER_TEMP 'update-setup.log'
+          Start-Process $exe -ArgumentList '--background'
+          for ($i = 0; $i -lt 60 -and -not (Test-Path $runtime); $i++) { Start-Sleep -Seconds 1 }
+          if (-not (Test-Path $runtime)) { Write-Error "The app didn't start in the tray"; exit 1 }
+          $old = (Get-Content $runtime -Raw | ConvertFrom-Json).pid
+          $p = Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/UPDATE=background', "/PID=$old", "/LOG=$setupLog" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content $setupLog -Tail 40; Write-Error "The update exited with $($p.ExitCode)"; exit 1 }
+          if (Get-Process -Id $old -ErrorAction SilentlyContinue) { Write-Error 'The update left the old app running'; exit 1 }
+          $new = $null
+          for ($i = 0; $i -lt 60 -and -not $new; $i++) {
+            Start-Sleep -Seconds 1
+            if (Test-Path $runtime) {
+              $new = (Get-Content $runtime -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json).pid
+              if ($new -eq $old) { $new = $null }
+            }
+          }
+          if (-not $new) { Get-Content $setupLog -Tail 40; Write-Error "The update didn't start the app again"; exit 1 }
+          $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId = $new").CommandLine
+          if ($cmd -notlike '*--background*') { Write-Error "The update started the app as [$cmd]"; exit 1 }
+          Stop-Process -Id $new -Force
+          for ($i = 0; $i -lt 10 -and (Get-Process -Id $new -ErrorAction SilentlyContinue); $i++) { Start-Sleep -Seconds 1 }
           Start-Process (Join-Path $app 'unins000.exe') -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait
           for ($i = 0; $i -lt 30 -and (Test-Path $exe); $i++) { Start-Sleep -Seconds 1 }
           if (Test-Path $exe) { Write-Error 'The uninstaller left the app behind'; exit 1 }

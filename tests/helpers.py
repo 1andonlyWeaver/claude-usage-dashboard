@@ -135,11 +135,11 @@ class FakeResponse:
     """What urllib.request.urlopen returns: a JSON body, or raw bytes."""
 
     def __init__(self, payload=None, raw: bytes | None = None):
-        self._body = raw if raw is not None else json.dumps(payload).encode("utf-8")
+        self._body = io.BytesIO(raw if raw is not None else json.dumps(payload).encode("utf-8"))
         self.headers = {}
 
-    def read(self):
-        return self._body
+    def read(self, size=-1):
+        return self._body.read(size)
 
     def __enter__(self):
         return self

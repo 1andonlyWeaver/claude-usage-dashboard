@@ -10,6 +10,12 @@
 ;   With any other text the tray's Start at login checkbox would read off.
 ;   Start at login is offered on a first install only; upgrades leave it as the tray left it.
 ; - AppId must never change: it's how Setup finds an earlier install to upgrade.
+;
+; Install update in the app (updates.launch) runs this Setup as
+;     Setup.exe /SILENT /SUPPRESSMSGBOXES /NORESTART /UPDATE=window|background /PID=<app's pid> /LOG=...
+; and quits. Setup waits for that pid to exit (else AppMutex would stop a silent Setup), ending
+; it if it takes over 30 s, and starts the app again when it's done: the new version, or the
+; old one if the install failed. /UPDATE=window opens its window, background only the tray.
 
 #ifndef AppVersion
   #error Pass the release number: ISCC /DAppVersion=2.0.0 packaging\installer.iss
@@ -70,16 +76,78 @@ const
   RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
   ApprovedKey = 'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run';
   RunValue = 'ClaudeUsageDashboard';
+  SYNCHRONIZE = $00100000;
+  PROCESS_TERMINATE = $0001;
+  WAIT_TIMEOUT = $00000102;
+  QuitWaitMs = 30000;  { the app's own Quit takes up to about 17 s: server, tray, threads }
 
 var
   Upgrading: Boolean;
+  RelaunchExe: String;   { set when the app started this Setup to update itself }
+  RelaunchArgs: String;
 
-{ An earlier install of this AppId is still registered: read once, before Setup writes its own entry }
-function InitializeSetup: Boolean;
+function OpenProcess(DesiredAccess: DWORD; InheritHandle: BOOL; ProcessId: DWORD): THandle;
+  external 'OpenProcess@kernel32.dll stdcall';
+function WaitForSingleObject(Handle: THandle; Milliseconds: DWORD): DWORD;
+  external 'WaitForSingleObject@kernel32.dll stdcall';
+function TerminateProcess(Handle: THandle; ExitCode: Cardinal): BOOL;
+  external 'TerminateProcess@kernel32.dll stdcall';
+function CloseHandle(Handle: THandle): BOOL;
+  external 'CloseHandle@kernel32.dll stdcall';
+
+{ Wait for the app that started this Setup to quit, and end it if it hangs }
+procedure WaitForApp(Pid: Integer);
+var
+  Process: THandle;
 begin
-  Upgrading := RegKeyExists(HKEY_CURRENT_USER,
-    ExpandConstant('Software\Microsoft\Windows\CurrentVersion\Uninstall\{#SetupSetting("AppId")}_is1'));
+  if Pid <= 0 then
+    Exit;
+  Process := OpenProcess(SYNCHRONIZE or PROCESS_TERMINATE, False, Pid);
+  if Process = 0 then
+    Exit;  { already gone }
+  try
+    if WaitForSingleObject(Process, QuitWaitMs) = WAIT_TIMEOUT then
+    begin
+      Log('The app didn''t quit within 30 s; ending it');
+      TerminateProcess(Process, 1);
+      WaitForSingleObject(Process, 5000);
+    end;
+  finally
+    CloseHandle(Process);
+  end;
+end;
+
+{ An earlier install of this AppId is still registered: read once, before Setup writes its own entry.
+  Started by Install update: note where the app is, to start it again, and wait for it to quit. }
+function InitializeSetup: Boolean;
+var
+  UninstallKey, Mode, Location: String;
+begin
+  UninstallKey := ExpandConstant('Software\Microsoft\Windows\CurrentVersion\Uninstall\{#SetupSetting("AppId")}_is1');
+  Upgrading := RegKeyExists(HKEY_CURRENT_USER, UninstallKey);
+  Mode := ExpandConstant('{param:UPDATE|}');
+  if Mode <> '' then
+  begin
+    if not RegQueryStringValue(HKEY_CURRENT_USER, UninstallKey, 'InstallLocation', Location) then
+      Location := ExpandConstant('{localappdata}\Programs\{#AppName}');
+    RelaunchExe := AddBackslash(Location) + '{#AppExe}';
+    if Mode = 'background' then
+      RelaunchArgs := '--background'
+    else
+      RelaunchArgs := '';
+    WaitForApp(StrToIntDef(ExpandConstant('{param:PID|0}'), 0));
+  end;
   Result := True;
+end;
+
+{ After Install update, start the app again: the new version, or the old one if Setup failed }
+procedure DeinitializeSetup;
+var
+  ResultCode: Integer;
+begin
+  if (RelaunchExe <> '') and FileExists(RelaunchExe) then
+    if not Exec(RelaunchExe, RelaunchArgs, '', SW_SHOWNORMAL, ewNoWait, ResultCode) then
+      Log('Couldn''t start ' + RelaunchExe + ': ' + SysErrorMessage(ResultCode));
 end;
 
 { Start at login is offered on a first install only. An upgrade leaves it as the tray left it. }

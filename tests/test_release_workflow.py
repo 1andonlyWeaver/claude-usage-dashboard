@@ -58,3 +58,22 @@ def test_it_builds_with_the_files_in_packaging():
                    r"packaging\installer.iss", r"dist\ClaudeUsageDashboard\ClaudeUsageDashboard.exe",
                    "ClaudeUsageDashboard-Setup-", "--smoke", "/TASKS=startatlogin"):
         assert needle in WORKFLOW, needle
+
+
+def test_a_release_needs_the_update_signing_key_set():
+    check = step("Check the tag matches version.py")
+    assert "import updates; print(updates.SIGNING_KEY)" in check
+    assert "packaging/sign.py new-key" in check
+
+
+def test_a_change_to_the_updater_runs_the_build():
+    assert "      - 'updates.py'\n" in WORKFLOW
+
+
+def test_the_install_round_trip_runs_an_update_the_way_the_app_starts_one():
+    round_trip = step("Install, smoke-test and uninstall")
+    assert "'/UPDATE=background', \"/PID=$old\"" in round_trip
+    assert "The update left the old app running" in round_trip
+    assert "The update didn't start the app again" in round_trip
+    assert "-notlike '*--background*'" in round_trip
+    assert round_trip.index("--smoke") < round_trip.index("/UPDATE=background") < round_trip.index("unins000.exe")

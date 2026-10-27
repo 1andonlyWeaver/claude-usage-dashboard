@@ -1594,8 +1594,21 @@ async function copyDiagnostics() {
 
 // ─── Updates ─────────────────────────────────────────────────
 // The server asks GitHub at most once a day (updates.py); the page only shows the answer.
+// The installed desktop app can also install it (can_install): the server downloads Setup,
+// checks its signature, starts it and quits, and Setup starts the new version.
 const UPDATE_POLL_MS = 30 * 60 * 1000;
+const INSTALL_POLL_MS = 1500;  // while a download is under way
+const INSTALL_ERRORS = {
+  'download-failed': "Couldn't download the update. Try again later, or download it yourself.",
+  'bad-signature': "The update wasn't installed: its signature didn't check out. Download it yourself only if you trust where it came from.",
+  'launch-failed': "Windows wouldn't start the update's installer. Try again, or download it yourself.",
+};
 let updateInfo = null;
+let installPoll = null;
+
+function installBusy(u) {
+  return !!u.install && ['downloading', 'starting'].includes(u.install.state);
+}
 
 async function loadUpdate() {
   try {
@@ -1606,30 +1619,75 @@ async function loadUpdate() {
 function renderUpdate(u) {
   updateInfo = u;
   const banner = document.getElementById('updateBanner');
-  if (u.notify) {
-    document.getElementById('updateTitle').textContent = `Version ${u.latest} is available. You have ${u.current}.`;
-    document.getElementById('updateLink').href = u.url;
+  const busy = installBusy(u);
+  const failed = u.available && u.install && u.install.state === 'failed';
+  const shown = u.notify || busy || failed;
+  if (shown) {
+    const v = (busy || failed) && u.install.version ? u.install.version : u.latest;
+    let title = `Version ${v} is available. You have ${u.current}.`;
+    let detail = u.can_install
+      ? 'Install it here: the dashboard closes, updates and opens again. Your data and settings stay.'
+      : 'Download the installer and run it over this one. Your data and settings stay.';
+    if (busy && u.install.state === 'downloading') {
+      title = `Downloading version ${v}…`;
+      detail = 'The dashboard closes and opens again once the new version is installed.';
+    } else if (busy) {
+      title = `Installing version ${v}…`;
+      detail = 'The dashboard closes now and opens again when the installer is done.';
+    } else if (failed) {
+      detail = INSTALL_ERRORS[u.install.error] || "The update wasn't installed.";
+    }
+    document.getElementById('updateTitle').textContent = title;
+    document.getElementById('updateDetail').textContent = detail;
+    document.getElementById('updateLink').href = u.url || '#';
   } else if (banner.contains(document.activeElement)) {
     document.getElementById('lastUpdated').focus();
   }
-  banner.hidden = !u.notify;
+  // Install where the app can, else the download page; neither while the install is under way
+  const install = document.getElementById('updateInstall');
+  const link = document.getElementById('updateLink');
+  const dismiss = document.getElementById('updateDismiss');
+  if (banner.contains(document.activeElement) && busy) document.getElementById('lastUpdated').focus();
+  install.hidden = !u.can_install || busy;
+  link.hidden = (u.can_install && !failed) || busy || !u.url;
+  dismiss.hidden = busy;
+  document.getElementById('btnInstallUpdate').hidden = !u.can_install || busy;
+  banner.hidden = !shown;
   const live = document.getElementById('updateLive');
-  const said = u.notify ? document.getElementById('updateTitle').textContent : '';
+  const said = shown ? document.getElementById('updateTitle').textContent : '';
   if (live.textContent !== said) live.textContent = said;
+  if (busy && !installPoll) installPoll = setInterval(loadUpdate, INSTALL_POLL_MS);
+  if (!busy && installPoll) { clearInterval(installPoll); installPoll = null; }
   showUpdateStatus(u);
+}
+
+async function installUpdate() {
+  if (updateInfo && installBusy(updateInfo)) return;
+  try {
+    renderUpdate(await apiFetch('/api/update/install', { method: 'POST' }));
+  } catch (e) {
+    // 409: the release changed, or this copy can't install; show what the server says now
+    await loadUpdate();
+    const banner = document.getElementById('updateBanner');
+    banner.hidden = false;
+    document.getElementById('updateDetail').textContent = "Couldn't start the update. Download it instead.";
+    document.getElementById('updateLink').hidden = !(updateInfo && updateInfo.url);
+  }
 }
 
 // The line under Check now. It's a status region, so rewrite it only when the answer changed.
 function showUpdateStatus(u) {
   const el = document.getElementById('updateStatus');
-  const key = JSON.stringify([u.available, u.latest, u.error, u.checked_at, u.current]);
+  const key = JSON.stringify([u.available, u.latest, u.error, u.checked_at, u.current, u.can_install]);
   if (el.dataset.key === key) return;
   el.dataset.key = key;
   const when = u.checked_at
     ? new Date(u.checked_at * 1000).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
     : '';
   el.textContent = '';
-  if (u.available) {
+  if (u.available && u.can_install) {
+    el.textContent = `Version ${u.latest} is available. You have ${u.current}.`;
+  } else if (u.available) {
     el.append(`Version ${u.latest} is available. `);
     const link = document.createElement('a');
     link.href = u.url;

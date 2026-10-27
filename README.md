@@ -10,7 +10,7 @@ It reads Claude Code's session logs in `%USERPROFILE%\.claude\projects`, the sam
 
 It also reads your Claude Code sign-in from `%USERPROFILE%\.claude\.credentials.json`. The access token goes to `api.anthropic.com` to read your quota percentages. The refresh token goes to `claude.ai`, and only when the dashboard renews your sign-in: when you click **Renew now**, or by itself if you turn on automatic renewal. A renewal is the only thing that changes that file.
 
-Once a day it asks GitHub for the number of the latest release, so it can tell you about new versions. You can turn that off in Settings.
+Once a day it asks GitHub for the number of the latest release, so it can tell you about new versions. You can turn that off in Settings. When you choose to install one, it downloads that release's installer from GitHub.
 
 Nothing else leaves your PC, and there's no analytics or telemetry. The optional person-hours estimates described below also send Claude an extract of each day's sessions, through your own Claude Code: your prompts and Claude's last replies, both clipped, plus the paths of files it changed and the descriptions of shell commands it ran.
 
@@ -36,7 +36,11 @@ Ctrl+plus and Ctrl+minus zoom the window, and Ctrl+0 puts it back.
 
 ## Updating
 
-When there's a newer release, a notice at the top of the dashboard links to it. Download the new installer and run it over the old one. Your data, your settings and your Start at login choice stay. If the installer says the dashboard is running, choose **Quit** from the tray icon's menu, then click **OK**.
+When there's a newer release, a notice appears at the top of the dashboard, and the tray icon shows a notification and an amber dot. Click **Install and restart** in the notice, or **Install update** in the tray menu. The dashboard downloads the new installer, checks its signature, then closes. The installer shows its progress and opens the dashboard again when it's done: with its window if the window was open, otherwise in the tray. Your data, your settings and your Start at login choice stay.
+
+Every release is signed with a key only the maintainer holds, and the dashboard installs nothing whose signature doesn't check out. If the check fails, the notice says so and nothing is installed.
+
+You can still update by hand: download the new installer from the notice's **Download** link or the releases page, and run it over the old one. If it says the dashboard is running, choose **Quit** from the tray icon's menu, then click **OK**. Version 2.0.4 and earlier can only update this way.
 
 **Check for updates** in the tray menu, or **Check now** in Settings, asks GitHub straight away.
 
@@ -63,7 +67,7 @@ That costs quota from your plan: about 1–2% of a week's quota to catch up on t
 
 ## Where your data lives
 
-Everything the dashboard keeps is in `%LOCALAPPDATA%\ClaudeUsageDashboard`. Its `data` folder holds the database, a quota cache, your settings, the last update check (`update.json`), the port of the running copy (`runtime.json`) and the window's own browser storage (`webview`). Its `logs` folder holds `dashboard.log`.
+Everything the dashboard keeps is in `%LOCALAPPDATA%\ClaudeUsageDashboard`. Its `data` folder holds the database, a quota cache, your settings, the last update check (`update.json`), a downloaded installer until the next start (`updates`), the port of the running copy (`runtime.json`) and the window's own browser storage (`webview`). Its `logs` folder holds `dashboard.log`, and `update-setup.log` from the last update installed from the app.
 
 Think twice before deleting `data\usage.db`. The dashboard rebuilds it from your logs on the next start, but Claude Code deletes logs older than 30 days by default, so anything older is gone for good, person-hours estimates included.
 

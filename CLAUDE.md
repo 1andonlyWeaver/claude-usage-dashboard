@@ -50,7 +50,7 @@ conda activate claude-usage-dashboard && python -m pytest
 ## Architecture
 
 ```
-app.py       FastAPI server — 24 API endpoints, local-only request guard, background ingest and person-hours threads, serves templates/
+app.py       FastAPI server — 25 API endpoints, local-only request guard, background ingest and person-hours threads, serves templates/
 db.py        SQLite query layer — pricing constants, token aggregations, cost calculations, person-hours figures
 ingest.py    ETL pipeline — scans ~/.claude/projects/**/*.jsonl, deduplicates, writes to SQLite
 person_hours.py  Person-hours judge — one-day transcript summaries, `claude -p` (Sonnet) calls, queue, worker gating, CLI
@@ -59,9 +59,10 @@ paths.py     Where bundled files, data and logs live (repo when run from source,
 settings.py  User settings in data/settings.json: judge opt-in, automatic token renewal, the desktop app's preferred_port (8765), the daily update check and the dismissed update notice
 autostart.py  Start at login for the desktop app: the HKCU Run value, and Task Manager's StartupApproved switch for it
 instance.py  One desktop app per Windows session: the Local\ClaudeUsageDashboard mutex, data/runtime.json (port, pid), proxy-free calls to the app's own server
-tray.py      The desktop app's tray icon (pystray): menu (with Check for updates), amber attention dot, one notification when the sign-in needs the person; polls /api/connection every 30 s
-desktop.py   Desktop entry point: pywebview window (centered on the cursor's monitor, shrunk to its work area; close hides to tray; Ctrl+0/plus/minus zoom), uvicorn thread on preferred_port or a free one, tray, second-launch handoff, --background, --smoke
-updates.py   Update check: GitHub's latest release at most once a day (an hour after a failure), kept in data/update.json and compared with version.py
+tray.py      The desktop app's tray icon (pystray): menu (with Check for updates and, when one can be installed, Install update), amber attention dot, one notification when the sign-in needs the person or a new version is out; polls /api/connection and /api/update every 30 s
+desktop.py   Desktop entry point: pywebview window (centered on the cursor's monitor, shrunk to its work area; close hides to tray; Ctrl+0/plus/minus zoom), uvicorn thread on preferred_port or a free one, tray, second-launch handoff, Install update (frozen only: start Setup, quit), --background, --smoke
+updates.py   Update check: GitHub's latest release at most once a day (an hour after a failure), kept in data/update.json and compared with version.py.
+             Install from the app: downloads Setup and its .sig to data/updates/, checks the Ed25519 signature against SIGNING_KEY, starts Setup /UPDATE
 applog.py    The log file: opens logs/dashboard.log as UTF-8, rotates it at 5 MB, makes print() safe on any stdout
 version.py   __version__, a bare release number (2.0.0) shown in Settings and the diagnostics
 requirements.txt  Pinned runtime packages for the release build; environment.yml installs it too
@@ -74,8 +75,9 @@ data/        usage.db — auto-created on first run; not committed
 scripts/     launcher.py (Task Scheduler entry point — port check, spawns server, stays alive so TS tracks it)
              register-task.ps1 (one-time setup), start-dashboard.bat (legacy manual launcher)
 packaging/   ClaudeUsageDashboard.spec (PyInstaller: onedir, windowed), build_assets.py (the exe's icon from tray.icon_image, its version resource from version.py),
-             installer.iss (Inno Setup, per user), requirements-build.txt (PyInstaller pins). Not a Python package: a PyPI library is called `packaging`
-.github/workflows/release.yml  On a bare-number tag: tag check, tests, build, --smoke, installer, silent install/upgrade/--smoke/uninstall, draft release. PRs touching the build run all but the tag check and release
+             installer.iss (Inno Setup, per user; /UPDATE waits for the app, then restarts it), requirements-build.txt (PyInstaller pins),
+             sign.py (the update signing key and each release's .sig; run on the maintainer's PC only). Not a Python package: a PyPI library is called `packaging`
+.github/workflows/release.yml  On a bare-number tag: tag check, tests, build, --smoke, installer, silent install/upgrade/--smoke//UPDATE over a running copy/uninstall, draft release. PRs touching the build run all but the tag check and release
 logs/        dashboard.log — server output under Task Scheduler or pythonw, UTF-8; moved to dashboard.log.1 at startup once past 5 MB; not committed
 ```
 
@@ -110,7 +112,10 @@ logs/        dashboard.log — server output under Task Scheduler or pythonw, UT
 | `data/settings.json` | User settings (auto-created on first change) |
 | `data/runtime.json` | The running desktop app's port and pid, for a second launch; removed at Quit |
 | `data/webview/` | The desktop window's WebView2 profile, so `localStorage` survives restarts |
-| `data/update.json` | The last update check: when, the latest release number, and any error |
+| `data/update.json` | The last update check: when, the latest release number, its Setup's size and whether it has a .sig, and any error |
+| `data/updates/` | The Setup downloaded by Install update; cleared at the first hourly tick after the next start |
+| `logs/update-setup.log` | Inno Setup's log of the last update installed from the app |
+| `~/.claude-usage-dashboard/update-signing-key.pem` | The maintainer's private signing key (password-protected). Never in the repo or GitHub; back it up |
 | `%LOCALAPPDATA%\Programs\Claude Usage Dashboard` | The installed app (Inno Setup, per user). Its data and log are in `%LOCALAPPDATA%\ClaudeUsageDashboard\data` and `\logs` |
 | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\ClaudeUsageDashboard` | Start at login (desktop app, tray menu). Task Manager's switch is under `...\Explorer\StartupApproved\Run` |
 | `claude` CLI (`PATH` or `~/.local/bin/claude.exe`) | Run headless by the person-hours judge |
@@ -190,9 +195,11 @@ Release tags are bare numbers equal to `version.__version__` (annotated, no `v`)
 1. Bump `version.py` on develop. Settings, `/api/app/info`, the exe's version resource and the installer all read it.
 2. Fast-forward main to develop and push it, then tag main: `git tag -a 2.1.0 -m 2.1.0 && git push origin 2.1.0`.
 3. `.github/workflows/release.yml` checks the tag against `version.py`, runs the tests, builds, smoke-tests the exe, and builds the installer. It installs that silently with Start at login (checking the `Run` value), runs Setup again as an upgrade (checking Start at login stays as it was), smoke-tests the installed exe and uninstalls it. Then it creates a **draft** release with `ClaudeUsageDashboard-Setup-<version>.exe`.
-4. Download the installer from the draft, try it, then publish the draft. `releases/latest` skips drafts, so installed copies see the release only once it's published.
+4. Download the installer from the draft and try it. Sign it on this PC and upload the signature: `python packaging/sign.py sign <installer>`, then `gh release upload <version> <installer>.sig`. Then publish the draft. `releases/latest` skips drafts, so installed copies see the release only once it's published. A release without its `.sig` still shows the notice, but only with the Download link.
 
-A tag that doesn't match `version.py` fails before anything is built: delete the tag, fix it, tag again.
+A tag that doesn't match `version.py` fails before anything is built: delete the tag, fix it, tag again. So does an empty `updates.SIGNING_KEY`: a copy built without one could never update itself.
+
+**Update signing.** Installed copies install a release only if its `.sig` verifies against `updates.SIGNING_KEY`, an Ed25519 public key. The private key lives only on the maintainer's PC (`packaging/sign.py new-key` makes it once and writes `SIGNING_KEY`), so the release workflow and a compromised GitHub account can't sign. The signed message is `ClaudeUsageDashboard-Setup <tag> sha256:<hex>`, so an older release's Setup can't pass for a newer one. Losing the key means everyone installs one build by hand with a new key. Download URLs are built from the tag, never taken from GitHub's answer.
 
 ## Person-hours
 
@@ -230,7 +237,7 @@ The cost card's `$ | h` toggle shows estimated person-hours: how long a competen
 
 ## Gotchas
 
-- **Tests never touch `data/usage.db`.** An autouse fixture in `tests/conftest.py` points `db.DB_PATH` and `ingest.DB_PATH` at a per-test temp file. `tests/conftest.py` also redirects `settings.SETTINGS_PATH` and `auth.CREDENTIALS_FILE` to per-test temp files and forbids `subprocess.run` / `subprocess.Popen`. Every test also gets an in-memory `winreg` in `autostart` (`tests/fake_winreg.py`), so none can touch the real registry. `instance.RUNTIME_FILE` points at a per-test file too. `updates._urlopen` fails any test that would reach GitHub, and `updates.STATE_FILE` points at a per-test file.
+- **Tests never touch `data/usage.db`.** An autouse fixture in `tests/conftest.py` points `db.DB_PATH` and `ingest.DB_PATH` at a per-test temp file. `tests/conftest.py` also redirects `settings.SETTINGS_PATH` and `auth.CREDENTIALS_FILE` to per-test temp files and forbids `subprocess.run` / `subprocess.Popen`. Every test also gets an in-memory `winreg` in `autostart` (`tests/fake_winreg.py`), so none can touch the real registry. `instance.RUNTIME_FILE` points at a per-test file too. `updates._urlopen` fails any test that would reach GitHub, `updates._popen` any that would start Setup, and `updates.STATE_FILE`, `DOWNLOAD_DIR` and `SETUP_LOG` point at per-test paths.
 - **Local-only guard.** Requests whose Host isn't `127.0.0.1`, `localhost` or `[::1]` get 403, and so do state-changing requests whose `Origin` isn't the dashboard's own. curl sends no `Origin`, so `curl -X POST http://127.0.0.1:8080/api/refresh` still works.
 - **Desktop app threads.** pywebview owns the main thread. uvicorn runs in a thread, so it installs no signal handlers. pystray runs its icon in another thread, and its setup callback is the 30-second connection poll. The close button hides the window only when WinForms reports `CloseReason.UserClosing` and Quit wasn't chosen, so Windows sign-out is never held up. pywebview's own CenterScreen comes after the form's handle exists, too late to count, so `_fit_to_screen` places the window in `before_show`, using the form's already DPI-scaled size. Calls to the app's own server go through `instance.call()`, which ignores proxies.
 - **Credentials writes go through `auth.refresh_token()` only**, and it runs only when automatic renewal is on or the user clicks Renew now. Everything else reads the file.
@@ -245,7 +252,7 @@ The cost card's `$ | h` toggle shows estimated person-hours: how long a competen
 
 ## API Endpoints
 
-`/api/quota`, `/api/connection`, `/api/connection/login` (POST), `/api/connection/renew` (POST), `/api/settings` (GET/POST), `/api/ingest-status`, `/api/refresh` (POST), `/api/daily`, `/api/projects`, `/api/models`, `/api/heatmap`, `/api/sessions`, `/api/session/{id}`, `/api/session/{id}/hours`, `/api/rate`, `/api/cost`, `/api/hours`, `/api/sources`, `/api/stats`, `/api/window`, `/api/app/info`, `/api/app/show` (POST), `/api/update`, `/api/update/check` (POST)
+`/api/quota`, `/api/connection`, `/api/connection/login` (POST), `/api/connection/renew` (POST), `/api/settings` (GET/POST), `/api/ingest-status`, `/api/refresh` (POST), `/api/daily`, `/api/projects`, `/api/models`, `/api/heatmap`, `/api/sessions`, `/api/session/{id}`, `/api/session/{id}/hours`, `/api/rate`, `/api/cost`, `/api/hours`, `/api/sources`, `/api/stats`, `/api/window`, `/api/app/info`, `/api/app/show` (POST), `/api/update`, `/api/update/check` (POST), `/api/update/install` (POST)
 
 `/api/hours?days=30` returns person-hours for the cost card's `h` view: interactive hours (judged + provisional), scheduled runs, active hours, leverage, hours by project, the judge model, and the `worker` state. `/api/session/{id}/hours` returns per-day person-hours for the drill-down panel. `/api/sessions` rows carry `person_hours` and `hours_status` (`done` / `provisional` / `partial`; null for Desktop sessions).
 
@@ -253,7 +260,7 @@ The cost card's `$ | h` toggle shows estimated person-hours: how long a competen
 
 `/api/app/info` names the program on the port (`name`, `version`, `desktop`, `pid`, `data_dir`, `log_dir`). `/api/app/show` brings the desktop window forward; a second launch of the desktop app calls it. It answers 409 when `app.py` runs on its own, with no window attached.
 
-`/api/update` returns the last update check: `current`, `latest`, `available`, `notify` (available, checks on, and not the dismissed release), `url` (the release page, built from the tag), `checked_at`, `error` (`http-<code>`, `network-error`, `bad-answer`) and `enabled`. `/api/update/check` asks GitHub at once, even with `update_check` off. `app._update_tick` runs hourly and asks only when `updates.due()`.
+`/api/update` returns the last update check: `current`, `latest`, `available`, `notify` (available, checks on, and not the dismissed release), `url` (the release page, built from the tag), `checked_at`, `error` (`http-<code>`, `network-error`, `bad-answer`), `enabled`, `installable` (newer, with a Setup and a .sig on the release, and a `SIGNING_KEY`), `can_install` (installable, and this is the installed desktop app) and `install` (`state`: `idle` / `downloading` / `starting` / `failed`, `version`, `error`: `download-failed` / `bad-signature` / `launch-failed`). `/api/update/check` asks GitHub at once, even with `update_check` off. `/api/update/install` starts the download and answers at once (409 when this copy can't install); after the check it calls `app.desktop_update`, which `desktop.py` sets only when frozen: it starts Setup with `/UPDATE=window|background /PID=<pid>` and quits. Setup waits up to 30 s for that pid (else ends it), upgrades, and starts the app again, old or new, from `DeinitializeSetup`. `app._update_tick` runs hourly and asks only when `updates.due()`.
 
 `/api/window?type=5h|7d&group_by=none|token_type|project|model` — token buckets within the current quota window (5-min or 60-min buckets).
 

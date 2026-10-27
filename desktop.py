@@ -5,6 +5,8 @@ The desktop app: the dashboard in its own window, and a tray icon that keeps it 
 - the main thread runs the pywebview window (WebView2); closing it hides it to the tray;
 - a thread runs the uvicorn server on 127.0.0.1, on settings' preferred_port when it's free;
 - tray.py's icon polls the connection and offers Open, Start at login, Check for updates and Quit.
+The installed copy can also update itself: Install update downloads the new Setup, checks its
+signature (updates.py), starts it and quits; Setup starts the new version when it's done.
 One copy runs per Windows session; launching another brings the first one's window forward.
 Without WebView2 the dashboard opens in the default browser and the tray works as usual.
 
@@ -51,6 +53,8 @@ class MONITORINFO(ctypes.Structure):
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 _user32.IsIconic.argtypes = (wintypes.HWND,)
 _user32.IsIconic.restype = wintypes.BOOL
+_user32.IsWindowVisible.argtypes = (wintypes.HWND,)
+_user32.IsWindowVisible.restype = wintypes.BOOL
 _user32.ShowWindow.argtypes = (wintypes.HWND, ctypes.c_int)
 _user32.ShowWindow.restype = wintypes.BOOL
 _user32.GetCursorPos.argtypes = (ctypes.POINTER(wintypes.POINT),)
@@ -138,7 +142,8 @@ class Shell:
     browser stands in for it.
     """
 
-    def __init__(self, url: str, server, open_browser=_open_in_browser, restore=_restore_if_minimized):
+    def __init__(self, url: str, server, open_browser=_open_in_browser, restore=_restore_if_minimized,
+                 visible=_user32.IsWindowVisible):
         self.url = url
         self.server = server
         self.window = None
@@ -148,6 +153,7 @@ class Shell:
         self.stopped = threading.Event()
         self._open_browser = open_browser
         self._restore = restore
+        self._visible = visible
 
     def show(self) -> None:
         if self.window is None:
@@ -169,6 +175,23 @@ class Shell:
         self.window = None
         if not background:
             self.show()
+
+    def window_shown(self) -> bool:
+        """Whether the window is open on screen (minimized counts), not hidden in the tray."""
+        return self.window is not None and bool(self.hwnd) and bool(self._visible(self.hwnd))
+
+    def install_update(self, installer) -> None:
+        """Start the downloaded Setup and quit, so it can replace this copy.
+
+        Setup starts the app again when it's done: with its window if the window was open, else
+        in the tray. Without WebView2 that's the tray too, so no second browser tab opens.
+        """
+        import updates
+
+        relaunch = "window" if self.window_shown() else "background"
+        updates.launch(installer, relaunch)  # OSError: Windows wouldn't start it; keep running
+        log(f"started {installer.name}; quitting so it can install")
+        self.quit()
 
     def quit(self) -> None:
         if self.quitting:
@@ -340,9 +363,25 @@ def _window_libraries_load() -> bool:
     return True
 
 
+def _signature_check_loads() -> bool:
+    """Whether updates.verify can run: cryptography and its compiled part made it into the build.
+
+    Without them every install from the app would fail as a bad download.
+    """
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        Ed25519PrivateKey.generate().sign(b"smoke")
+    except Exception as ex:
+        log(f"smoke: the signature check's library didn't load ({type(ex).__name__}: {ex})")
+        return False
+    return True
+
+
 def smoke() -> int:
     """Start the server on a free port, fetch /, /api/connection and a vendored file, stop.
-    0 when all three answer, and, in a frozen build, the window's libraries load."""
+    0 when all three answer, and, in a frozen build, the window's libraries and the update
+    signature check load."""
     sock = bind_socket(0)
     port = sock.getsockname()[1]
     server, thread = start_server(sock)
@@ -357,7 +396,7 @@ def smoke() -> int:
                 or not script):
             log("smoke: unexpected answer")
             return 1
-        if getattr(sys, "frozen", False) and not _window_libraries_load():
+        if getattr(sys, "frozen", False) and not (_window_libraries_load() and _signature_check_loads()):
             return 1
         log(f"smoke: ok on port {port}; connection {status['state']}")
         return 0
@@ -420,6 +459,10 @@ def main(argv=None) -> int:
         log(f"couldn't write runtime.json ({ex}); a second launch won't find this copy")
     log(f"serving {url}")
     shell = Shell(url, server)
+    if getattr(sys, "frozen", False):  # from source there's no installed copy for Setup to replace
+        import app
+
+        app.desktop_update = shell.install_update
     shell.tray = tray.Tray(shell, url, port)
     shell.tray.start()
     try:

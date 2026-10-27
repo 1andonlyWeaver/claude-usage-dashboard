@@ -52,7 +52,7 @@ def test_versions_compare_as_numbers():
 
 def test_fetch_latest_asks_github_for_the_latest_release(monkeypatch):
     calls = github(monkeypatch, FakeResponse({"tag_name": "2.1.0", "name": "2.1.0"}))
-    assert updates.fetch_latest() == "2.1.0"
+    assert updates.fetch_latest() == {"tag": "2.1.0", "installer_size": None, "signed": False}
     (request,) = calls
     assert request.full_url == updates.LATEST_URL == \
         "https://api.github.com/repos/1andonlyWeaver/claude-usage-dashboard/releases/latest"
@@ -73,9 +73,11 @@ def test_a_successful_check_is_saved_and_shown(monkeypatch, isolated_updates):
     github(monkeypatch, FakeResponse({"tag_name": "2.1.0"}))
     status = updates.check(now=NOW)
     assert status == {"current": "2.0.0", "latest": "2.1.0", "available": True, "notify": True,
-                      "url": RELEASE_2_1_0, "checked_at": NOW, "error": None, "enabled": True}
+                      "url": RELEASE_2_1_0, "checked_at": NOW, "error": None, "enabled": True,
+                      "installable": False,
+                      "install": {"state": "idle", "version": None, "error": None}}
     assert json.loads(isolated_updates.read_text(encoding="utf-8")) == \
-        {"checked_at": NOW, "latest": "2.1.0", "error": None}
+        {"checked_at": NOW, "latest": "2.1.0", "error": None, "installer_size": None, "signed": False}
     assert updates.status() == status
 
 

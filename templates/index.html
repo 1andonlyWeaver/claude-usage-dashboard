@@ -73,11 +73,12 @@
       <span class="auth-banner-icon" aria-hidden="true">&#8593;</span>
       <div class="auth-banner-text">
         <strong id="updateTitle"></strong>
-        <span>Download the installer and run it over this one. Your data and settings stay.</span>
+        <span id="updateDetail"></span>
       </div>
       <div class="auth-banner-actions">
+        <button class="btn-refresh" type="button" id="updateInstall" onclick="installUpdate()" hidden>Install and restart</button>
         <a class="btn-refresh" id="updateLink" href="#" target="_blank" rel="noopener">Download</a>
-        <button class="btn-refresh" type="button" onclick="dismissUpdate()">Dismiss</button>
+        <button class="btn-refresh" type="button" id="updateDismiss" onclick="dismissUpdate()">Dismiss</button>
       </div>
     </div>
     <!-- Always in the page, so screen readers hear about a new release (the notice itself comes and goes) -->
@@ -364,7 +365,10 @@
             </span>
           </label>
           <p class="setting-help" id="updateStatus" role="status"></p>
-          <div><button class="btn-refresh" type="button" id="btnCheckUpdate" onclick="checkForUpdates()">Check now</button></div>
+          <div class="update-actions">
+            <button class="btn-refresh" type="button" id="btnCheckUpdate" onclick="checkForUpdates()">Check now</button>
+            <button class="btn-refresh" type="button" id="btnInstallUpdate" onclick="installUpdate()" hidden>Install and restart</button>
+          </div>
         </section>
         <p class="setting-help">Claude Usage Dashboard {{ version }}</p>
       </div>
