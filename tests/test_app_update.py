@@ -131,6 +131,7 @@ def test_install_without_a_desktop_app_is_a_conflict(client, isolated_updates, s
 
 def test_install_with_nothing_to_install_is_a_conflict(client, isolated_updates, monkeypatch):
     signed_release(isolated_updates)  # but no SIGNING_KEY here
+    monkeypatch.setattr(updates, "SIGNING_KEY", "")  # the repo's own key is set since 2.1.0
     monkeypatch.setattr(app, "desktop_update", lambda installer: pytest.fail("handed over"))
     r = client.post("/api/update/install")
     assert r.status_code == 409 and "can't be installed" in r.json()["detail"]
