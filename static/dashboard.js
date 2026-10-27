@@ -398,7 +398,7 @@ function updateForecasts() {
 
     const hoursToFull = pace.pctPerHour > 0 ? pctRemaining / pace.pctPerHour : Infinity;
     if (hoursToFull > hoursToReset) {
-      el.textContent = 'On track — won\'t cap';
+      el.textContent = 'Not on track to exceed limit';
       el.style.color = 'rgba(245,237,228,0.4)';
       return;
     }
