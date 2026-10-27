@@ -77,3 +77,12 @@ def test_the_install_round_trip_runs_an_update_the_way_the_app_starts_one():
     assert "The update didn't start the app again" in round_trip
     assert "-notlike '*--background*'" in round_trip
     assert round_trip.index("--smoke") < round_trip.index("/UPDATE=background") < round_trip.index("unins000.exe")
+
+
+def test_the_update_round_trip_waits_for_setup_alone():
+    """Start-Process -Wait also waits for what Setup starts: the app it restarts, which never
+    exits. The 2.1.0 tag's run hung there until the job's 30-minute limit cancelled it."""
+    update = next(line for line in step("Install, smoke-test and uninstall").splitlines()
+                  if "'/UPDATE=background'" in line)
+    assert "-Wait" not in update and "-PassThru" in update
+    assert "$p.WaitForExit(" in step("Install, smoke-test and uninstall")

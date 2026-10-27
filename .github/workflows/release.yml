@@ -122,7 +122,10 @@ jobs:
           for ($i = 0; $i -lt 60 -and -not (Test-Path $runtime); $i++) { Start-Sleep -Seconds 1 }
           if (-not (Test-Path $runtime)) { Write-Error "The app didn't start in the tray"; exit 1 }
           $old = (Get-Content $runtime -Raw | ConvertFrom-Json).pid
-          $p = Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/UPDATE=background', "/PID=$old", "/LOG=$setupLog" -Wait -PassThru
+          # Not -Wait: that also waits for every process Setup starts, and the app it starts again never exits
+          $p = Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/UPDATE=background', "/PID=$old", "/LOG=$setupLog" -PassThru
+          $null = $p.Handle  # keep a handle, or ExitCode reads empty after WaitForExit
+          if (-not $p.WaitForExit(180000)) { Get-Content $setupLog -Tail 40; Write-Error 'The update took over 3 minutes'; exit 1 }
           if ($p.ExitCode -ne 0) { Get-Content $setupLog -Tail 40; Write-Error "The update exited with $($p.ExitCode)"; exit 1 }
           if (Get-Process -Id $old -ErrorAction SilentlyContinue) { Write-Error 'The update left the old app running'; exit 1 }
           $new = $null
