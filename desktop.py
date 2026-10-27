@@ -43,6 +43,10 @@ TITLE = "Claude Usage Dashboard"
 SW_RESTORE = 9
 SMOKE_FILE = "/static/vendor/chart.umd.js"  # a vendored file: proves a build bundled static/
 MONITOR_DEFAULTTONEAREST = 2
+# Between starting Setup and quitting: longer than the page's 1.5 s install poll (INSTALL_POLL_MS
+# in dashboard.js), so the window says it's installing before it closes. Setup is already
+# waiting for this process, so the install starts only this much later.
+INSTALL_QUIT_DELAY = 2.0
 
 
 class MONITORINFO(ctypes.Structure):
@@ -143,7 +147,7 @@ class Shell:
     """
 
     def __init__(self, url: str, server, open_browser=_open_in_browser, restore=_restore_if_minimized,
-                 visible=_user32.IsWindowVisible):
+                 visible=_user32.IsWindowVisible, pause=time.sleep):
         self.url = url
         self.server = server
         self.window = None
@@ -154,6 +158,7 @@ class Shell:
         self._open_browser = open_browser
         self._restore = restore
         self._visible = visible
+        self._pause = pause
 
     def show(self) -> None:
         if self.window is None:
@@ -185,12 +190,14 @@ class Shell:
 
         Setup starts the app again when it's done: with its window if the window was open, else
         in the tray. Without WebView2 that's the tray too, so no second browser tab opens.
+        Runs on the install's own thread (updates.install), so the pause holds up nothing else.
         """
         import updates
 
         relaunch = "window" if self.window_shown() else "background"
         updates.launch(installer, relaunch)  # OSError: Windows wouldn't start it; keep running
         log(f"started {installer.name}; quitting so it can install")
+        self._pause(INSTALL_QUIT_DELAY)
         self.quit()
 
     def quit(self) -> None:

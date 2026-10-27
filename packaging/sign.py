@@ -55,7 +55,7 @@ def set_signing_key(public: str, path: Path = UPDATES_PY) -> None:
     new, count = _KEY_LINE.subn(f'SIGNING_KEY = "{public}"', text)
     if count != 1:
         raise SystemExit(f"Couldn't find the SIGNING_KEY line in {path}")
-    path.write_text(new, encoding="utf-8")
+    path.write_text(new, encoding="utf-8", newline="\n")  # LF, as .gitattributes keeps it; not Windows' CRLF
 
 
 def new_key(path: Path, password: bytes) -> str:

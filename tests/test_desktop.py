@@ -151,9 +151,18 @@ class FakeTray:
         self.stopped = True
 
 
+def serves_nothing(server, thread):
+    """A start_server stand-in that closes the socket main() bound, as uvicorn does when it stops."""
+    def start(sock):
+        sock.close()
+        return server, thread
+    return start
+
+
 def make_shell():
     opened, restored = [], []
-    shell = desktop.Shell(URL, FakeServer(), open_browser=opened.append, restore=restored.append)
+    shell = desktop.Shell(URL, FakeServer(), open_browser=opened.append, restore=restored.append,
+                          pause=lambda seconds: None)
     return shell, opened, restored
 
 
@@ -305,7 +314,7 @@ def test_startup_survives_a_runtime_file_it_cannot_write_and_quit_cleans_up(monk
     monkeypatch.setattr(desktop.instance, "acquire", lambda: 99)
     monkeypatch.setattr(desktop.instance, "release", lambda handle: calls.append(f"released {handle}"))
     monkeypatch.setattr(desktop.instance, "write_runtime", locked)
-    monkeypatch.setattr(desktop, "start_server", lambda sock: (Server(), Thread()))
+    monkeypatch.setattr(desktop, "start_server", serves_nothing(Server(), Thread()))
     monkeypatch.setattr(tray, "Tray", Tray)  # main imports tray once it holds the mutex
     monkeypatch.setattr(desktop, "run_window", lambda shell, background: calls.append("window ran"))
     assert desktop.main([]) == 0
@@ -466,13 +475,15 @@ def test_the_signature_check_loads_here():
     (None, None, True, "background"),         # no WebView2: no second browser tab
 ])
 def test_install_update_starts_setup_then_quits(monkeypatch, window, hwnd, visible, relaunch):
-    launched = []
-    monkeypatch.setattr(updates, "launch", lambda path, how: launched.append((path, how)))
+    events = []
+    monkeypatch.setattr(updates, "launch", lambda path, how: events.append(("launch", path, how)))
     shell, _, _ = make_shell()
     shell._visible = lambda h: visible
+    shell._pause = lambda seconds: events.append(("pause", seconds, shell.quitting))
     shell.window, shell.hwnd, shell.tray = window, hwnd, FakeTray()
     shell.install_update(Path("Setup.exe"))
-    assert launched == [(Path("Setup.exe"), relaunch)]
+    # Still running through the pause, so the page can say it's installing
+    assert events == [("launch", Path("Setup.exe"), relaunch), ("pause", desktop.INSTALL_QUIT_DELAY, False)]
     assert shell.server.should_exit and shell.tray.stopped and shell.stopped.is_set()
 
 
@@ -522,7 +533,7 @@ def test_only_the_installed_app_offers_to_install_updates(monkeypatch, quiet_mai
     monkeypatch.setattr(desktop.instance, "acquire", lambda: 99)
     monkeypatch.setattr(desktop.instance, "release", lambda handle: None)
     monkeypatch.setattr(desktop.instance, "write_runtime", lambda port: None)
-    monkeypatch.setattr(desktop, "start_server", lambda sock: (Server(), Thread()))
+    monkeypatch.setattr(desktop, "start_server", serves_nothing(Server(), Thread()))
     monkeypatch.setattr(tray, "Tray", Tray)
     monkeypatch.setattr(desktop, "run_window", lambda shell, background: seen.append((shell, app.desktop_update)))
     assert desktop.main([]) == 0

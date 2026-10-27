@@ -1,10 +1,13 @@
 """The update endpoints, the hourly tick behind the daily check, and the notice's place in the page."""
 import json
+import math
+import re
 
 import pytest
 from fastapi.testclient import TestClient
 
 import app
+import desktop
 import updates
 import version
 from helpers import FakeResponse, fake_urlopen
@@ -155,3 +158,23 @@ def test_the_page_carries_the_install_buttons(client):
     for marker in ('id="updateInstall"', 'id="btnInstallUpdate"', 'onclick="installUpdate()"',
                    'id="updateDetail"', 'id="updateDismiss"'):
         assert marker in page, marker
+
+
+def page_constant(client, name):
+    """A `const NAME = 60 * 1000;` line in the served dashboard.js: the product of its numbers."""
+    js = client.get("/static/dashboard.js").text
+    match = re.search(rf"^const {name} = ([\d\s*]+);", js, re.MULTILINE)
+    assert match, name
+    return math.prod(int(n) for n in match.group(1).split("*"))
+
+
+def test_an_open_window_shows_a_new_check_within_a_minute_or_so(client):
+    """The server's first check comes 60 s after the app starts. A page that re-read /api/update
+    only every 30 minutes kept the notice hidden that long in a window left open."""
+    assert page_constant(client, "UPDATE_POLL_MS") <= 2 * 60 * 1000
+
+
+def test_the_window_says_it_is_installing_before_it_closes(client):
+    """The app waits longer than the page's install poll between starting Setup and quitting.
+    Quitting at once closed the window before the page ever showed "Installing"."""
+    assert desktop.INSTALL_QUIT_DELAY * 1000 > page_constant(client, "INSTALL_POLL_MS")

@@ -1596,7 +1596,10 @@ async function copyDiagnostics() {
 // The server asks GitHub at most once a day (updates.py); the page only shows the answer.
 // The installed desktop app can also install it (can_install): the server downloads Setup,
 // checks its signature, starts it and quits, and Setup starts the new version.
-const UPDATE_POLL_MS = 30 * 60 * 1000;
+// Reading the saved answer is cheap, so a window left open shows the notice within a minute of
+// a check: the server's first one comes 60 s after the app starts, and the tray's Check for
+// updates asks at any time.
+const UPDATE_POLL_MS = 60 * 1000;
 const INSTALL_POLL_MS = 1500;  // while a download is under way
 const INSTALL_ERRORS = {
   'download-failed': "Couldn't download the update. Try again later, or download it yourself.",

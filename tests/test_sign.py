@@ -51,6 +51,14 @@ def test_new_key_saves_an_encrypted_private_key_and_writes_the_public_one(keyed)
     assert len(base64.b64decode(public)) == 32
 
 
+def test_writing_the_key_leaves_updates_py_in_lf(tmp_path):
+    """Windows' text mode turned every line of updates.py into CRLF, and git warned about it."""
+    copy = tmp_path / "updates.py"
+    copy.write_bytes(b'"""Doc."""\nSIGNING_KEY = ""\nTIMEOUT = 10\n')
+    sign.set_signing_key("cHVibGlj", copy)
+    assert copy.read_bytes() == b'"""Doc."""\nSIGNING_KEY = "cHVibGlj"\nTIMEOUT = 10\n'
+
+
 def test_new_key_never_replaces_an_existing_key(keyed):
     key_file, _, _ = keyed
     before = key_file.read_bytes()
