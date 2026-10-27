@@ -49,7 +49,7 @@ MAX_SIGNATURE = 1024     # bytes: a .sig is one line of base64
 # maintainer's PC holds the private key: packaging/sign.py new-key writes this line, and
 # packaging/sign.py sign <installer> makes each release's .sig. Empty: nothing installs from
 # the app, and the notice links to the download page instead.
-SIGNING_KEY = ""
+SIGNING_KEY = "csdmhFzG8fyvF2ig/Oero5QE4ASg1mnWVnO1rNkOZlk="
 
 _NUMBER = re.compile(r"\d+(?:\.\d+){0,3}")
 _urlopen = urllib.request.urlopen  # tests replace this: no test may reach GitHub
