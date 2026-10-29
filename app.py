@@ -358,7 +358,8 @@ async def _get_usage_data() -> dict:
     """Return cached usage data, refreshing from the API when the cache is stale.
 
     Returns a dict with keys: five_hour_pct, five_hour_resets_at,
-    seven_day_pct, seven_day_resets_at, plus optional extra_usage_* fields.
+    seven_day_pct, seven_day_resets_at, seven_day_limit (False when the plan has no weekly
+    limit; absent from caches written before it was added), plus optional extra_usage_* fields.
     On error, includes an "error" key.
     """
     now = time.monotonic()
@@ -408,8 +409,11 @@ async def _get_usage_data() -> dict:
             parsed = {
                 "five_hour_pct": five.get("utilization", 0),
                 "five_hour_resets_at": five.get("resets_at"),
-                "seven_day_pct": seven.get("utilization", 0),
+                "seven_day_pct": seven.get("utilization"),
                 "seven_day_resets_at": seven.get("resets_at"),
+                # Plans without a weekly limit answer "seven_day": null; the page hides
+                # the 7-day gauge and chart for them.
+                "seven_day_limit": seven.get("utilization") is not None,
                 "extra_usage_enabled": extra.get("is_enabled", False),
                 "extra_usage_limit": extra.get("monthly_limit"),
                 "extra_usage_used": extra.get("used_credits"),
@@ -616,8 +620,12 @@ def _asset_url(rel_path: str) -> str:
 
 @app.get("/")
 async def index(request: Request):
+    # Lay the page out for the last known plan, so an account without a weekly limit
+    # doesn't see the 7-day gauge flash up until the first quota poll hides it.
+    weekly_limit = (_usage_cache["data"] or {}).get("seven_day_limit", True)
     return templates.TemplateResponse(request, "index.html",
-                                      {"asset_url": _asset_url, "version": version.__version__})
+                                      {"asset_url": _asset_url, "version": version.__version__,
+                                       "weekly_limit": weekly_limit})
 
 
 @app.get("/api/quota")

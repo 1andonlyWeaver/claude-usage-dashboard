@@ -397,7 +397,12 @@ body {
   filter: grayscale(0.4);
 }
 
-/* ─── Overuse status (inline in 7d gauge card) ─── */
+/* ─── Plans without a weekly limit: no 7-day gauge, chart or range ─── */
+.no-weekly-limit .weekly-only { display: none !important; }
+.no-weekly-limit .gauges-row { grid-template-columns: 1fr auto 1fr; }
+.no-weekly-limit .window-charts-row { grid-template-columns: 1fr; }
+
+/* ─── Overuse status (inline in the 7d gauge card, or the 5h one without a weekly limit) ─── */
 .gauge-overuse-status {
   margin-top: 8px;
   font-family: var(--font-mono);
@@ -977,12 +982,13 @@ body {
 /* ─── Responsive ─── */
 @media (max-width: 1100px) {
   .gauges-row { grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; }
+  .no-weekly-limit .gauges-row { grid-template-columns: 1fr 1fr; grid-template-rows: auto; }
   .divider-vert { display: none; }
   .bottom-row { grid-template-columns: 1fr 1fr; }
   .window-charts-row { grid-template-columns: 1fr; }
 }
 @media (max-width: 700px) {
-  .gauges-row { grid-template-columns: 1fr; }
+  .gauges-row, .no-weekly-limit .gauges-row { grid-template-columns: 1fr; }
   .bottom-row { grid-template-columns: 1fr; }
   .chart-wrap-tall { height: 220px; }
   .window-charts-row { grid-template-columns: 1fr; }

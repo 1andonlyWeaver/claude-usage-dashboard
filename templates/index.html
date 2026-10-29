@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="{{ asset_url('style.css') }}">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='16' fill='%23E07A5F'/><path d='M14 42 A18 18 0 0 1 50 42' fill='none' stroke='%23FAF0E6' stroke-opacity='.35' stroke-width='7' stroke-linecap='round'/><path d='M14 42 A18 18 0 0 1 50 42' fill='none' stroke='%23FAF0E6' stroke-width='7' stroke-linecap='round' stroke-dasharray='40 200'/><line x1='32' y1='42' x2='39.6' y2='31.5' stroke='%23141413' stroke-width='6' stroke-linecap='round'/><circle cx='32' cy='42' r='5' fill='%23141413'/></svg>">
 </head>
-<body>
+<body{% if not weekly_limit %} class="no-weekly-limit"{% endif %}>
   <!-- Background blobs -->
   <div class="bg-blob blob-1"></div>
   <div class="bg-blob blob-2"></div>
@@ -35,7 +35,7 @@
       <div class="header-right">
         <div class="window-info" id="windowInfo">
           <div class="window-range" id="window5hRange" title="Current 5-hour quota window">5h · —</div>
-          <div class="window-range" id="window7dRange" title="Current 7-day quota window">7d · —</div>
+          <div class="window-range weekly-only" id="window7dRange" title="Current 7-day quota window">7d · —</div>
         </div>
         <span class="conn-dot" id="connDot" aria-hidden="true"></span>
         <div class="last-updated" id="lastUpdated" tabindex="-1">Connecting…</div>
@@ -134,7 +134,8 @@
 
         <div class="divider-vert"></div>
 
-        <div class="card gauge-card" id="gauge7d">
+        <!-- .weekly-only: hidden for plans without a weekly limit (setWeeklyLimit) -->
+        <div class="card gauge-card weekly-only" id="gauge7d">
           <div class="gauge-wrap">
             <svg class="gauge-svg" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
               <defs>
@@ -207,7 +208,7 @@
               <canvas id="chart5h"></canvas>
             </div>
           </div>
-          <div class="card chart-card window-card">
+          <div class="card chart-card window-card weekly-only">
             <div class="card-header">
               <h2 class="card-title">7-Day Session</h2>
               <button class="maximize-btn" onclick="openChartFullscreen('7d')" title="Maximize">&#x26F6;</button>
@@ -381,7 +382,7 @@
         <div class="chart-fs-header">
           <div class="chart-fs-tabs">
             <button class="view-btn" id="fsTab5h" onclick="setFsTab('5h', this)">5-Hour</button>
-            <button class="view-btn" id="fsTab7d" onclick="setFsTab('7d', this)">7-Day</button>
+            <button class="view-btn weekly-only" id="fsTab7d" onclick="setFsTab('7d', this)">7-Day</button>
           </div>
           <div class="view-selector">
             <button class="view-btn" id="fsViewRate" onclick="setFsView('rate', this)">Rate</button>

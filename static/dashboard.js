@@ -60,6 +60,7 @@ window.addEventListener('DOMContentLoaded', () => {
     if (e.key === 'Escape') closePanel();
   });
   setCostUnit(savedCostUnit());
+  setWeeklyLimit(!document.body.classList.contains('no-weekly-limit'));
   initAll();
   startQuotaPolling();
   checkIngestStatus();
@@ -103,6 +104,29 @@ function startQuotaPolling() {
 }
 
 let quotaState = { five: null, seven: null };
+
+// Some plans (e.g. work seats) have no weekly limit: the usage API answers "seven_day": null
+// and /api/quota says seven_day_limit: false. The page then drops the 7-day gauge, chart,
+// range and fullscreen tab (.weekly-only). The server lays the page out from its cached
+// reading, so this starts from the body class.
+let hasWeeklyLimit = true;
+
+function setWeeklyLimit(has) {
+  hasWeeklyLimit = has;
+  document.body.classList.toggle('no-weekly-limit', !has);
+  // The overuse line sits under the 7-day gauge; keep it visible under the 5-hour one.
+  const info = document.querySelector((has ? '#gauge7d' : '#gauge5h') + ' .gauge-info');
+  const extra = document.getElementById('extraUsage');
+  if (info && extra && extra.parentElement !== info) info.append(extra);
+  if (!has) {
+    quotaState.seven = null;
+    paceState['7d'] = null;
+    if (chart7d) { chart7d.destroy(); chart7d = null; }
+    if (fsTab === '7d' && document.getElementById('chartFsOverlay').classList.contains('open')) {
+      setFsTab('5h', document.getElementById('fsTab5h'));
+    }
+  }
+}
 
 // ─── Claude connection ───────────────────────────────────────
 // Without live quota the session charts silently switch their y-axis to raw tokens, which
@@ -237,6 +261,11 @@ async function fetchQuota() {
     if (conn) renderConnection(conn);
     document.getElementById('gauge5h').classList.toggle('stale', hasError);
     document.getElementById('gauge7d').classList.toggle('stale', hasError);
+    // Absent from error replies with nothing cached, and from caches older than the flag.
+    if (data.seven_day_limit != null && data.seven_day_limit !== hasWeeklyLimit) {
+      setWeeklyLimit(data.seven_day_limit);
+      loadWindowCharts();  // fetch or drop the 7-day chart
+    }
 
     const hasData = data.five_hour_resets_at != null;
     document.getElementById('windowInfo').classList.toggle('stale', hasError);
@@ -255,12 +284,16 @@ async function fetchQuota() {
 
     quotaState = {
       five: { pct: data.five_hour_pct, resetsAt: advanceStaleResetTime(new Date(data.five_hour_resets_at), 5 * 3600000) },
-      seven: { pct: data.seven_day_pct, resetsAt: advanceStaleResetTime(new Date(data.seven_day_resets_at), 7 * 24 * 3600000) },
+      seven: hasWeeklyLimit
+        ? { pct: data.seven_day_pct, resetsAt: advanceStaleResetTime(new Date(data.seven_day_resets_at), 7 * 24 * 3600000) }
+        : null,
     };
     updateGauge('5h', quotaState.five.pct);
-    updateGauge('7d', quotaState.seven.pct);
     updateIdealTick('5h', quotaState.five.resetsAt, 5 * 3600000);
-    updateIdealTick('7d', quotaState.seven.resetsAt, 7 * 24 * 3600000);
+    if (quotaState.seven) {
+      updateGauge('7d', quotaState.seven.pct);
+      updateIdealTick('7d', quotaState.seven.resetsAt, 7 * 24 * 3600000);
+    }
     updateForecasts();
     updateExtraUsage(data);
     updateWindowRanges();
@@ -574,7 +607,7 @@ async function loadWindowCharts() {
     const gb = windowStack === 'none' ? 'none' : windowStack;
     const [d5h, d7d] = await Promise.all([
       apiFetch('/api/window?type=5h&group_by=' + gb),
-      apiFetch('/api/window?type=7d&group_by=' + gb),
+      hasWeeklyLimit ? apiFetch('/api/window?type=7d&group_by=' + gb) : null,
     ]);
     paceState['5h'] = computePace(d5h);
     paceState['7d'] = computePace(d7d);
@@ -583,7 +616,7 @@ async function loadWindowCharts() {
     if (chart5h) { chart5h.destroy(); chart5h = null; }
     if (chart7d) { chart7d.destroy(); chart7d = null; }
     chart5h = buildWindowChart(d5h, 'chart5h', 3);
-    chart7d = buildWindowChart(d7d, 'chart7d', 9);
+    if (d7d) chart7d = buildWindowChart(d7d, 'chart7d', 9);
   } catch (e) {
     // Fetch failed — leave existing charts intact rather than showing blank canvas
     console.warn('Window chart refresh failed, keeping previous charts:', e);

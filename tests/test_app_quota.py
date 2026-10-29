@@ -174,3 +174,30 @@ def test_a_renewal_that_fails_in_transit_stays_unavailable(isolated_credentials,
     assert not auth.rejected()
     # Same file, same token: nothing to gain from retrying before the usual backoff.
     assert quota_cache["retry_after"] - time.monotonic() > app.CACHE_MIN_RETRY - 60
+
+
+@pytest.mark.parametrize("seven_day, limit, pct", [
+    ({"utilization": 30.0, "resets_at": None}, True, 30.0),
+    (None, False, None),  # a plan with no weekly limit
+])
+def test_quota_says_whether_the_plan_has_a_weekly_limit(isolated_credentials, quota_cache,
+                                                        monkeypatch, seven_day, limit, pct):
+    write_credentials(isolated_credentials)
+    urlopen, _ = fake_urlopen([FakeResponse({**USAGE, "seven_day": seven_day})])
+    monkeypatch.setattr(app.urllib.request, "urlopen", urlopen)
+    data = asyncio.run(app._get_usage_data())
+    assert (data["seven_day_limit"], data["seven_day_pct"], data["five_hour_pct"]) == (limit, pct, 12.0)
+
+
+@pytest.mark.parametrize("cached, hidden", [
+    (None, False),                                     # nothing known yet
+    ({"five_hour_pct": 1.0}, False),                   # cached before the flag existed
+    ({"five_hour_pct": 1.0, "seven_day_limit": True}, False),
+    ({"five_hour_pct": 1.0, "seven_day_limit": False}, True),
+])
+def test_the_page_starts_without_the_weekly_gauge_for_a_plan_without_one(quota_cache, cached, hidden):
+    from fastapi.testclient import TestClient
+    quota_cache["data"] = cached
+    page = TestClient(app.app, base_url="http://127.0.0.1:8765").get("/").text
+    assert ('<body class="no-weekly-limit">' in page) is hidden
+    assert 'class="card gauge-card weekly-only" id="gauge7d"' in page
